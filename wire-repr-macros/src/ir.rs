@@ -744,6 +744,12 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
             );
         }
         getters.insert(name, field.name.span());
+        if field.is_prefix() {
+            getters.insert(
+                normalized_name(&field.encoded_getter),
+                field.encoded_getter.span(),
+            );
+        }
         for projection in &field.projections {
             let name = normalized_name(&projection.name);
             if reserved.contains(&name.as_str()) {
@@ -1581,6 +1587,10 @@ mod tests {
         }
         model("layout H { field length: U8 { position: 1; } field payload: region(length) { position: 2; } field set_length: U8 { position: 3; } }")
             .expect("a source setter is omitted, so its hypothetical collision is legal");
+        error(
+            "layout H { field set_foo: prefix(crate::P) { position: 1; } field foo_encoded: U8 { position: 2; } }",
+            "generated field setter conflicts",
+        );
 
         let value = model("layout H { field payload: region(length) { position: 3; } field length: prefix(crate::P) { position: 1; } field again: region(length) { position: 2; } field fixed: U8 { position: 4; } }").unwrap();
         let Layout::Sequential(layout) = &value.layouts[0] else {

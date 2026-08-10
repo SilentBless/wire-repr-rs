@@ -20,6 +20,8 @@ jobs:
         run: cargo +1.91.0 check --workspace --no-default-features --all-targets
       - name: Test
         run: cargo +1.91.0 test --workspace --no-default-features --all-targets
+      - name: Documentation tests
+        run: cargo +1.91.0 test -p wire-repr --no-default-features --doc
       - name: Clippy
         run: cargo +1.91.0 clippy --workspace --no-default-features --all-targets -- -D warnings
       - name: Documentation
