@@ -4,8 +4,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use wire_repr::{EncodePlan, FixedCodec, PrefixCodec, PrefixExtent, wire_repr};
 
-static TINY_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
-static TINY_DECODE_LENGTH: AtomicUsize = AtomicUsize::new(0);
+static MIXED_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+static MIXED_DECODE_LENGTH: AtomicUsize = AtomicUsize::new(0);
 static ORDER_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,7 +34,6 @@ impl PrefixCodec for TinyPrefix {
         Self: 'value;
 
     fn validate_prefix(bytes: &[u8]) -> Result<PrefixExtent, Self::DecodeError> {
-        TINY_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
         match bytes {
             [] => Err(TinyDecodeError::Empty),
             [0] => Err(TinyDecodeError::Incomplete),
@@ -44,7 +43,47 @@ impl PrefixCodec for TinyPrefix {
     }
 
     fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
-        TINY_DECODE_LENGTH.store(bytes.len(), Ordering::Relaxed);
+        match bytes {
+            [0, value] => *value,
+            [value] => value - 1,
+            _ => panic!("decode must receive one exact validated prefix"),
+        }
+    }
+
+    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
+        value
+            .checked_add(1)
+            .map(|encoded| [encoded])
+            .ok_or(TinyEncodeError::Reserved)
+    }
+}
+
+struct MixedPrefix;
+
+impl PrefixCodec for MixedPrefix {
+    type Value<'wire>
+        = u8
+    where
+        Self: 'wire;
+    type DecodeError = TinyDecodeError;
+    type EncodeError = TinyEncodeError;
+    type Plan<'value>
+        = [u8; 1]
+    where
+        Self: 'value;
+
+    fn validate_prefix(bytes: &[u8]) -> Result<PrefixExtent, Self::DecodeError> {
+        MIXED_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
+        match bytes {
+            [] => Err(TinyDecodeError::Empty),
+            [0] => Err(TinyDecodeError::Incomplete),
+            [0, _, ..] => Ok(PrefixExtent::new(NonZeroUsize::new(2).unwrap())),
+            [_, ..] => Ok(PrefixExtent::new(NonZeroUsize::MIN)),
+        }
+    }
+
+    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
+        MIXED_DECODE_LENGTH.store(bytes.len(), Ordering::Relaxed);
         match bytes {
             [0, value] => *value,
             [value] => value - 1,
@@ -284,7 +323,7 @@ impl FixedCodec for ZeroWidth {
 wire_repr! {
     pub layout Mixed {
         field tail: BeU16 { position: 3; }
-        field value: prefix(TinyPrefix) { position: 2; }
+        field value: prefix(MixedPrefix) { position: 2; }
         field tag: U8 { position: 1; }
     }
 
@@ -335,8 +374,8 @@ wire_repr! {
 
 #[test]
 fn mixed_layout_preserves_exact_prefix_encoding_suffix_and_declaration_api() {
-    TINY_VALIDATIONS.store(0, Ordering::Relaxed);
-    TINY_DECODE_LENGTH.store(0, Ordering::Relaxed);
+    MIXED_VALIDATIONS.store(0, Ordering::Relaxed);
+    MIXED_DECODE_LENGTH.store(0, Ordering::Relaxed);
     let input = [7, 0, 41, 0x12, 0x34, 0xaa];
     let (view, suffix) = MixedView::parse_prefix(&input).expect("mixed prefix layout should parse");
 
@@ -344,10 +383,10 @@ fn mixed_layout_preserves_exact_prefix_encoding_suffix_and_declaration_api() {
     assert_eq!(suffix, &[0xaa]);
     assert_eq!(view.tag(), 7);
     assert_eq!(view.value_encoded(), &[0, 41]);
-    assert_eq!(TINY_VALIDATIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(MIXED_VALIDATIONS.load(Ordering::Relaxed), 1);
     assert_eq!(view.value(), 41);
-    assert_eq!(TINY_DECODE_LENGTH.load(Ordering::Relaxed), 2);
-    assert_eq!(TINY_VALIDATIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(MIXED_DECODE_LENGTH.load(Ordering::Relaxed), 2);
+    assert_eq!(MIXED_VALIDATIONS.load(Ordering::Relaxed), 1);
     assert_eq!(view.tail(), 0x1234);
 
     let canonical =
@@ -359,10 +398,10 @@ fn mixed_layout_preserves_exact_prefix_encoding_suffix_and_declaration_api() {
 #[test]
 fn exact_parse_reports_dynamic_represented_length() {
     assert!(matches!(
-        MixedView::parse_exact(&[7, 0, 41, 0x12, 0x34, 0xaa]),
-        Err(MixedError::TrailingBytes {
-            expected: 5,
-            actual: 6
+        ShortAfterPrefixView::parse_exact(&[42, 0x12, 0x34, 0xaa]),
+        Err(ShortAfterPrefixError::TrailingBytes {
+            expected: 3,
+            actual: 4
         })
     ));
 }
