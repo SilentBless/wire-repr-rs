@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install Rust 1.91.0
+        run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: cargo +1.91.0 fmt --all -- --check
+      - name: Check
+        run: cargo +1.91.0 check --workspace --no-default-features --all-targets
+      - name: Test
+        run: cargo +1.91.0 test --workspace --no-default-features --all-targets
+      - name: Clippy
+        run: cargo +1.91.0 clippy --workspace --no-default-features --all-targets -- -D warnings
+      - name: Documentation
+        run: RUSTDOCFLAGS='-D warnings' cargo +1.91.0 doc --workspace --no-default-features --no-deps
+
+  release-codegen:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install Rust 1.91.0 and Linux target
+        run: |
+          rustup toolchain install 1.91.0 --profile minimal
+          rustup target add x86_64-unknown-linux-gnu --toolchain 1.91.0
+      - name: Check release code generation
+        run: python3 ci/check-codegen.py --root "$GITHUB_WORKSPACE"
