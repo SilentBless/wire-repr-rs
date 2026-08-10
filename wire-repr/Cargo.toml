@@ -1,0 +1,18 @@
+[package]
+name = "wire-repr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A no_std, no_alloc Rust library for wire representations."
+documentation = "https://docs.rs/wire-repr"
+readme = "../README.md"
+
+[features]
+default = []
+
+[dependencies]
+wire-repr-macros.workspace = true
+
+[lints]
+workspace = true

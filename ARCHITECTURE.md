@@ -1,0 +1,105 @@
+# Architecture
+
+This document is normative.
+
+## Package boundary
+
+The repository root is a virtual workspace. It owns shared metadata,
+documentation, licensing, and toolchain settings; it owns no Rust source or
+tests. There are exactly two crates: `wire-repr/`, the public runtime facade,
+and `wire-repr-macros/`, the procedural-macro compiler. There is no third
+support crate.
+
+`wire-repr/` owns wire-representation types and encoding/decoding behavior
+exposed by its public API. It remains usable in
+`no_std` environments without allocation. It depends on `wire-repr-macros`
+only to reexport the public `wire_repr!` facade macro; the macro dependency
+adds no target-runtime schema or machinery.
+
+## Codec boundary
+
+Fixed codecs own representations with a compile-time width and decode every
+exact-width bit pattern. `bytes(N)` exposes an uninterpreted borrowed span.
+Prefix codecs own representations whose encoded width must be discovered from
+the input, so they perform bounded structural prefix parsing. Layout composition
+owns field order and exact represented extents. Domain validation belongs to
+consumers.
+
+Encoding performs all fallible work before bytes are copied into caller-owned
+output. A returned encoding error leaves the complete caller-owned output
+unchanged. Successful plans must emit a representation that decodes to the planned
+semantic value. Exact input encodings remain available
+to layout views and are not reconstructed from decoded values.
+
+## Layout macro boundary
+
+Procedural-macro implementation belongs exclusively to `wire-repr-macros/`.
+The compiler parses canonical layout syntax, normalizes and checks it before
+rendering, preserves user documentation, and emits concrete operations.
+Sequential layouts validate contiguous one-based positions across fields and
+anonymous padding/alignment entries in physical order. Padding consumes a fixed
+nonzero length. Alignment is relative to the represented layout start and
+consumes the minimum bytes required by a nonzero boundary. Spacing bytes remain
+opaque exact input; named reserved spans use `bytes(N)` and remain consumer-
+interpreted. Sequential layouts may mix these entries with fixed codecs, custom prefix
+codecs, and named opaque regions. A region is framed by the checked `usize`
+conversion of a physically preceding non-region field's decoded value. The
+source is decoded from its exact accepted wire span before region capacity is
+checked; this framing use is the only parse-time decode exception for prefix
+fields. Regions may be empty and expose only their exact borrowed bytes.
+Dynamic sequential views store their represented bytes and one exclusive end
+boundary per prefix field or region; they never cache semantic values or scan
+runtime metadata. Exact prefix encodings remain directly available even when
+they are legal noncanonical forms.
+Absolute layouts check zero-based offsets in ascending offset order; their
+width is the maximum field extent, gaps remain opaque represented bytes, and
+runtime codec-width overlaps are rejected before input slicing.
+
+The render dispatcher has separate fixed-sequential, dynamic-sequential, and
+absolute owners. A generated view borrows only the accepted exact prefix and
+exposes fixed getters without content validation. Prefix extents from custom
+codecs are structurally parsed and checked before slicing. An
+eligible unsigned builtin
+storage field may own immutable bit projections. They own no bytes or parse
+errors, use LSB0 numbering over the decoded semantic integer regardless of
+endianness, and render as direct storage-getter shift/mask operations. Signed
+and custom codecs have no projection contract; there is no runtime bit-storage
+trait, metadata, or validation layer.
+
+Generated mutable views expose immutable getters and only those typed
+same-width setters that cannot change framing. They expose no unrestricted
+mutable-byte access. Dynamic sequential views therefore omit setters for prefix
+fields, regions, and every fixed field used as a region length source. View
+conversion preserves dynamic boundaries without reparsing.
+
+Generated builders retain values and encoding plans through complete preflight,
+then commit physical fields in physical order. Missing values and codec planning
+follow declaration order; width and extent legality, shared-source agreement,
+checked arithmetic, and output capacity all precede mutation. Dynamic builders
+derive region length-source values from caller-provided region slices. Shared
+sources require equal region lengths, and source conversion and planning happen
+once. Padding, alignment bytes, absolute-layout gaps, and bytes after the
+represented prefix remain unchanged.
+
+The macro emits no runtime descriptors, schema walkers, allocation, dynamic
+dispatch, generated source files, or build scripts. Independently owned physical
+bitfields, nested region schemas, and repeated sequences are excluded. Prefix,
+region, padding, and alignment composition is sequential-only; absolute layouts
+remain fixed-width.
+
+## Constraints
+
+- The target library uses only safe Rust; `unsafe` is forbidden.
+- The target library has no runtime dependencies.
+- Allocation is not a supported requirement of the target library.
+- Default features remain empty; optional behavior requires an explicit feature
+  and must preserve the baseline contract.
+- Public behavior is deterministic from explicit inputs and does not depend on
+  ambient runtime state.
+
+## Ownership
+
+Runtime codec contracts and built-ins live under `wire-repr/src/codec`. The
+`wire-repr/src/lib.rs` crate root is the documented public facade and macro
+reexport. Public cross-owner behavior is tested through integration tests in
+`wire-repr/tests`; narrow implementation invariants remain with their owner.

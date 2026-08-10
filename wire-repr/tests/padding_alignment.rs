@@ -1,0 +1,121 @@
+use core::{convert::Infallible, num::NonZeroUsize};
+
+use wire_repr::{PrefixCodec, PrefixExtent, wire_repr};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TinyError {
+    Incomplete,
+}
+
+struct TinyPrefix;
+
+impl PrefixCodec for TinyPrefix {
+    type Value<'wire>
+        = u8
+    where
+        Self: 'wire;
+    type DecodeError = TinyError;
+    type EncodeError = Infallible;
+    type Plan<'value>
+        = [u8; 1]
+    where
+        Self: 'value;
+
+    fn validate_prefix(bytes: &[u8]) -> Result<PrefixExtent, Self::DecodeError> {
+        match bytes {
+            [0, _, ..] => Ok(PrefixExtent::new(NonZeroUsize::new(2).unwrap())),
+            [_, ..] => Ok(PrefixExtent::new(NonZeroUsize::MIN)),
+            [] => Err(TinyError::Incomplete),
+        }
+    }
+
+    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
+        match bytes {
+            [0, value] => *value,
+            [value] => value - 1,
+            _ => panic!("decode must receive one exact validated prefix"),
+        }
+    }
+
+    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
+        Ok([value + 1])
+    }
+}
+
+wire_repr! {
+    pub layout StaticPadded {
+        field tail: BeU16 { position: 4; }
+        align { position: 3; boundary: 4; }
+        padding { position: 2; length: 2; }
+        field head: U8 { position: 1; }
+    }
+
+    pub layout BoundaryOne {
+        field tail: U8 { position: 3; }
+        align { position: 2; boundary: 1; }
+        field head: U8 { position: 1; }
+    }
+
+    pub layout DynamicPadded {
+        field tail: BeU16 { position: 5; }
+        align { position: 4; boundary: 4; }
+        padding { position: 3; length: 1; }
+        field value: prefix(TinyPrefix) { position: 2; }
+        field head: U8 { position: 1; }
+    }
+}
+
+#[test]
+fn fixed_padding_and_alignment_preserve_opaque_bytes_and_static_width() {
+    assert_eq!(StaticPaddedView::WIDTH, 6);
+    let input = [7, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 0x99];
+    let (view, suffix) = StaticPaddedView::parse_prefix(&input).expect("layout should parse");
+    assert_eq!(view.as_bytes(), &input[..6]);
+    assert_eq!(suffix, &[0x99]);
+    assert_eq!(view.head(), 7);
+    assert_eq!(view.tail(), 0x1234);
+
+    assert_eq!(BoundaryOneView::WIDTH, 2);
+    let boundary_one = BoundaryOneView::parse_exact(&[1, 2]).expect("boundary one is a no-op");
+    assert_eq!(boundary_one.head(), 1);
+    assert_eq!(boundary_one.tail(), 2);
+}
+
+#[test]
+fn dynamic_alignment_uses_the_represented_offset_and_preserves_exact_boundaries() {
+    let canonical = [7, 42, 0xaa, 0xbb, 0x12, 0x34, 0x99];
+    let (view, suffix) = DynamicPaddedView::parse_prefix(&canonical).expect("layout should parse");
+    assert_eq!(view.as_bytes(), &canonical[..6]);
+    assert_eq!(suffix, &[0x99]);
+    assert_eq!(view.head(), 7);
+    assert_eq!(view.value_encoded(), &[42]);
+    assert_eq!(view.value(), 41);
+    assert_eq!(view.tail(), 0x1234);
+
+    let noncanonical = [7, 0, 41, 0xaa, 0x12, 0x34];
+    let view = DynamicPaddedView::parse_exact(&noncanonical).expect("layout should parse");
+    assert_eq!(view.as_bytes(), &noncanonical);
+    assert_eq!(view.value_encoded(), &[0, 41]);
+    assert_eq!(view.value(), 41);
+    assert_eq!(view.tail(), 0x1234);
+}
+
+#[test]
+fn dynamic_padding_and_alignment_shortage_errors_identify_physical_positions() {
+    assert!(matches!(
+        DynamicPaddedView::parse_prefix(&[7, 42]),
+        Err(DynamicPaddedError::InputTooShort {
+            position: 3,
+            expected: 1,
+            available: 0,
+        })
+    ));
+    assert!(matches!(
+        DynamicPaddedView::parse_prefix(&[7, 42, 0xaa]),
+        Err(DynamicPaddedError::InputTooShort {
+            position: 4,
+            expected: 1,
+            available: 0,
+        })
+    ));
+}
