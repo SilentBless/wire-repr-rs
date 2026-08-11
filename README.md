@@ -1,174 +1,294 @@
-# wire-repr
+<h1 align="center">wire-repr</h1>
 
-`wire-repr` provides exact byte-backed binary representations for Rust. Its
-allocation-free codec contracts support fixed-width and prefix codecs, while
-`wire_repr!` generates bounded views, constrained mutable views, and atomic
-caller-buffer builders for sequential and fixed absolute-offset layouts.
+<p align="center">
+  <strong>Zero-cost byte-backed representations for binary formats.</strong>
+</p>
 
-This repository is a virtual two-crate workspace. `wire-repr/` is the public
-`no_std` runtime facade and reexports `wire_repr!`; `wire-repr-macros/` is the
-procedural-macro compiler used only at compile time. The workspace root owns
-shared metadata, documentation, licensing, and toolchain settings. There is no
-third support crate.
+`wire-repr` generates safe borrowed views, constrained mutable views, and atomic
+caller-buffer builders from compact layout declarations. It is designed for network
+protocols, file headers, storage pages, firmware formats, IPC, and other binary data
+where exact bytes and explicit ownership matter.
 
-## Fixed layouts
+> [!IMPORTANT]
+> Generated views borrow ordinary byte slices. They do not reinterpret bytes as Rust
+> structs and do not depend on alignment, ABI layout, allocation, or `unsafe`.
 
-Sequential layouts assign fields and anonymous spacing entries contiguous
-one-based physical positions. Absolute layouts use zero-based byte offsets;
-gaps are represented bytes and
-are preserved verbatim, while overlapping codec extents are rejected before
-input access. Both forms generate a borrowed view, typed structural errors,
-exact and prefix parsing, byte access, and decoded getters. Fixed codecs decode
-every exact-width bit pattern; domain validation remains consumer-owned. The
-generated API has no runtime schema, allocation, or dynamic dispatch.
+---
 
-## Fixed byte spans
+## ✨ What it does
 
-Use `bytes(N)` when a named field owns fixed-width bytes without interpreting
-its contents:
+- **Zero-copy views.** Parse directly over caller-owned bytes and retain exact represented
+  spans, including legal noncanonical prefix encodings.
+- **Direct generated code.** Fixed getters compile to ordinary loads, endian conversions,
+  shifts, and masks—without runtime schemas, reflection, or field lookup.
+- **Atomic writes.** Builders plan the complete representation before touching caller
+  output; an error leaves the whole destination unchanged.
+- **Explicit framing.** `parse_prefix` returns one bounded representation plus its suffix,
+  while `parse_exact` rejects unrelated trailing bytes.
+- **Consumer-owned semantics.** The framework owns bounds and layout. Consumers keep
+  ownership of magic values, reserved-byte policy, checksums, and cross-field rules.
+- **Small runtime.** The public crate is `no_std`, `no_alloc`, dependency-free at target
+  runtime, and safe Rust only.
 
-```rust
-wire_repr! {
-    pub absolute layout DatabaseHeader {
-        field magic: bytes(16) { offset: 0; }
-    }
-}
+## 🚀 Quick start
+
+Add the facade crate:
+
+```toml
+[dependencies]
+wire-repr = { version = "0.1", default-features = false }
 ```
 
-The getter returns the exact borrowed `&[u8]`. Consumers compare magic values,
-inspect reserved bytes, or apply domain policy directly. Builders and setters
-accept borrowed bytes and check only their exact width before mutation.
+Declare a sequential layout. Physical placement is inferred from declaration order:
 
-## Prefix fields
+```rust
+use wire_repr::wire_repr;
 
-A sequential layout can mix fixed fields with custom `PrefixCodec`-backed
-fields whose exact width is discovered by structural prefix parsing:
+wire_repr! {
+    pub layout Header {
+        field kind: U8;
+        field length: BeU16;
+        field flags: U8 {
+            projections {
+                bit enabled: 0;
+                bits mode: 1..=3;
+            }
+        }
+    }
+}
+
+let input = [7, 0x01, 0x00, 0b0000_1011, 0xff];
+let (view, suffix) = HeaderView::parse_prefix(&input).expect("valid header");
+
+assert_eq!(view.as_bytes(), &input[..4]);
+assert_eq!(suffix, &[0xff]);
+assert_eq!(view.kind(), 7);
+assert_eq!(view.length(), 256);
+assert!(view.enabled());
+assert_eq!(view.mode(), 5);
+
+let mut output = [0u8; 4];
+let (built, suffix) = HeaderBuilder::new()
+    .kind(7)
+    .length(256)
+    .flags(0b0000_1011)
+    .build_into(&mut output)
+    .expect("complete builder");
+
+assert_eq!(built.as_bytes(), &input[..4]);
+assert!(suffix.is_empty());
+```
+
+> [!NOTE]
+> `parse_prefix` excludes the suffix from the generated view. Use `parse_exact` when the
+> entire input must be exactly one representation.
+
+## 🧭 Layout model
+
+### Sequential layouts
+
+Sequential layouts use source order by default. Fields, padding, and alignment occupy
+contiguous one-based physical positions:
 
 ```rust
 wire_repr::wire_repr! {
     pub layout Record {
-        field kind: U8 { position: 1; }
-        field name: prefix(crate::Terminated) { position: 2; }
-        field checksum: BeU16 { position: 3; }
+        field kind: U8;
+        padding { length: 3; }
+        align { boundary: 8; }
+        field flags: BeU16;
     }
 }
 ```
 
-The generated view retains only the represented bytes and one end boundary per
-prefix field. `name()` decodes the exact accepted span, while
-`name_encoded()` returns its original bytes, including legal noncanonical
-encodings. Parsing validates each prefix once and safely rejects a custom codec
-extent that exceeds the remaining input. Dynamic sequential views have no
-compile-time `WIDTH`; their `as_bytes()` excludes the returned suffix.
+Use explicit `position` on **every** physical entry only when wire order must differ from
+API and documentation order:
 
-## Bounded regions
+```rust
+wire_repr::wire_repr! {
+    pub layout Reordered {
+        field checksum: BeU16 { position: 2; }
+        field tag: U8 { position: 1; }
+    }
+}
+```
 
-A named field can own an opaque byte region whose length comes from an earlier
-physical field:
+Mixing explicit and implicit placement is rejected. Declaration order always controls
+the generated API and rustdoc order; explicit positions control only physical order.
+
+### Absolute layouts
+
+Absolute layouts use mandatory zero-based byte offsets:
+
+```rust
+wire_repr::wire_repr! {
+    pub absolute layout DatabaseHeader {
+        field magic: bytes(16) { offset: 0; }
+        field version: BeU32 { offset: 16; }
+    }
+}
+```
+
+Gaps remain represented bytes and are preserved verbatim. Overlapping codec extents are
+rejected before input access. Absolute layouts are fixed-width and deliberately do not
+infer offsets or support padding and alignment entries.
+
+## 🧩 Fields and framing
+
+### Fixed values and byte spans
+
+Built-in fixed codecs cover unsigned 8/16/24/32/64/128-bit integers and signed
+8/16/32/64/128-bit integers in the applicable byte orders. Fixed codecs decode every exact-width bit pattern; domain
+validation remains consumer-owned.
+
+Use `bytes(N)` when a field owns fixed-width bytes without interpreting them. Its getter
+returns the original borrowed `&[u8]`. Builders and setters check only the exact width
+before mutation.
+
+### Bit projections
+
+Unsigned built-in storage fields can expose named immutable projections:
+
+```rust
+field flags: U8 {
+    projections {
+        bit enabled: 0;
+        bits mode: 1..=3;
+    }
+}
+```
+
+Bit zero is the decoded value's least-significant bit regardless of wire endianness.
+The storage field remains the only byte owner; projection getters are direct shift/mask
+operations with no runtime metadata or dispatch.
+
+### Prefix fields
+
+A sequential field backed by a custom `PrefixCodec` discovers its exact encoded width
+during structural parsing:
+
+```rust
+field name: prefix(crate::Terminated);
+```
+
+The generated view preserves the exact accepted bytes. `name()` returns the decoded
+value, while `name_encoded()` exposes its original encoding. Parsing validates the
+prefix extent once and rejects any codec claim beyond the remaining input.
+
+### Bounded regions
+
+A region borrows an opaque span whose length comes from an earlier physical field:
 
 ```rust
 wire_repr::wire_repr! {
     pub layout Frame {
-        field payload_length: BeU16 { position: 1; }
-        field payload: region(payload_length) { position: 2; }
+        field payload_length: BeU16;
+        field payload: region(payload_length);
+        field checksum: BeU32;
     }
 }
 ```
 
-The length field may use a fixed or prefix codec, may be declared before or
-after the region in source order, and may frame more than one later region. It
-must physically precede every region that uses it. Its decoded value must
-support checked conversion to `usize`; incompatible custom values produce a
-normal Rust conversion-bound error, while values that do not fit produce the
-layout's `InvalidRegionLength` parse error. A prefix length source is decoded
-from its exact accepted encoding solely to establish framing. Other prefix
-fields remain decode-free during parsing.
+Dynamic builders accept the region bytes and derive its length source automatically.
+A source may be declared later in explicit-position source order, but it must physically
+precede every region it frames. Regions may be empty and remain available as exact
+borrowed bytes for a consumer-owned inner parser.
 
-A region may be empty. Its getter returns the exact borrowed bytes without
-semantic validation, reconstruction, or a duplicate encoded getter. Parse an
-inner format explicitly with its own `parse_exact` when needed. Regions store
-only an exclusive end boundary, remain part of `as_bytes()`, and work with
-later fixed fields, prefix fields, padding, alignment, and other independently
-bounded regions. They are sequential-only and cannot own projections or serve
-as another region's length source.
+> [!TIP]
+> Keep unsupported or application-specific material as `bytes(N)` or `region(length)`,
+> then parse it with a small consumer-owned view. The framework should not learn domain
+> policy merely to move a slice boundary.
 
-## Padding and alignment
+## ✍️ Mutation and building
 
-Sequential layouts can include anonymous physical spacing entries:
+Generated mutable views preserve the same represented extent as immutable views.
+Same-width fixed fields receive typed setters when changing them cannot invalidate
+region framing. Prefix fields, regions, and region length sources do not receive
+in-place setters, and mutable views never expose unrestricted access to the full backing
+slice.
 
-```rust
-wire_repr::wire_repr! {
-    pub layout Record {
-        field kind: U8 { position: 1; }
-        padding { position: 2; length: 3; }
-        align { position: 3; boundary: 8; }
-        field payload: prefix(crate::Terminated) { position: 4; }
-    }
-}
+Builders preflight codec plans, checked arithmetic, derived region lengths, and output
+capacity before writing. A successful build returns the bounded mutable view together
+with its disjoint suffix. A failed build leaves every caller-owned output byte unchanged.
+Padding, alignment bytes, absolute gaps, and suffixes are therefore preserved rather
+than silently normalized.
+
+## 🔬 What reaches the CPU
+
+Generated fixed-layout operations are ordinary safe Rust: direct byte loads, endian
+conversion, shifts, masks, and bounded copies. There are no runtime descriptors, schema
+walkers, erased codecs, hidden allocation, or dynamic dispatch.
+
+For example, with Rust 1.91.0 targeting `x86_64-unknown-linux-gnu`, the generated
+big-endian `u16` getter and its handwritten safe-Rust equivalent compile to the same
+optimized body (compiler-local labels simplified):
+
+```asm
+cmpq    $2, %rsi
+jne     .invalid
+movzwl  (%rdi), %edx
+rolw    $8, %dx
+movw    $1, %ax
+retq
+.invalid:
+xorl    %eax, %eax
+retq
 ```
 
-Positions remain contiguous across fields, padding, and alignment entries.
-Padding consumes its fixed nonzero length. Alignment consumes the minimum bytes
-needed to place the next entry at a multiple of its nonzero boundary relative
-to the start of the represented layout; boundary `1` is a valid no-op. Spacing
-bytes are opaque, have no generated getters, remain part of `as_bytes()`, and
-are never normalized during parsing. Use a `bytes(N)` field when reserved bytes
-need a name or direct inspection; consumers own their semantics. Fixed sequential layouts
-retain `WIDTH`; prefix-backed layouts compute spacing from the validated runtime
-offset. Absolute layouts use explicit offsets and reject these entries.
+The generated fixed builder is likewise merged by the optimizer with its handwritten
+equivalent. Its complete operation shape is a capacity check, endian conversion, and
+one store—no framework calls:
 
-## Bit projections
-
-A fixed unsigned builtin storage field can expose read-only named bit projections:
-
-```rust
-wire_repr::wire_repr! {
-    pub layout Header {
-        field flags: U8 { position: 1; projections {
-            /// Whether processing is enabled.
-            bit enabled: 0;
-            /// Normalized mode bits.
-            bits mode: 1..=3;
-        } }
-    }
-}
+```asm
+cmpq    $2, %rsi
+jb      .short
+rolw    $8, %dx
+movw    %dx, (%rdi)
+.short:
+cmpq    $2, %rsi
+setae   %al
+retq
 ```
 
-Bit zero is the decoded unsigned value's LSB, irrespective of wire endianness.
-`U8`, unsigned 16/24/32/64/128-bit builtins are eligible; signed and custom
-codecs are not. Storage remains the only byte owner and is still readable via
-its getter. Projection getters are immutable direct shift/mask operations with
-no validation, metadata, allocation, or runtime dispatch.
+The [probe source](wire-repr/tests/codegen.rs) covers getters, projections, mutation,
+and builders. The [pinned release-codegen gate](ci/check-codegen.py) compares each one
+against equivalent handwritten safe Rust and rejects extra instructions, calls, panic
+paths, allocation, or dynamic dispatch:
 
-## Mutation and building
+```sh
+python3 ci/check-codegen.py
+```
 
-Generated mutable views retain the same represented prefix and dynamic
-boundaries as immutable views. Fixed fields have typed same-width setters when
-changing them cannot alter region framing. Prefix fields, regions, and region
-length sources have no in-place setters. There is no unrestricted mutable-byte
-access, so padding, alignment bytes, gaps, and returned suffixes cannot be
-changed accidentally through a view.
+The stable contract is the optimized operation shape and absence of framework
+machinery—not fragile textual assembly snapshots tied to register allocation or labels.
 
-Builders plan every codec and compute the complete represented extent before
-writing to caller-owned output. Every returned error leaves the entire output
-unchanged. A successful build returns a bounded mutable view and its disjoint
-mutable suffix without reparsing. Dynamic builders accept region byte slices and
-derive each region length source automatically; regions sharing one source must
-have equal lengths. A source value must support checked construction from
-`usize`, and its codec's documented encode/decode round-trip law must preserve
-that length.
+## ⚠️ Deliberate limits
 
-Repeated sequences are not supported. Prefix fields and bounded regions remain
-sequential-only; absolute layouts remain fixed-width.
+> [!NOTE]
+> `wire-repr` is a byte-representation compiler, not a universal schema VM or protocol
+> runtime.
 
-## Contract
+- Repeated sequences and arbitrary conditional fields are not supported.
+- Prefix fields and bounded regions are sequential-only.
+- Absolute layouts remain fixed-width and explicit-offset-only.
+- The framework does not own checksums, semantic relationships, protocol state, I/O, or
+  allocation policy.
+- Custom codecs remain explicit Rust types rather than runtime descriptors.
 
-- Rust 1.91.0, edition 2024.
-- Library targets are `no_std` and `no_alloc`.
-- Safe Rust only; `unsafe_code` is denied.
-- No target-runtime dependencies.
-- Default features are empty.
+For the normative ownership, parsing, mutation, and extension rules, see
+[`ARCHITECTURE.md`](ARCHITECTURE.md). Generated APIs and codec contracts are documented
+in the [crate documentation](https://docs.rs/wire-repr).
 
-## License
+## 📦 Workspace and contract
 
-MIT. See [LICENSE](LICENSE).
+The repository contains two crates:
+
+- `wire-repr` — public `no_std` runtime facade and `wire_repr!` reexport;
+- `wire-repr-macros` — host-side procedural-macro compiler.
+
+The target-runtime contract is Rust 1.91, edition 2024, empty default features, no
+allocation, no runtime dependencies, and `unsafe_code = "deny"`.
+
+## 📄 License
+
+MIT © 2026 SilentBless. See [LICENSE](LICENSE).
