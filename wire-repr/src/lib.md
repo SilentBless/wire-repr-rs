@@ -74,7 +74,7 @@ For `layout Packet`, [`wire_repr!`] generates a family centered on the declarati
 | --- | --- |
 | `PacketView<'wire>` | Immutable borrowed representation and field getters |
 | `PacketViewMut<'wire>` | Constrained mutable representation and eligible setters |
-| `PacketBuilder` | Fluent caller-buffer construction |
+| `PacketBuilder<'value>` | Fluent caller-buffer construction |
 | `PacketError` | Structural parse errors |
 | `PacketMutationError` | Fixed-field planning and setter errors |
 | `PacketWriteError` | Missing inputs, planning, extent, and capacity errors |

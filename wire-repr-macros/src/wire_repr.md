@@ -134,7 +134,7 @@ For a declaration named `Packet`, the macro generates:
 - `PacketView<'wire>` with `parse_prefix`, `parse_exact`, `as_bytes`, and field getters;
 - `PacketViewMut<'wire>` with `parse_prefix_mut`, `parse_exact_mut`, `as_bytes`, `as_view`,
   `into_view`, and eligible fixed-field setters;
-- `PacketBuilder` with `new`, fluent field inputs, and `build_into`;
+- `PacketBuilder<'value>` with `new`, fluent field inputs, and `build_into`;
 - `PacketError`, `PacketMutationError`, and `PacketWriteError`.
 
 Fixed layouts also expose `PacketView::WIDTH`. Prefix fields generate both `field()` for the
