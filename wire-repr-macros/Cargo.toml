@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Procedural macro compiler for wire-repr layouts."
+documentation = "https://docs.rs/wire-repr-macros"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["binary", "zero-copy", "codegen", "proc-macro"]
+categories = ["development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

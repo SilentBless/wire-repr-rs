@@ -6,7 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 description = "A no_std, no_alloc Rust library for wire representations."
 documentation = "https://docs.rs/wire-repr"
+repository.workspace = true
+homepage.workspace = true
 readme = "../README.md"
+keywords = ["binary", "zero-copy", "no-std", "no-alloc", "codegen"]
+categories = ["encoding", "no-std", "no-std::no-alloc"]
 
 [features]
 default = []
