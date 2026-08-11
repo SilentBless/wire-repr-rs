@@ -1,4 +1,4 @@
-//! Codec contracts and built-in integer codecs.
+#![doc = include_str!("mod.md")]
 
 mod fixed;
 mod integers;

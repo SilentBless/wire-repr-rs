@@ -1,14 +1,12 @@
 #![no_std]
 #![deny(missing_docs, unsafe_code)]
-
-//! Runtime codec contracts and integer codecs for `wire-repr`.
+#![doc = include_str!("lib.md")]
 
 extern crate self as wire_repr;
 
 /// Codec contracts and built-in codecs.
 pub mod codec;
 
-/// Declares sequential or fixed absolute-offset byte-backed wire layouts.
 #[doc(inline)]
 pub use wire_repr_macros::wire_repr;
 

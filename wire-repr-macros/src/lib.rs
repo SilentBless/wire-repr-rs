@@ -11,7 +11,7 @@ mod ir;
 mod render;
 mod syntax;
 
-/// Declares sequential or fixed absolute-offset byte-backed wire layouts.
+#[doc = include_str!("wire_repr.md")]
 #[proc_macro]
 pub fn wire_repr(input: TokenStream) -> TokenStream {
     match syn::parse(input).and_then(ir::normalize) {
