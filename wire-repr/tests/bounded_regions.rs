@@ -51,6 +51,42 @@ impl PrefixCodec for LengthPrefix {
     }
 }
 
+struct PlainLengthPrefix;
+
+impl PrefixCodec for PlainLengthPrefix {
+    type Value<'wire>
+        = u8
+    where
+        Self: 'wire;
+    type DecodeError = LengthError;
+    type EncodeError = Infallible;
+    type Plan<'value>
+        = [u8; 1]
+    where
+        Self: 'value;
+
+    fn validate_prefix(bytes: &[u8]) -> Result<PrefixExtent, Self::DecodeError> {
+        match bytes {
+            [] => Err(LengthError::Empty),
+            [0] => Err(LengthError::Incomplete),
+            [0, _, ..] => Ok(PrefixExtent::new(NonZeroUsize::new(2).unwrap())),
+            [_, ..] => Ok(PrefixExtent::new(NonZeroUsize::MIN)),
+        }
+    }
+
+    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
+        match bytes {
+            [0, value] => *value,
+            [value] => value - 1,
+            _ => panic!("decode must receive one exact validated prefix"),
+        }
+    }
+
+    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
+        Ok([value + 1])
+    }
+}
+
 wire_repr! {
     pub layout Framed {
         field tail: U8 { position: 6; }
@@ -72,6 +108,11 @@ wire_repr! {
     pub layout WideLength {
         field payload: region(length) { position: 2; }
         field length: BeU128 { position: 1; }
+    }
+
+    pub layout ShortFramed {
+        field payload: region(length) { position: 2; }
+        field length: prefix(crate::PlainLengthPrefix) { position: 1; }
     }
 }
 
@@ -125,8 +166,8 @@ fn conversion_and_shortage_errors_precede_later_physical_entries() {
 
     let short = [3, b'a'];
     assert!(matches!(
-        FramedView::parse_prefix(&short),
-        Err(FramedError::InputTooShort {
+        ShortFramedView::parse_prefix(&short),
+        Err(ShortFramedError::InputTooShort {
             position: 2,
             expected: 2,
             available: 1,
@@ -134,7 +175,7 @@ fn conversion_and_shortage_errors_precede_later_physical_entries() {
     ));
 
     assert!(matches!(
-        FramedView::parse_prefix(&[]),
-        Err(FramedError::FieldLength(LengthError::Empty))
+        ShortFramedView::parse_prefix(&[]),
+        Err(ShortFramedError::FieldLength(LengthError::Empty))
     ));
 }
