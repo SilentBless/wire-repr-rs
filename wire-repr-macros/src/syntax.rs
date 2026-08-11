@@ -1,5 +1,6 @@
 //! Exact token grammar for canonical `wire_repr!` input.
 
+use proc_macro2::Span;
 use syn::{
     Attribute, Error, Ident, LitInt, Meta, Path, Result, Token, Visibility, braced,
     parse::{Parse, ParseStream},
@@ -32,11 +33,36 @@ pub(crate) struct Layout {
     pub(crate) physical: Vec<PhysicalEntry>,
 }
 
+/// A field or spacing placement before semantic normalization.
+pub(crate) enum Placement {
+    Explicit(LitInt),
+    Implicit(Span),
+}
+
+impl Placement {
+    pub(crate) fn span(&self) -> Span {
+        match self {
+            Self::Explicit(value) => value.span(),
+            Self::Implicit(span) => *span,
+        }
+    }
+
+    pub(crate) const fn is_explicit(&self) -> bool {
+        matches!(self, Self::Explicit(_))
+    }
+}
+
 /// A parsed physical sequential-layout entry.
 pub(crate) enum PhysicalEntry {
     Field(usize),
-    Padding { position: LitInt, length: LitInt },
-    Alignment { position: LitInt, boundary: LitInt },
+    Padding {
+        placement: Placement,
+        length: LitInt,
+    },
+    Alignment {
+        placement: Placement,
+        boundary: LitInt,
+    },
 }
 
 /// Parsed placement mode.
@@ -53,7 +79,7 @@ pub(crate) struct Field {
     pub(crate) docs: Vec<Attribute>,
     pub(crate) name: Ident,
     pub(crate) codec: Codec,
-    pub(crate) placement: LitInt,
+    pub(crate) placement: Placement,
     pub(crate) projections: Vec<Projection>,
 }
 
@@ -154,30 +180,59 @@ fn parse_padding(input: ParseStream<'_>) -> Result<PhysicalEntry> {
     input.parse::<keyword::padding>()?;
     let content;
     braced!(content in input);
-    let position = parse_entry_property(&content, "position")?;
-    let length = parse_entry_property(&content, "length")?;
-    if !content.is_empty() {
-        return Err(Error::new(
-            content.span(),
-            "unexpected tokens after `length`",
-        ));
-    }
-    Ok(PhysicalEntry::Padding { position, length })
+    let (placement, length) = parse_spacing_properties(&content, "length")?;
+    Ok(PhysicalEntry::Padding { placement, length })
 }
 
 fn parse_alignment(input: ParseStream<'_>) -> Result<PhysicalEntry> {
     input.parse::<keyword::align>()?;
     let content;
     braced!(content in input);
-    let position = parse_entry_property(&content, "position")?;
-    let boundary = parse_entry_property(&content, "boundary")?;
-    if !content.is_empty() {
+    let (placement, boundary) = parse_spacing_properties(&content, "boundary")?;
+    Ok(PhysicalEntry::Alignment {
+        placement,
+        boundary,
+    })
+}
+
+fn parse_spacing_properties(
+    input: ParseStream<'_>,
+    value_name: &str,
+) -> Result<(Placement, LitInt)> {
+    let first: Ident = input.parse().map_err(|_| {
+        Error::new(
+            input.span(),
+            format!("expected `position` or `{value_name}`"),
+        )
+    })?;
+    let placement = if first == "position" {
+        input.parse::<Token![:]>()?;
+        let position = input.parse()?;
+        input.parse::<Token![;]>()?;
+        Placement::Explicit(position)
+    } else if first == value_name {
+        Placement::Implicit(first.span())
+    } else {
         return Err(Error::new(
-            content.span(),
-            "unexpected tokens after `boundary`",
+            first.span(),
+            format!("expected `position` or `{value_name}`"),
+        ));
+    };
+    let value = if placement.is_explicit() {
+        parse_entry_property(input, value_name)?
+    } else {
+        input.parse::<Token![:]>()?;
+        let value = input.parse()?;
+        input.parse::<Token![;]>()?;
+        value
+    };
+    if !input.is_empty() {
+        return Err(Error::new(
+            input.span(),
+            format!("unexpected tokens after `{value_name}`"),
         ));
     }
-    Ok(PhysicalEntry::Alignment { position, boundary })
+    Ok((placement, value))
 }
 
 fn parse_entry_property(input: ParseStream<'_>, expected: &str) -> Result<LitInt> {
@@ -205,46 +260,61 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
     let name = input.parse()?;
     input.parse::<Token![:]>()?;
     let codec = parse_codec(input)?;
+    if input.peek(Token![;]) {
+        let semicolon: Token![;] = input.parse()?;
+        if kind == LayoutKind::Absolute {
+            return Err(Error::new(semicolon.span, "expected `offset`"));
+        }
+        return Ok(Field {
+            docs,
+            name,
+            codec,
+            placement: Placement::Implicit(semicolon.span),
+            projections: Vec::new(),
+        });
+    }
+
     let content;
     braced!(content in input);
-    let placement_name: Ident = content.parse().map_err(|_| {
-        Error::new(
-            content.span(),
-            match kind {
-                LayoutKind::Sequential => "expected `position`",
-                LayoutKind::Absolute => "expected `offset`",
-            },
-        )
-    })?;
     let expected = match kind {
         LayoutKind::Sequential => "position",
         LayoutKind::Absolute => "offset",
     };
-    if placement_name != expected {
-        let message = match (kind, placement_name.to_string().as_str()) {
-            (LayoutKind::Sequential, "offset") => {
-                "`offset` is unsupported in fixed sequential layouts; use `position`"
-            }
-            (LayoutKind::Absolute, "position") => {
-                "`position` is unsupported in fixed absolute layouts; use `offset`"
-            }
-            (LayoutKind::Sequential, "bits" | "region" | "align" | "padding") => {
-                "this is unsupported in fixed sequential layouts; use `position`"
-            }
-            (LayoutKind::Absolute, "bits" | "region" | "align" | "padding") => {
-                "this is unsupported in fixed absolute layouts; use `offset`"
-            }
-            _ => match kind {
-                LayoutKind::Sequential => "expected `position`",
-                LayoutKind::Absolute => "expected `offset`",
-            },
-        };
-        return Err(Error::new(placement_name.span(), message));
-    }
-
-    content.parse::<Token![:]>()?;
-    let placement = content.parse::<LitInt>()?;
-    content.parse::<Token![;]>()?;
+    let placement = if content.peek(keyword::projections) {
+        if kind == LayoutKind::Absolute {
+            return Err(Error::new(content.span(), "expected `offset`"));
+        }
+        Placement::Implicit(content.span())
+    } else {
+        let placement_name: Ident = content
+            .parse()
+            .map_err(|_| Error::new(content.span(), format!("expected `{expected}`")))?;
+        if placement_name != expected {
+            let message = match (kind, placement_name.to_string().as_str()) {
+                (LayoutKind::Sequential, "offset") => {
+                    "`offset` is unsupported in fixed sequential layouts; use `position`"
+                }
+                (LayoutKind::Absolute, "position") => {
+                    "`position` is unsupported in fixed absolute layouts; use `offset`"
+                }
+                (LayoutKind::Sequential, "bits" | "region" | "align" | "padding") => {
+                    "this is unsupported in fixed sequential layouts; use `position`"
+                }
+                (LayoutKind::Absolute, "bits" | "region" | "align" | "padding") => {
+                    "this is unsupported in fixed absolute layouts; use `offset`"
+                }
+                _ => match kind {
+                    LayoutKind::Sequential => "expected `position`",
+                    LayoutKind::Absolute => "expected `offset`",
+                },
+            };
+            return Err(Error::new(placement_name.span(), message));
+        }
+        content.parse::<Token![:]>()?;
+        let placement = content.parse::<LitInt>()?;
+        content.parse::<Token![;]>()?;
+        Placement::Explicit(placement)
+    };
     let mut projections = Vec::new();
     if content.peek(keyword::projections) {
         content.parse::<keyword::projections>()?;
@@ -454,7 +524,10 @@ mod tests {
             &parsed.layouts[2].visibility,
             Visibility::Restricted(_)
         ));
-        assert_eq!(parsed.layouts[0].fields[0].placement.base10_digits(), "0");
+        assert!(matches!(
+            &parsed.layouts[0].fields[0].placement,
+            Placement::Explicit(value) if value.base10_digits() == "0"
+        ));
         assert_eq!(parsed.layouts[3].kind, LayoutKind::Sequential);
     }
 
@@ -674,13 +747,13 @@ mod tests {
         assert_eq!(physical.len(), 4);
         assert!(matches!(
             &physical[0],
-            PhysicalEntry::Alignment { position, boundary }
+            PhysicalEntry::Alignment { placement: Placement::Explicit(position), boundary }
                 if position.base10_digits() == "3" && boundary.base10_digits() == "8"
         ));
         assert!(matches!(&physical[1], PhysicalEntry::Field(0)));
         assert!(matches!(
             &physical[2],
-            PhysicalEntry::Padding { position, length }
+            PhysicalEntry::Padding { placement: Placement::Explicit(position), length }
                 if position.base10_digits() == "2" && length.base10_digits() == "3"
         ));
         assert!(matches!(&physical[3], PhysicalEntry::Field(1)));
@@ -688,7 +761,7 @@ mod tests {
         for (source, needle) in [
             (
                 "layout H { field a: U8 { position: 1; } padding { length: 3; position: 2; } }",
-                "expected `position`",
+                "unexpected tokens",
             ),
             (
                 "layout H { field a: U8 { position: 1; } padding { position: 2; bytes: 3; } }",
@@ -709,6 +782,49 @@ mod tests {
         ] {
             let error = parse_error(source);
             assert!(error.to_string().contains(needle), "{source}: {error}");
+        }
+    }
+    #[test]
+    fn parses_implicit_sequential_fields_and_spacing() {
+        let parsed: Invocation = parse_str(
+            "layout H { field length: U8; field prefix: prefix(crate::Prefix); field payload: region(length); field bytes: bytes(4); field custom: codec(crate::Codec); field flags: U8 { projections { bit enabled: 0; } } padding { length: 3; } align { boundary: 8; } }",
+        )
+        .unwrap();
+        let layout = &parsed.layouts[0];
+        assert!(
+            layout
+                .fields
+                .iter()
+                .all(|field| matches!(&field.placement, Placement::Implicit(_)))
+        );
+        assert_eq!(layout.fields[5].projections.len(), 1);
+        assert!(matches!(
+            &layout.physical[6],
+            PhysicalEntry::Padding {
+                placement: Placement::Implicit(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &layout.physical[7],
+            PhysicalEntry::Alignment {
+                placement: Placement::Implicit(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_implicit_absolute_fields_with_offset_diagnostics() {
+        for source in [
+            "absolute layout H { field value: U8; }",
+            "absolute layout H { field flags: U8 { projections { bit enabled: 0; } } }",
+        ] {
+            assert!(
+                parse_error(source)
+                    .to_string()
+                    .contains("expected `offset`")
+            );
         }
     }
 }

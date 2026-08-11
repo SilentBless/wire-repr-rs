@@ -36,13 +36,19 @@ to layout views and are not reconstructed from decoded values.
 Procedural-macro implementation belongs exclusively to `wire-repr-macros/`.
 The compiler parses canonical layout syntax, normalizes and checks it before
 rendering, preserves user documentation, and emits concrete operations.
-Sequential layouts validate contiguous one-based positions across fields and
-anonymous padding/alignment entries in physical order. Padding consumes a fixed
-nonzero length. Alignment is relative to the represented layout start and
-consumes the minimum bytes required by a nonzero boundary. Spacing bytes remain
-opaque exact input; named reserved spans use `bytes(N)` and remain consumer-
-interpreted. Sequential layouts may mix these entries with fixed codecs, custom prefix
-codecs, and named opaque regions. A region is framed by the checked `usize`
+Sequential layouts have two exclusive modes. If no physical entry supplies
+`position`, normalization infers contiguous one-based physical positions from
+physical source declaration order across fields and anonymous padding/alignment
+entries. If any entry supplies `position`, every physical entry must do so and
+the supplied positions must be contiguous; explicit mode may reorder physical
+placement independently of declaration order. In both modes normalization lowers
+to concrete contiguous one-based physical order before rendering, while
+preserving declaration order as the owner of generated API and documentation.
+Padding consumes a fixed nonzero length. Alignment is relative to the
+represented layout start and consumes the minimum bytes required by a nonzero
+boundary. Spacing bytes remain opaque exact input; named reserved spans use
+`bytes(N)` and remain consumer-interpreted. Sequential layouts may mix these
+entries with fixed codecs, custom prefix codecs, and named opaque regions. A region is framed by the checked `usize`
 conversion of a physically preceding non-region field's decoded value. The
 source is decoded from its exact accepted wire span before region capacity is
 checked; this framing use is the only parse-time decode exception for prefix
@@ -51,9 +57,10 @@ Dynamic sequential views store their represented bytes and one exclusive end
 boundary per prefix field or region; they never cache semantic values or scan
 runtime metadata. Exact prefix encodings remain directly available even when
 they are legal noncanonical forms.
-Absolute layouts check zero-based offsets in ascending offset order; their
-width is the maximum field extent, gaps remain opaque represented bytes, and
-runtime codec-width overlaps are rejected before input slicing.
+Every absolute-layout field requires an explicit zero-based offset. Absolute
+layouts check offsets in ascending offset order; their width is the maximum
+field extent, gaps remain opaque represented bytes, and runtime codec-width
+overlaps are rejected before input slicing.
 
 The render dispatcher has separate fixed-sequential, dynamic-sequential, and
 absolute owners. A generated view borrows only the accepted exact prefix and

@@ -301,6 +301,49 @@ fn normalize_layout(
 
     let kind = source.kind;
     let source_physical = source.physical;
+    let mut implicit_field_positions = vec![None; source.fields.len()];
+    if kind == syntax::LayoutKind::Sequential {
+        let mut has_explicit = false;
+        let mut has_implicit = false;
+        for (source_position, entry) in source_physical.iter().enumerate() {
+            let placement = match entry {
+                syntax::PhysicalEntry::Field(index) => &source.fields[*index].placement,
+                syntax::PhysicalEntry::Padding { placement, .. }
+                | syntax::PhysicalEntry::Alignment { placement, .. } => placement,
+            };
+            has_explicit |= placement.is_explicit();
+            has_implicit |= !placement.is_explicit();
+            if let syntax::PhysicalEntry::Field(index) = entry
+                && !placement.is_explicit()
+            {
+                implicit_field_positions[*index] = source_position.checked_add(1);
+                if implicit_field_positions[*index].is_none() {
+                    push(
+                        errors,
+                        Error::new(placement.span(), "implicit position does not fit in usize"),
+                    );
+                }
+            }
+        }
+        if has_explicit && has_implicit {
+            for entry in &source_physical {
+                let placement = match entry {
+                    syntax::PhysicalEntry::Field(index) => &source.fields[*index].placement,
+                    syntax::PhysicalEntry::Padding { placement, .. }
+                    | syntax::PhysicalEntry::Alignment { placement, .. } => placement,
+                };
+                if !placement.is_explicit() {
+                    push(
+                        errors,
+                        Error::new(
+                            placement.span(),
+                            "`position` is required for every sequential entry when any position is explicit",
+                        ),
+                    );
+                }
+            }
+        }
+    }
     let source_field_indices: HashMap<_, _> = source
         .fields
         .iter()
@@ -366,7 +409,16 @@ fn normalize_layout(
             syntax::LayoutKind::Sequential => "position",
             syntax::LayoutKind::Absolute => "offset",
         };
-        let placement = parse_placement(&field.placement, placement_label, errors)?;
+        let placement = match &field.placement {
+            syntax::Placement::Explicit(value) => parse_placement(value, placement_label, errors)?,
+            syntax::Placement::Implicit(_) => {
+                let Some(position) = implicit_field_positions[declaration_index] else {
+                    push(errors, Error::new(placement_span, "expected `offset`"));
+                    continue;
+                };
+                position
+            }
+        };
         if kind == syntax::LayoutKind::Sequential && placement == 0 {
             push(
                 errors,
@@ -557,7 +609,7 @@ fn normalize_layout(
     let mut physical_order = Vec::new();
     if kind == syntax::LayoutKind::Sequential {
         let mut physical_placements = HashMap::new();
-        for entry in source_physical {
+        for (source_position, entry) in source_physical.into_iter().enumerate() {
             let (item, span) = match entry {
                 syntax::PhysicalEntry::Field(source_index) => {
                     let Some(Some(index)) = normalized_field_indices.get(source_index) else {
@@ -572,9 +624,10 @@ fn normalize_layout(
                         field.placement_span,
                     )
                 }
-                syntax::PhysicalEntry::Padding { position, length } => {
-                    let span = position.span();
-                    let Some(position_value) = parse_placement(&position, "position", errors)
+                syntax::PhysicalEntry::Padding { placement, length } => {
+                    let span = placement.span();
+                    let Some(position_value) =
+                        sequential_position(&placement, source_position, errors)
                     else {
                         continue;
                     };
@@ -585,7 +638,7 @@ fn normalize_layout(
                     if position_value == 0 {
                         push(
                             errors,
-                            Error::new(position.span(), "position must be one-based (at least 1)"),
+                            Error::new(placement.span(), "position must be one-based (at least 1)"),
                         );
                     }
                     if length_value == 0 {
@@ -602,9 +655,13 @@ fn normalize_layout(
                         span,
                     )
                 }
-                syntax::PhysicalEntry::Alignment { position, boundary } => {
-                    let span = position.span();
-                    let Some(position_value) = parse_placement(&position, "position", errors)
+                syntax::PhysicalEntry::Alignment {
+                    placement,
+                    boundary,
+                } => {
+                    let span = placement.span();
+                    let Some(position_value) =
+                        sequential_position(&placement, source_position, errors)
                     else {
                         continue;
                     };
@@ -616,7 +673,7 @@ fn normalize_layout(
                     if position_value == 0 {
                         push(
                             errors,
-                            Error::new(position.span(), "position must be one-based (at least 1)"),
+                            Error::new(placement.span(), "position must be one-based (at least 1)"),
                         );
                     }
                     if boundary_value == 0 {
@@ -671,17 +728,17 @@ fn normalize_layout(
         for entry in source_physical {
             match entry {
                 syntax::PhysicalEntry::Field(_) => {}
-                syntax::PhysicalEntry::Padding { position, .. } => push(
+                syntax::PhysicalEntry::Padding { placement, .. } => push(
                     errors,
                     Error::new(
-                        position.span(),
+                        placement.span(),
                         "padding is unsupported in absolute layouts",
                     ),
                 ),
-                syntax::PhysicalEntry::Alignment { position, .. } => push(
+                syntax::PhysicalEntry::Alignment { placement, .. } => push(
                     errors,
                     Error::new(
-                        position.span(),
+                        placement.span(),
                         "alignment is unsupported in absolute layouts",
                     ),
                 ),
@@ -1002,6 +1059,26 @@ fn register_name(
         push(errors, Error::new(name.span(), message));
     }
 }
+fn sequential_position(
+    placement: &syntax::Placement,
+    source_position: usize,
+    errors: &mut Option<Error>,
+) -> Option<usize> {
+    match placement {
+        syntax::Placement::Explicit(value) => parse_placement(value, "position", errors),
+        syntax::Placement::Implicit(span) => match source_position.checked_add(1) {
+            Some(position) => Some(position),
+            None => {
+                push(
+                    errors,
+                    Error::new(*span, "implicit position does not fit in usize"),
+                );
+                None
+            }
+        },
+    }
+}
+
 fn parse_placement(
     literal: &syn::LitInt,
     label: &str,
@@ -1691,6 +1768,56 @@ mod tests {
             ),
         ] {
             error(source, needle);
+        }
+    }
+    #[test]
+    fn normalizes_implicit_sequential_entries_in_source_order() {
+        let value = model(
+            "layout H { field head: U8; padding { length: 3; } align { boundary: 8; } field tail: U8; }",
+        )
+        .unwrap();
+        let Layout::Sequential(layout) = &value.layouts[0] else {
+            panic!("expected sequential layout")
+        };
+        assert_eq!(layout.data.fields[0].name, "head");
+        assert_eq!(layout.data.fields[0].declaration_index, 0);
+        assert_eq!(layout.data.fields[0].placement, 1);
+        assert_eq!(layout.data.fields[1].name, "tail");
+        assert_eq!(layout.data.fields[1].declaration_index, 1);
+        assert_eq!(layout.data.fields[1].placement, 4);
+        assert_eq!(
+            layout.physical_order,
+            [
+                PhysicalItem::Field {
+                    index: 0,
+                    position: 1,
+                },
+                PhysicalItem::Padding {
+                    position: 2,
+                    length: 3,
+                },
+                PhysicalItem::Alignment {
+                    position: 3,
+                    boundary: 8,
+                },
+                PhysicalItem::Field {
+                    index: 1,
+                    position: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_mixed_sequential_placement_including_spacing() {
+        for source in [
+            "layout H { field head: U8 { position: 1; } padding { length: 3; } }",
+            "layout H { field head: U8; align { position: 2; boundary: 8; } }",
+        ] {
+            error(
+                source,
+                "`position` is required for every sequential entry when any position is explicit",
+            );
         }
     }
 }
