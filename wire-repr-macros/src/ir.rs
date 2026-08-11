@@ -83,6 +83,8 @@ pub(crate) struct Field {
     pub(crate) error_variant: Ident,
     /// Fixed-sequential setter name, normalized with the source identifier.
     pub(crate) setter_name: Ident,
+    /// Dynamic-region mutable accessor name, normalized with the source identifier.
+    pub(crate) region_mut_name: Option<Ident>,
     /// Exact-representation getter name used when this is a prefix field.
     pub(crate) encoded_getter: Ident,
     /// Stored end-boundary name used when this is a prefix field.
@@ -531,6 +533,16 @@ fn normalize_layout(
             "dynamic field boundary",
             errors,
         )?;
+        let region_mut_name = if is_region {
+            Some(generated_ident(
+                &format!("{generated_stem}_mut"),
+                field.name.span(),
+                "region mutable accessor",
+                errors,
+            )?)
+        } else {
+            None
+        };
         let projections = if is_prefix || is_region {
             if !field.projections.is_empty() {
                 let message = if is_region {
@@ -559,6 +571,7 @@ fn normalize_layout(
             placement_span,
             error_variant,
             setter_name,
+            region_mut_name,
             encoded_getter,
             boundary,
             is_region_length_source: false,
@@ -839,6 +852,40 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
             push(
                 errors,
                 Error::new(field.name.span(), "generated field setter collision"),
+            );
+        }
+    }
+    let mut region_accessors = HashMap::new();
+    for field in fields.iter().filter(|field| field.is_region()) {
+        let Some(accessor) = &field.region_mut_name else {
+            continue;
+        };
+        let name = normalized_name(accessor);
+        if getters.contains_key(&name) {
+            push(
+                errors,
+                Error::new(
+                    field.name.span(),
+                    "generated region mutable accessor conflicts with an existing getter",
+                ),
+            );
+        }
+        if setters.contains_key(&name) {
+            push(
+                errors,
+                Error::new(
+                    field.name.span(),
+                    "generated region mutable accessor conflicts with an existing setter",
+                ),
+            );
+        }
+        if region_accessors.insert(name, field.name.span()).is_some() {
+            push(
+                errors,
+                Error::new(
+                    field.name.span(),
+                    "generated region mutable accessor collision",
+                ),
             );
         }
     }
@@ -1588,6 +1635,20 @@ mod tests {
         assert!(layout.data.fields[1].is_region_length_source);
         assert!(!layout.data.fields[0].is_region_length_source);
         assert!(!layout.data.fields[2].is_region_length_source);
+        assert_eq!(
+            layout.data.fields[0]
+                .region_mut_name
+                .as_ref()
+                .map(ToString::to_string),
+            Some("second_mut".to_owned())
+        );
+        assert_eq!(
+            layout.data.fields[2]
+                .region_mut_name
+                .as_ref()
+                .map(ToString::to_string),
+            Some("first_mut".to_owned())
+        );
         assert!(matches!(
             layout.data.fields[0].kind,
             FieldKind::Region {
@@ -1677,6 +1738,41 @@ mod tests {
         assert!(!layout.data.fields[0].is_region_length_source);
         assert!(!layout.data.fields[2].is_region_length_source);
         assert!(!layout.data.fields[3].is_region_length_source);
+    }
+
+    #[test]
+    fn dynamic_region_mutable_accessor_names_normalize_and_reject_collisions() {
+        let value = model(
+            "layout H { field length: U8 { position: 1; } field r#payload: region(length) { position: 2; } }",
+        )
+        .unwrap();
+        let Layout::Sequential(layout) = &value.layouts[0] else {
+            panic!("expected sequential layout")
+        };
+        assert_eq!(
+            layout.data.fields[1]
+                .region_mut_name
+                .as_ref()
+                .map(ToString::to_string),
+            Some("payload_mut".to_owned())
+        );
+
+        error(
+            "layout H { field length: U8 { position: 1; } field r#payload: region(length) { position: 2; } field payload_mut: U8 { position: 3; } }",
+            "generated region mutable accessor conflicts with an existing getter",
+        );
+        error(
+            "layout H { field length: U8 { position: 1; } field r#parse_prefix: region(length) { position: 2; } }",
+            "reserved generated member",
+        );
+        error(
+            "layout H { field length: U8 { position: 1; } field payload: region(length) { position: 2; } field flags: U8 { position: 3; projections { bit payload_mut: 0; } } }",
+            "generated region mutable accessor conflicts with an existing getter",
+        );
+        error(
+            "layout H { field length: U8 { position: 1; } field set_tail: region(length) { position: 2; } field tail_mut: U8 { position: 3; } }",
+            "generated region mutable accessor conflicts with an existing setter",
+        );
     }
 
     #[test]

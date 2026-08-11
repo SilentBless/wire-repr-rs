@@ -80,7 +80,8 @@ fields implement `wire_repr::FixedCodec`; `prefix(path)` fields implement
 `bytes(N)` is a fixed-width opaque borrowed span. `region(source)` is a dynamic opaque
 borrowed span framed by an earlier physical fixed or prefix field. A builder derives the
 source value from the region length, so the source does not receive a fluent input method.
-If multiple regions share one source, their lengths must agree.
+If multiple regions share one source, their lengths must agree. A mutable view exposes each
+region as `field_mut()`, which can change bytes but cannot resize or reframe the region.
 
 # Projections
 
@@ -133,7 +134,7 @@ For a declaration named `Packet`, the macro generates:
 
 - `PacketView<'wire>` with `parse_prefix`, `parse_exact`, `as_bytes`, and field getters;
 - `PacketViewMut<'wire>` with `parse_prefix_mut`, `parse_exact_mut`, `as_bytes`, `as_view`,
-  `into_view`, and eligible fixed-field setters;
+  `into_view`, eligible fixed-field setters, and mutable bounded-region accessors;
 - `PacketBuilder<'value>` with `new`, fluent field inputs, and `build_into`;
 - `PacketError`, `PacketMutationError`, and `PacketWriteError`.
 

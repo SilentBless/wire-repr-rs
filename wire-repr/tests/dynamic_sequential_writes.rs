@@ -158,6 +158,40 @@ fn mutable_dynamic_view_preserves_boundaries_and_updates_only_eligible_spans() {
 }
 
 #[test]
+fn mutable_region_accessor_updates_only_the_validated_region() {
+    let mut input = [2, b'a', b'b', 0xee, 0x12, 0x34, 0xca, 0xfe, 0x99];
+    {
+        let (mut view, suffix) = DynamicWriteViewMut::parse_prefix_mut(&mut input).unwrap();
+        assert_eq!(suffix, [0x99]);
+        let region = view.body_mut();
+        assert_eq!(region, b"ab");
+        region.copy_from_slice(b"XY");
+        assert_eq!(view.length(), 2);
+        assert_eq!(view.body(), b"XY");
+        assert_eq!(
+            view.as_bytes(),
+            &[2, b'X', b'Y', 0xee, 0x12, 0x34, 0xca, 0xfe]
+        );
+    }
+    assert_eq!(input, [2, b'X', b'Y', 0xee, 0x12, 0x34, 0xca, 0xfe, 0x99]);
+}
+
+#[test]
+fn mutable_zero_length_region_is_an_exact_empty_span() {
+    let mut input = [0, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 0xca, 0xfe, 0x99];
+    {
+        let (mut view, suffix) = DynamicWriteViewMut::parse_prefix_mut(&mut input).unwrap();
+        assert_eq!(suffix, [0x99]);
+        assert!(view.body_mut().is_empty());
+        assert_eq!(
+            view.as_bytes(),
+            &[0, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 0xca, 0xfe]
+        );
+    }
+    assert_eq!(input, [0, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 0xca, 0xfe, 0x99]);
+}
+
+#[test]
 fn mutable_dynamic_layout_without_eligible_setters_compiles_and_parses() {
     fn assert_error_type(_: Option<NoEligibleSettersMutationError>) {}
 

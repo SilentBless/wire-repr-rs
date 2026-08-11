@@ -105,6 +105,14 @@ wire_repr! {
         field length: U8 { position: 1; }
     }
 
+    pub layout AdjacentMutableRegions {
+        field first_length: U8 { position: 1; }
+        field second_length: U8 { position: 2; }
+        field first: region(first_length) { position: 3; }
+        field second: region(second_length) { position: 4; }
+        field tail: U8 { position: 5; }
+    }
+
     pub layout WideLength {
         field payload: region(length) { position: 2; }
         field length: BeU128 { position: 1; }
@@ -151,6 +159,29 @@ fn adjacent_zero_length_regions_are_exact_and_do_not_stall_physical_progress() {
     assert!(view.second().is_empty());
     assert_eq!(view.tail(), 9);
     assert_eq!(view.as_bytes(), &bytes);
+}
+
+#[test]
+fn adjacent_mutable_regions_respect_each_validated_boundary() {
+    let mut bytes = [2, 2, b'a', b'b', b'c', b'd', 9];
+    {
+        let mut view = AdjacentMutableRegionsViewMut::parse_exact_mut(&mut bytes).unwrap();
+        view.first_mut().copy_from_slice(b"AB");
+        view.second_mut().copy_from_slice(b"CD");
+        assert_eq!(view.first(), b"AB");
+        assert_eq!(view.second(), b"CD");
+        assert_eq!(view.tail(), 9);
+    }
+    assert_eq!(bytes, [2, 2, b'A', b'B', b'C', b'D', 9]);
+
+    let mut empty_first = [0, 2, b'x', b'y', 9];
+    {
+        let mut view = AdjacentMutableRegionsViewMut::parse_exact_mut(&mut empty_first).unwrap();
+        assert!(view.first_mut().is_empty());
+        view.second_mut().copy_from_slice(b"XY");
+        assert_eq!(view.tail(), 9);
+    }
+    assert_eq!(empty_first, [0, 2, b'X', b'Y', 9]);
 }
 
 #[test]

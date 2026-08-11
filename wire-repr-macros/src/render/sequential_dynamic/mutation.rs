@@ -199,8 +199,13 @@ fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<TokenStream> 
         }
         FieldKind::Region { .. } => {
             let end = &field.boundary;
+            let region_mut_name = field
+                .region_mut_name
+                .as_ref()
+                .expect("validated region mutable accessor name");
             vec![
                 quote! { #[doc = "Returns the exact opaque bytes in this validated region."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> &[u8] { &self.bytes[(#start)..self.#end] } },
+                quote! { #[doc = "Returns mutable access to exactly this validated region without changing its framing."] #(#docs)* #[inline] #visibility fn #region_mut_name(&mut self) -> &mut [u8] { &mut self.bytes[(#start)..self.#end] } },
             ]
         }
     }

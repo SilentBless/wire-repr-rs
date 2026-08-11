@@ -76,8 +76,10 @@ trait, metadata, or validation layer.
 Generated mutable views expose immutable getters and only those typed
 same-width setters that cannot change framing. They expose no unrestricted
 mutable-byte access. Dynamic sequential views therefore omit setters for prefix
-fields, regions, and every fixed field used as a region length source. View
-conversion preserves dynamic boundaries without reparsing.
+fields, regions, and every fixed field used as a region length source; each
+region instead exposes a mutable slice of exactly its validated span, which
+cannot resize or reframe it. View conversion preserves dynamic boundaries
+without reparsing.
 
 Generated builders retain values and encoding plans through complete preflight,
 then commit physical fields in physical order. Missing values and codec planning
