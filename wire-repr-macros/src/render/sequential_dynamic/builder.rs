@@ -4,7 +4,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use super::super::{codec_tokens, effective_fixed_codec_tokens, mapping_raw_type_tokens};
-use crate::ir::{Field, FieldKind, PhysicalItem, SequentialLayout};
+use crate::ir::{ByteRangeEnd, Field, FieldKind, PhysicalItem, SequentialLayout};
 
 pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let data = &layout.data;
@@ -16,7 +16,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let inputs: Vec<_> = data
         .fields
         .iter()
-        .filter(|field| !field.is_region_length_source)
+        .filter(|field| !field.is_derived_range_source)
         .map(|field| {
             let name = &field.name;
             match field.codec() {
@@ -35,7 +35,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let initializers = data
         .fields
         .iter()
-        .filter(|field| !field.is_region_length_source)
+        .filter(|field| !field.is_derived_range_source)
         .map(|field| {
             let name = &field.name;
             quote!(#name: ::core::option::Option::None)
@@ -43,7 +43,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let destructured = data
         .fields
         .iter()
-        .filter(|field| !field.is_region_length_source)
+        .filter(|field| !field.is_derived_range_source)
         .map(|field| &field.name);
     let zero_width = layout.physical_order.iter().filter_map(|item| {
         let PhysicalItem::Field { index, position } = item else {
@@ -61,7 +61,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             }
         })
     });
-    let missing = data.fields.iter().filter(|field| !field.is_region_length_source).map(|field| {
+    let missing = data.fields.iter().filter(|field| !field.is_derived_range_source).map(|field| {
         let name = &field.name;
         let text = field_name(field);
         quote! {
@@ -71,57 +71,32 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             };
         }
     });
-    let length_checks = source_length_checks(layout, write_error_name);
-    let preflight = data.fields.iter().enumerate().filter_map(|(index, field)| {
+    let ordinary_preflight = data.fields.iter().enumerate().filter_map(|(index, field)| {
+        if field.is_derived_range_source {
+            return None;
+        }
         let codec = field.codec()?;
         let plan = plan_ident(index);
         let variant = &field.error_variant;
         let text = field_name(field);
-        if field.is_region_length_source {
-            let (region, position) = first_region_for_source(layout, index)?;
-            let region_name = &data.fields[region].name;
-            let source_position = field.placement;
-            let convert = if codec.is_prefix() {
-                let codec = codec_tokens(codec);
-                quote!(<#codec as ::wire_repr::PrefixCodec>::Value<'static>)
-            } else {
-                let codec = codec_tokens(codec);
-                quote!(<#codec as ::wire_repr::FixedCodec>::Value<'static>)
-            };
-            let source_value = format_ident!("__wire_source_value_{index}");
-            let plan_expression = plan_expression(codec, quote!(#source_value));
-            let length_check = plan_length_check(codec, &plan, &text, write_error_name);
-            Some(quote! {
-                let #source_value: #convert = match ::core::convert::TryFrom::<usize>::try_from(#region_name.len()) {
-                    Ok(value) => value,
-                    Err(_) => return Err(#write_error_name::InvalidRegionLength {
-                        position: #position,
-                        source_position: #source_position,
-                        length: #region_name.len(),
-                    }),
-                };
-                let #plan = #plan_expression.map_err(#write_error_name::#variant)?;
-                #length_check
-            })
+        let name = &field.name;
+        let (plan_expression, length_check) = if codec.is_prefix() {
+            (
+                plan_expression(codec, quote!(#name)),
+                plan_length_check(codec, &plan, &text, write_error_name),
+            )
         } else {
-            let name = &field.name;
-            let (plan_expression, length_check) = if codec.is_prefix() {
-                (
-                    plan_expression(codec, quote!(#name)),
-                    plan_length_check(codec, &plan, &text, write_error_name),
-                )
-            } else {
-                (
-                    fixed_plan_expression(field, quote!(#name))?,
-                    fixed_plan_length_check(field, &plan, &text, write_error_name)?,
-                )
-            };
-            Some(quote! {
-                let #plan = #plan_expression.map_err(#write_error_name::#variant)?;
-                #length_check
-            })
-        }
+            (
+                fixed_plan_expression(field, quote!(#name))?,
+                fixed_plan_length_check(field, &plan, &text, write_error_name)?,
+            )
+        };
+        Some(quote! {
+            let #plan = #plan_expression.map_err(#write_error_name::#variant)?;
+            #length_check
+        })
     });
+    let derived_preflight = derived_source_preflight(layout, write_error_name);
     let (extent, boundaries) = extent_checks(layout, write_error_name);
     let commits = commits(layout);
     let variants = data.fields.iter().filter_map(encode_variant);
@@ -129,7 +104,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let fluent = data
         .fields
         .iter()
-        .filter(|field| !field.is_region_length_source)
+        .filter(|field| !field.is_derived_range_source)
         .flat_map(|field| {
             let name = &field.name;
             let docs = &field.docs;
@@ -170,9 +145,9 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                 #(#zero_width)*
                 let Self { #(#destructured,)* .. } = self;
                 #(#missing)*
-                #(#length_checks)*
-                #(#preflight)*
+                #(#ordinary_preflight)*
                 #(#extent)*
+                #(#derived_preflight)*
                 let expected = __wire_offset;
                 let actual = output.len();
                 if actual < expected {
@@ -192,10 +167,10 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             #(#variants)*
             #[doc = "Reports a fixed codec that declares zero width."]
             InvalidCodecWidth { #[doc = "The one-based physical position of the invalid field."] position: usize },
-            #[doc = "Reports a region length that cannot be represented by its source codec."]
-            InvalidRegionLength { #[doc = "The one-based physical position of the region."] position: usize, #[doc = "The one-based physical position of its source field."] source_position: usize, #[doc = "The region length in bytes."] length: usize },
-            #[doc = "Reports regions sharing a source but having unequal lengths."]
-            ConflictingRegionLengths { #[doc = "The one-based physical position of the source field."] source_position: usize, #[doc = "The first region physical position."] first_region_position: usize, #[doc = "The conflicting region physical position."] conflicting_region_position: usize, #[doc = "The first region length in bytes."] expected: usize, #[doc = "The conflicting region length in bytes."] actual: usize },
+            #[doc = "Reports a range-derived source value that cannot be represented by its physical source type."]
+            InvalidRangeSource { #[doc = "The one-based physical position of the range."] position: usize, #[doc = "The one-based physical position of its source field."] source_position: usize, #[doc = "The required source value."] value: usize },
+            #[doc = "Reports ranges sharing a source but requiring unequal source values."]
+            ConflictingRangeSources { #[doc = "The one-based physical position of the source field."] source_position: usize, #[doc = "The first range physical position."] first_range_position: usize, #[doc = "The conflicting range physical position."] conflicting_range_position: usize, #[doc = "The first required source value."] expected: usize, #[doc = "The conflicting required source value."] actual: usize },
             #[doc = "Reports a successful fixed codec plan with an invalid encoded length."]
             InvalidPlanLength { #[doc = "The field whose plan was invalid."] field: &'static str, #[doc = "The codec width required for the field."] expected: usize, #[doc = "The length reported by the plan."] actual: usize },
             #[doc = "Reports a successful prefix codec plan with zero encoded length."]
@@ -212,8 +187,8 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                     Self::MissingField { field } => write!(formatter, "missing field {field}"),
                     #(#displays)*
                     Self::InvalidCodecWidth { position } => write!(formatter, "fixed codec at position {position} has zero width"),
-                    Self::InvalidRegionLength { position, source_position, length } => write!(formatter, "region at position {position} has length {length}, not representable by source at position {source_position}"),
-                    Self::ConflictingRegionLengths { source_position, first_region_position, conflicting_region_position, expected, actual } => write!(formatter, "regions at positions {first_region_position} and {conflicting_region_position} disagree for source {source_position}: {expected} versus {actual}"),
+                    Self::InvalidRangeSource { position, source_position, value } => write!(formatter, "range at position {position} requires source value {value}, not representable by source at position {source_position}"),
+                    Self::ConflictingRangeSources { source_position, first_range_position, conflicting_range_position, expected, actual } => write!(formatter, "ranges at positions {first_range_position} and {conflicting_range_position} disagree for source {source_position}: {expected} versus {actual}"),
                     Self::InvalidPlanLength { field, expected, actual } => write!(formatter, "field {field} plan length: expected {expected} bytes, got {actual}"),
                     Self::InvalidPrefixPlanLength { field } => write!(formatter, "prefix field {field} plan has zero length"),
                     Self::InvalidLayoutExtent { position, offset, advance } => write!(formatter, "layout extent at position {position} overflows: offset {offset} plus advance {advance}"),
@@ -225,59 +200,128 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     }
 }
 
-fn source_length_checks(layout: &SequentialLayout, error: &syn::Ident) -> Vec<TokenStream> {
-    layout
-        .data
-        .fields
-        .iter()
-        .enumerate()
-        .filter_map(|(region_index, region)| {
-            let FieldKind::Region { length_source, .. } = &region.kind else {
-                return None;
-            };
-            let first = layout.data.fields[..region_index]
-                .iter()
-                .find(|candidate| {
-                    matches!(
-                        &candidate.kind,
-                        FieldKind::Region {
-                            length_source: candidate_source,
-                            ..
-                        } if candidate_source == length_source
-                    )
-                })?;
-            let source_position = layout.data.fields[*length_source].placement;
-            let first_name = &first.name;
-            let first_position = first.placement;
-            let name = &region.name;
-            let position = region.placement;
-            Some(quote! {
-                if #name.len() != #first_name.len() {
-                    return Err(#error::ConflictingRegionLengths {
+fn derived_source_preflight(layout: &SequentialLayout, error: &syn::Ident) -> Vec<TokenStream> {
+    let mut required_values = Vec::new();
+    let mut conflicts = Vec::new();
+    let mut source_plans = Vec::new();
+
+    for (source, field) in layout.data.fields.iter().enumerate() {
+        if !field.is_derived_range_source {
+            continue;
+        }
+        let Some(codec) = field.codec() else {
+            continue;
+        };
+        if codec.is_prefix() {
+            continue;
+        }
+        let Some(codec) = effective_fixed_codec_tokens(field) else {
+            continue;
+        };
+        let ranges: Vec<_> = layout
+            .data
+            .fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, range)| match &range.kind {
+                FieldKind::ByteRange {
+                    end:
+                        ByteRangeEnd::Relative {
+                            source: candidate, ..
+                        },
+                }
+                | FieldKind::ByteRange {
+                    end:
+                        ByteRangeEnd::Absolute {
+                            source: candidate, ..
+                        },
+                } if *candidate == source => Some((index, range)),
+                _ => None,
+            })
+            .collect();
+        let Some(&(first_index, first_range)) = ranges.first() else {
+            continue;
+        };
+        let first_position = first_range.placement;
+        let source_position = field.placement;
+        let first_value = range_source_value(first_index, first_range, error);
+        let required_value = format_ident!("__wire_required_source_value_{source}");
+        required_values.push(quote! {
+            let #required_value = #first_value;
+        });
+        conflicts.extend(ranges.iter().skip(1).map(|(index, range)| {
+            let declaration_index = range.declaration_index;
+            let position = range.placement;
+            let value = range_source_value(*index, range, error);
+            let check = quote! {
+                let __wire_range_value = #value;
+                if __wire_range_value != #required_value {
+                    return Err(#error::ConflictingRangeSources {
                         source_position: #source_position,
-                        first_region_position: #first_position,
-                        conflicting_region_position: #position,
-                        expected: #first_name.len(),
-                        actual: #name.len(),
+                        first_range_position: #first_position,
+                        conflicting_range_position: #position,
+                        expected: #required_value,
+                        actual: __wire_range_value,
                     });
                 }
-            })
-        })
+            };
+            (declaration_index, check)
+        }));
+        let source_value = format_ident!("__wire_source_value_{source}");
+        let plan = plan_ident(source);
+        let variant = &field.error_variant;
+        let text = field_name(field);
+        let plan_expression = quote!(<#codec as ::wire_repr::FixedCodec>::plan(#source_value));
+        let Some(length_check) = fixed_plan_length_check(field, &plan, &text, error) else {
+            continue;
+        };
+        source_plans.push(quote! {
+            let #source_value: <#codec as ::wire_repr::FixedCodec>::Value<'static> = match ::core::convert::TryFrom::<usize>::try_from(#required_value) {
+                Ok(value) => value,
+                Err(_) => return Err(#error::InvalidRangeSource {
+                    position: #first_position,
+                    source_position: #source_position,
+                    value: #required_value,
+                }),
+            };
+            let #plan = #plan_expression.map_err(#error::#variant)?;
+            #length_check
+        });
+    }
+
+    conflicts.sort_by_key(|(declaration_index, _)| *declaration_index);
+    required_values
+        .into_iter()
+        .chain(conflicts.into_iter().map(|(_, check)| check))
+        .chain(source_plans)
         .collect()
 }
 
-fn first_region_for_source(layout: &SequentialLayout, source: usize) -> Option<(usize, usize)> {
-    layout
-        .data
-        .fields
-        .iter()
-        .enumerate()
-        .find_map(|(index, field)| match &field.kind {
-            FieldKind::Region { length_source, .. } if *length_source == source => {
-                Some((index, field.placement))
-            }
-            _ => None,
-        })
+fn range_source_value(index: usize, range: &Field, error: &syn::Ident) -> TokenStream {
+    let name = &range.name;
+    match &range.kind {
+        FieldKind::ByteRange {
+            end: ByteRangeEnd::Relative { .. },
+        } => quote!(#name.len()),
+        FieldKind::ByteRange {
+            end: ByteRangeEnd::Absolute { .. },
+        } => {
+            let start = format_ident!("__wire_start_{index}");
+            let position = range.placement;
+            quote!(match #start.checked_add(#name.len()) {
+                Some(value) => value,
+                None => return Err(#error::InvalidLayoutExtent {
+                    position: #position,
+                    offset: #start,
+                    advance: #name.len(),
+                }),
+            })
+        }
+        FieldKind::ByteRange {
+            end: ByteRangeEnd::BufEnd,
+        }
+        | FieldKind::Codec(_) => quote!(0usize),
+    }
 }
 
 fn plan_expression(codec: &crate::ir::Codec, value: TokenStream) -> TokenStream {
@@ -334,7 +378,9 @@ fn extent_checks(
             PhysicalItem::Field { index, position } => {
                 let field = &layout.data.fields[*index];
                 let advance = match &field.kind {
-                    FieldKind::Remainder => {
+                    FieldKind::ByteRange {
+                        end: ByteRangeEnd::BufEnd,
+                    } => {
                         let name = &field.name;
                         quote!(#name.len())
                     }
@@ -381,7 +427,7 @@ fn extent_checks(
         });
         if let PhysicalItem::Field { index, .. } = item {
             let field = &layout.data.fields[*index];
-            if field.is_prefix() || field.is_region() {
+            if field.is_prefix() || field.is_byte_range() {
                 let boundary = &field.boundary;
                 boundaries.push(boundary.clone());
                 output.push(quote!(let #boundary = __wire_offset;));
@@ -403,7 +449,7 @@ fn commits(layout: &SequentialLayout) -> Vec<TokenStream> {
             let start = format_ident!("__wire_start_{index}");
             let end = format_ident!("__wire_end_{index}");
             let advance = match &field.kind {
-                FieldKind::Remainder => {
+                FieldKind::ByteRange { end: ByteRangeEnd::BufEnd } => {
                     let name = &field.name;
                     quote!(#name.len())
                 }
@@ -423,7 +469,7 @@ fn commits(layout: &SequentialLayout) -> Vec<TokenStream> {
                 },
             };
             let write = match &field.kind {
-                FieldKind::Remainder => {
+                FieldKind::ByteRange { end: ByteRangeEnd::BufEnd } => {
                     let name = &field.name;
                     quote!(bytes[#start..#end].copy_from_slice(#name);)
                 }

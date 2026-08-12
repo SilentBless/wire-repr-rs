@@ -13,7 +13,7 @@ wire_repr! {
 
     pub layout ImplicitDynamic {
         field length: U8;
-        field payload: region(length);
+        field payload: bytes(current_pos..current_pos + length);
         field tail: BeU16;
     }
 }
@@ -45,7 +45,7 @@ fn implicit_fixed_layout_normalizes_spacing_and_write_paths() {
 }
 
 #[test]
-fn implicit_dynamic_layout_frames_regions_in_declaration_order() {
+fn implicit_dynamic_layout_frames_ranges_in_declaration_order() {
     let input = [2, 0xca, 0xfe, 0x12, 0x34, 0x99];
     let (view, suffix) = ImplicitDynamicView::parse_prefix(&input).expect("valid prefix");
     assert_eq!(view.as_bytes(), &input[..5]);

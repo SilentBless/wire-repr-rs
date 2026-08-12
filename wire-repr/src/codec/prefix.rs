@@ -54,11 +54,6 @@ impl PrefixExtent {
 /// the same semantic value supplied to [`Self::plan`]. A codec that violates these
 /// requirements is contract-invalid. All fallible planning completes before a caller
 /// buffer is mutated.
-///
-/// When a layout builder derives a region length through
-/// `Self::Value<'static>: TryFrom<usize>`, the complete conversion and codec round trip
-/// must preserve that length: converting the decoded planned representation back to
-/// `usize` must produce the original region length.
 pub trait PrefixCodec {
     /// Semantic value represented by the codec, which may borrow decode input.
     type Value<'wire>

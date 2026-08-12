@@ -88,14 +88,14 @@ fn dynamic_alignment_uses_the_represented_offset_and_preserves_exact_boundaries(
     assert_eq!(view.as_bytes(), &canonical[..6]);
     assert_eq!(suffix, &[0x99]);
     assert_eq!(view.head(), 7);
-    assert_eq!(view.value_encoded(), &[42]);
+    assert_eq!(view.value_raw(), &[42]);
     assert_eq!(view.value(), 41);
     assert_eq!(view.tail(), 0x1234);
 
     let noncanonical = [7, 0, 41, 0xaa, 0x12, 0x34];
     let view = DynamicPaddedView::parse_exact(&noncanonical).expect("layout should parse");
     assert_eq!(view.as_bytes(), &noncanonical);
-    assert_eq!(view.value_encoded(), &[0, 41]);
+    assert_eq!(view.value_raw(), &[0, 41]);
     assert_eq!(view.value(), 41);
     assert_eq!(view.tail(), 0x1234);
 }

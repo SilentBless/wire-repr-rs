@@ -106,14 +106,14 @@ pub(crate) struct Field {
     pub(crate) error_variant: Ident,
     /// Fixed-sequential setter name, normalized with the source identifier.
     pub(crate) setter_name: Ident,
-    /// Dynamic-region mutable accessor name, normalized with the source identifier.
-    pub(crate) region_mut_name: Option<Ident>,
-    /// Exact-representation getter name used when this is a prefix field.
-    pub(crate) encoded_getter: Ident,
+    /// Dynamic-range mutable accessor name, normalized with the source identifier.
+    pub(crate) range_mut_name: Option<Ident>,
+    /// Raw-wire getter name used when this is a prefix field.
+    pub(crate) raw_getter: Ident,
     /// Stored end-boundary name used when this is a prefix field.
     pub(crate) boundary: Ident,
-    /// Whether any region is framed by this field's decoded value.
-    pub(crate) is_region_length_source: bool,
+    /// Whether any byte range is derived from this field's raw value.
+    pub(crate) is_derived_range_source: bool,
     pub(crate) projections: Vec<Projection>,
 }
 
@@ -121,7 +121,7 @@ impl Field {
     pub(crate) fn codec(&self) -> Option<&Codec> {
         match &self.kind {
             FieldKind::Codec(codec) => Some(codec),
-            FieldKind::Region { .. } | FieldKind::Remainder => None,
+            FieldKind::ByteRange { .. } => None,
         }
     }
 
@@ -129,24 +129,31 @@ impl Field {
         self.codec().is_some_and(Codec::is_prefix)
     }
 
-    pub(crate) const fn is_region(&self) -> bool {
-        matches!(self.kind, FieldKind::Region { .. })
+    pub(crate) const fn is_byte_range(&self) -> bool {
+        matches!(self.kind, FieldKind::ByteRange { .. })
     }
 
-    pub(crate) const fn is_remainder(&self) -> bool {
-        matches!(self.kind, FieldKind::Remainder)
+    pub(crate) const fn is_buf_end_range(&self) -> bool {
+        matches!(
+            self.kind,
+            FieldKind::ByteRange {
+                end: ByteRangeEnd::BufEnd
+            }
+        )
     }
 }
 
 /// Fully resolved semantic kind of a named field.
 pub(crate) enum FieldKind {
     Codec(Codec),
-    Region {
-        length_source: usize,
-        length_source_span: Span,
-    },
-    /// Opaque caller-bounded bytes at the terminal physical position.
-    Remainder,
+    ByteRange { end: ByteRangeEnd },
+}
+
+/// Validated byte-range end algebra.
+pub(crate) enum ByteRangeEnd {
+    Relative { source: usize, source_span: Span },
+    Absolute { source: usize, source_span: Span },
+    BufEnd,
 }
 
 /// A semantic fixed mapping and its physical raw representation.
@@ -348,22 +355,12 @@ fn normalize_scalar(
             );
             return None;
         }
-        syntax::Codec::Region(_) => {
+        syntax::Codec::Range(_) => {
             push(
                 errors,
                 Error::new(
                     source.name.span(),
-                    "scalar storage must be a builtin fixed integer codec; `region(field)` is unsupported",
-                ),
-            );
-            return None;
-        }
-        syntax::Codec::Remainder => {
-            push(
-                errors,
-                Error::new(
-                    source.name.span(),
-                    "scalar storage must be a builtin fixed integer codec; `remainder` is unsupported",
+                    "scalar storage must be a builtin fixed integer codec; byte ranges are unsupported",
                 ),
             );
             return None;
@@ -647,19 +644,12 @@ fn normalize_layout(
                     );
                     None
                 }
-                syntax::Codec::Region(_) => {
-                    push(
-                        errors,
-                        Error::new_spanned(semantic, "mappings are unsupported on region fields"),
-                    );
-                    None
-                }
-                syntax::Codec::Remainder => {
+                syntax::Codec::Range(_) => {
                     push(
                         errors,
                         Error::new_spanned(
                             semantic,
-                            "mappings are unsupported on remainder fields",
+                            "mappings are unsupported on byte range fields",
                         ),
                     );
                     None
@@ -696,40 +686,55 @@ fn normalize_layout(
                 }
                 FieldKind::Codec(Codec::Prefix(path))
             }
-            syntax::Codec::Region(source) => {
+            syntax::Codec::Range(range) => {
                 if kind == syntax::LayoutKind::Absolute {
                     push(
                         errors,
                         Error::new(
                             field.name.span(),
-                            "regions are unsupported in absolute layouts",
+                            "byte ranges are unsupported in absolute layouts",
                         ),
                     );
                 }
-                let source_name = normalized_name(&source);
-                let Some(&length_source) = source_field_indices.get(&source_name) else {
-                    push(
-                        errors,
-                        Error::new(source.span(), "unknown region length field"),
-                    );
-                    continue;
+                let start_span = match range.start {
+                    syntax::ByteRangeStart::CurrentPos => None,
+                    syntax::ByteRangeStart::BufStart(span)
+                    | syntax::ByteRangeStart::BufEnd(span)
+                    | syntax::ByteRangeStart::FieldStart(span)
+                    | syntax::ByteRangeStart::FieldEnd(span) => Some(span),
                 };
-                FieldKind::Region {
-                    length_source,
-                    length_source_span: source.span(),
-                }
-            }
-            syntax::Codec::Remainder => {
-                if kind == syntax::LayoutKind::Absolute {
+                if let Some(span) = start_span {
                     push(
                         errors,
-                        Error::new(
-                            field.name.span(),
-                            "remainder fields are unsupported in absolute layouts",
-                        ),
+                        Error::new(span, "byte range start must be `current_pos`"),
                     );
                 }
-                FieldKind::Remainder
+                let end = match range.end {
+                    syntax::ByteRangeEnd::BufEnd => ByteRangeEnd::BufEnd,
+                    syntax::ByteRangeEnd::Relative { source, span } => {
+                        let source_name = normalized_name(&source);
+                        let Some(&source) = source_field_indices.get(&source_name) else {
+                            push(errors, Error::new(span, "unknown byte range source field"));
+                            continue;
+                        };
+                        ByteRangeEnd::Relative {
+                            source,
+                            source_span: span,
+                        }
+                    }
+                    syntax::ByteRangeEnd::Absolute { source, span } => {
+                        let source_name = normalized_name(&source);
+                        let Some(&source) = source_field_indices.get(&source_name) else {
+                            push(errors, Error::new(span, "unknown byte range source field"));
+                            continue;
+                        };
+                        ByteRangeEnd::Absolute {
+                            source,
+                            source_span: span,
+                        }
+                    }
+                };
+                FieldKind::ByteRange { end }
             }
         };
         let raw_name = if mapping.is_some() {
@@ -756,8 +761,7 @@ fn normalize_layout(
             &field_kind,
             FieldKind::Codec(codec) if codec.is_prefix()
         );
-        let is_region = matches!(&field_kind, FieldKind::Region { .. });
-        let is_remainder = matches!(&field_kind, FieldKind::Remainder);
+        let is_byte_range = matches!(&field_kind, FieldKind::ByteRange { .. });
         if kind == syntax::LayoutKind::Absolute && is_prefix {
             push(
                 errors,
@@ -767,7 +771,7 @@ fn normalize_layout(
                 ),
             );
         }
-        if !is_region && !is_remainder {
+        if !is_byte_range {
             register_name(
                 &mut variants,
                 &error_variant,
@@ -775,8 +779,8 @@ fn normalize_layout(
                 "generated field error variant collision",
             );
         }
-        let encoded_getter = generated_ident(
-            &format!("{generated_stem}_encoded"),
+        let raw_getter = generated_ident(
+            &format!("{generated_stem}_raw"),
             field.name.span(),
             "prefix representation getter",
             errors,
@@ -784,7 +788,7 @@ fn normalize_layout(
         if is_prefix {
             register_name(
                 &mut getter_names,
-                &encoded_getter,
+                &raw_getter,
                 errors,
                 "prefix representation getter conflicts with an existing generated getter",
             );
@@ -795,22 +799,20 @@ fn normalize_layout(
             "dynamic field boundary",
             errors,
         )?;
-        let region_mut_name = if is_region || is_remainder {
+        let range_mut_name = if is_byte_range {
             Some(generated_ident(
                 &format!("{generated_stem}_mut"),
                 field.name.span(),
-                "region mutable accessor",
+                "range mutable accessor",
                 errors,
             )?)
         } else {
             None
         };
-        let projections = if is_prefix || is_region || is_remainder {
+        let projections = if is_prefix || is_byte_range {
             if !field.projections.is_empty() {
-                let message = if is_remainder {
-                    "remainder fields cannot own bit projections"
-                } else if is_region {
-                    "region fields cannot own bit projections"
+                let message = if is_byte_range {
+                    "byte range fields cannot own bit projections"
                 } else {
                     "prefix codec fields cannot own bit projections"
                 };
@@ -838,55 +840,91 @@ fn normalize_layout(
             placement_span,
             error_variant,
             setter_name,
-            region_mut_name,
-            encoded_getter,
+            range_mut_name,
+            raw_getter,
             boundary,
-            is_region_length_source: false,
+            is_derived_range_source: false,
             projections,
         });
         normalized_field_indices[declaration_index] = Some(normalized_index);
     }
 
-    let pending_regions: Vec<_> = fields
+    let pending_ranges: Vec<_> = fields
         .iter()
         .enumerate()
-        .filter_map(|(region_index, field)| match &field.kind {
-            FieldKind::Region {
-                length_source,
-                length_source_span,
-            } => Some((region_index, *length_source, *length_source_span)),
-            FieldKind::Codec(_) | FieldKind::Remainder => None,
+        .filter_map(|(range_index, field)| match &field.kind {
+            FieldKind::ByteRange {
+                end:
+                    ByteRangeEnd::Relative {
+                        source,
+                        source_span,
+                    }
+                    | ByteRangeEnd::Absolute {
+                        source,
+                        source_span,
+                    },
+            } => Some((range_index, *source, *source_span)),
+            FieldKind::Codec(_)
+            | FieldKind::ByteRange {
+                end: ByteRangeEnd::BufEnd,
+            } => None,
         })
         .collect();
-    for (region_index, source_declaration, source_span) in pending_regions {
+    let mut source_algebra = HashMap::new();
+    for (range_index, source_declaration, source_span) in pending_ranges {
         let Some(Some(source_index)) = normalized_field_indices.get(source_declaration) else {
             continue;
         };
         let source_index = *source_index;
-        if fields[source_index].is_region() || fields[source_index].is_remainder() {
+        let source = &fields[source_index];
+        if !matches!(source.codec(), Some(Codec::Builtin(_))) {
             push(
                 errors,
                 Error::new(
                     source_span,
-                    "region and remainder fields cannot be region length sources",
+                    "byte range source must be a direct builtin fixed-width integer or a semantic mapping over one",
                 ),
             );
             continue;
         }
-        if fields[source_index].placement >= fields[region_index].placement {
+        if source.placement >= fields[range_index].placement {
             push(
                 errors,
                 Error::new(
                     source_span,
-                    "region length field must physically precede the region",
+                    "byte range source field must physically precede the range",
                 ),
             );
             continue;
         }
-        if let FieldKind::Region { length_source, .. } = &mut fields[region_index].kind {
-            *length_source = source_index;
+        let algebra = match &fields[range_index].kind {
+            FieldKind::ByteRange {
+                end: ByteRangeEnd::Relative { .. },
+            } => "relative",
+            FieldKind::ByteRange {
+                end: ByteRangeEnd::Absolute { .. },
+            } => "absolute",
+            _ => continue,
+        };
+        let key = source_index;
+        if let Some(previous) = source_algebra.insert(key, algebra)
+            && previous != algebra
+        {
+            push(
+                errors,
+                Error::new(
+                    source_span,
+                    "a byte range source cannot mix relative and absolute end algebra",
+                ),
+            );
         }
-        fields[source_index].is_region_length_source = true;
+        if let FieldKind::ByteRange {
+            end: ByteRangeEnd::Relative { source, .. } | ByteRangeEnd::Absolute { source, .. },
+        } = &mut fields[range_index].kind
+        {
+            *source = source_index;
+        }
+        fields[source_index].is_derived_range_source = true;
         fields[source_index].raw_setter_name = None;
     }
 
@@ -997,32 +1035,34 @@ fn normalize_layout(
             physical_order.push(item);
         }
         physical_order.sort_by_key(PhysicalItem::position);
-        let remainders: Vec<_> = physical_order
+        let buf_end_ranges: Vec<_> = physical_order
             .iter()
             .filter_map(|item| match item {
-                PhysicalItem::Field { index, .. } if fields[*index].is_remainder() => Some(*index),
+                PhysicalItem::Field { index, .. } if fields[*index].is_buf_end_range() => {
+                    Some(*index)
+                }
                 _ => None,
             })
             .collect();
-        if remainders.len() > 1 {
-            for index in remainders.iter().skip(1) {
+        if buf_end_ranges.len() > 1 {
+            for index in buf_end_ranges.iter().skip(1) {
                 push(
                     errors,
                     Error::new(
                         fields[*index].name.span(),
-                        "at most one remainder field is supported",
+                        "at most one `buf_end` byte range is supported",
                     ),
                 );
             }
         }
-        if let Some(&index) = remainders.first()
+        if let Some(&index) = buf_end_ranges.first()
             && !matches!(physical_order.last(), Some(PhysicalItem::Field { index: last, .. }) if *last == index)
         {
             push(
                 errors,
                 Error::new(
                     fields[index].placement_span,
-                    "remainder fields must be physically terminal",
+                    "byte range fields must be physically terminal",
                 ),
             );
         }
@@ -1061,7 +1101,7 @@ fn normalize_layout(
 
     let has_dynamic = fields
         .iter()
-        .any(|field| field.is_prefix() || field.is_region() || field.is_remainder());
+        .any(|field| field.is_prefix() || field.is_byte_range());
     if kind == syntax::LayoutKind::Absolute
         || (kind == syntax::LayoutKind::Sequential && !has_dynamic)
     {
@@ -1115,10 +1155,7 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
         }
         getters.insert(name, field.name.span());
         if field.is_prefix() {
-            getters.insert(
-                normalized_name(&field.encoded_getter),
-                field.encoded_getter.span(),
-            );
+            getters.insert(normalized_name(&field.raw_getter), field.raw_getter.span());
         }
         for projection in &field.projections {
             let name = normalized_name(&projection.name);
@@ -1149,7 +1186,7 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
     }
     let mut setters = HashMap::new();
     for field in fields.iter().filter(|field| {
-        matches!(field.codec(), Some(codec) if !codec.is_prefix()) && !field.is_region_length_source
+        matches!(field.codec(), Some(codec) if !codec.is_prefix()) && !field.is_derived_range_source
     }) {
         let name = normalized_name(&field.setter_name);
         if getters.contains_key(&name) {
@@ -1189,9 +1226,9 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
             );
         }
     }
-    let mut region_accessors = HashMap::new();
-    for field in fields.iter().filter(|field| field.is_region()) {
-        let Some(accessor) = &field.region_mut_name else {
+    let mut range_accessors = HashMap::new();
+    for field in fields.iter().filter(|field| field.is_byte_range()) {
+        let Some(accessor) = &field.range_mut_name else {
             continue;
         };
         let name = normalized_name(accessor);
@@ -1200,7 +1237,7 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
                 errors,
                 Error::new(
                     field.name.span(),
-                    "generated region mutable accessor conflicts with an existing getter",
+                    "generated range mutable accessor conflicts with an existing getter",
                 ),
             );
         }
@@ -1209,55 +1246,22 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
                 errors,
                 Error::new(
                     field.name.span(),
-                    "generated region mutable accessor conflicts with an existing setter",
+                    "generated range mutable accessor conflicts with an existing setter",
                 ),
             );
         }
-        if region_accessors.insert(name, field.name.span()).is_some() {
+        if range_accessors.insert(name, field.name.span()).is_some() {
             push(
                 errors,
                 Error::new(
                     field.name.span(),
-                    "generated region mutable accessor collision",
-                ),
-            );
-        }
-    }
-    for field in fields.iter().filter(|field| field.is_remainder()) {
-        let Some(accessor) = &field.region_mut_name else {
-            continue;
-        };
-        let name = normalized_name(accessor);
-        if getters.contains_key(&name) {
-            push(
-                errors,
-                Error::new(
-                    field.name.span(),
-                    "generated remainder mutable accessor conflicts with an existing getter",
-                ),
-            );
-        }
-        if setters.contains_key(&name) {
-            push(
-                errors,
-                Error::new(
-                    field.name.span(),
-                    "generated remainder mutable accessor conflicts with an existing setter",
-                ),
-            );
-        }
-        if region_accessors.insert(name, field.name.span()).is_some() {
-            push(
-                errors,
-                Error::new(
-                    field.name.span(),
-                    "generated remainder mutable accessor collision",
+                    "generated range mutable accessor collision",
                 ),
             );
         }
     }
     let mut fluent = HashMap::new();
-    for field in fields.iter().filter(|field| !field.is_region_length_source) {
+    for field in fields.iter().filter(|field| !field.is_derived_range_source) {
         let name = normalized_name(&field.name);
         if matches!(name.as_str(), "new" | "build_into") {
             push(
@@ -1280,7 +1284,7 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
     }
     for field in fields
         .iter()
-        .filter(|field| !field.is_region_length_source)
+        .filter(|field| !field.is_derived_range_source)
         .filter_map(|field| field.raw_name.as_ref())
     {
         let name = normalized_name(field);
@@ -1748,8 +1752,8 @@ mod tests {
                 "prefix codecs",
             ),
             (
-                "layout H { field length: U8; field value: region(length) as crate::Semantic; }",
-                "region fields",
+                "layout H { field length: U8; field value: bytes(current_pos..current_pos + length) as crate::Semantic; }",
+                "byte range fields",
             ),
         ] {
             error(source, needle);
@@ -1767,15 +1771,6 @@ mod tests {
             Some(Codec::Builtin(Builtin::U8))
         ));
         assert_eq!(layout.data.fields[0].projections.len(), 1);
-
-        let value = model("layout H { field length: U8 as crate::Length; field set_length_raw: U8; field payload: region(length); }").unwrap();
-        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
-            panic!("expected sequential layout")
-        };
-        let source = &layout.data.fields[0];
-        assert!(source.is_region_length_source);
-        assert!(source.raw_name.is_some());
-        assert!(source.raw_setter_name.is_none());
     }
 
     #[test]
@@ -1841,7 +1836,7 @@ mod tests {
         for (source, needle) in [
             ("scalar S: bytes(2);", "bytes(N)"),
             ("scalar S: prefix(crate::P);", "prefix(path)"),
-            ("scalar S: region(length);", "region(field)"),
+            ("scalar S: bytes(current_pos..buf_end);", "byte ranges"),
             ("scalar S: crate::Other;", "custom path"),
             ("scalar S: Unknown;", "supported builtin"),
             (
@@ -2215,7 +2210,7 @@ mod tests {
         assert!(dynamic.has_dynamic);
         let prefix = &dynamic.data.fields[1];
         assert!(matches!(prefix.codec(), Some(Codec::Prefix(_))));
-        assert_eq!(prefix.encoded_getter.to_string(), "type_encoded");
+        assert_eq!(prefix.raw_getter.to_string(), "type_raw");
         assert_eq!(prefix.boundary.to_string(), "__wire_end_type");
         let Item::Layout(Layout::Sequential(fixed)) = &value.items[1] else {
             panic!("expected sequential layout")
@@ -2232,7 +2227,7 @@ mod tests {
                 "cannot own bit projections",
             ),
             (
-                "layout H { field r#type: prefix(crate::P) { position: 1; } field type_encoded: U8 { position: 2; } }",
+                "layout H { field r#type: prefix(crate::P) { position: 1; } field type_raw: U8 { position: 2; } }",
                 "generated getter",
             ),
             (
@@ -2243,242 +2238,6 @@ mod tests {
             error(source, needle);
         }
     }
-    #[test]
-    fn normalizes_regions_and_rejects_invalid_length_sources() {
-        let value = model(
-            "layout H { field second: region(length) { position: 3; } field length: U8 { position: 1; } field first: region(length) { position: 2; } }",
-        )
-        .unwrap();
-        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
-            panic!("expected sequential layout")
-        };
-        assert!(layout.has_dynamic);
-        assert_eq!(layout.data.fields[0].name, "second");
-        assert_eq!(layout.data.fields[1].name, "length");
-        assert_eq!(layout.data.fields[2].name, "first");
-        assert!(layout.data.fields[1].is_region_length_source);
-        assert!(!layout.data.fields[0].is_region_length_source);
-        assert!(!layout.data.fields[2].is_region_length_source);
-        assert_eq!(
-            layout.data.fields[0]
-                .region_mut_name
-                .as_ref()
-                .map(ToString::to_string),
-            Some("second_mut".to_owned())
-        );
-        assert_eq!(
-            layout.data.fields[2]
-                .region_mut_name
-                .as_ref()
-                .map(ToString::to_string),
-            Some("first_mut".to_owned())
-        );
-        assert!(matches!(
-            layout.data.fields[0].kind,
-            FieldKind::Region {
-                length_source: 1,
-                ..
-            }
-        ));
-        assert!(matches!(
-            layout.data.fields[2].kind,
-            FieldKind::Region {
-                length_source: 1,
-                ..
-            }
-        ));
-        assert_eq!(
-            layout.physical_order,
-            [
-                PhysicalItem::Field {
-                    index: 1,
-                    position: 1,
-                },
-                PhysicalItem::Field {
-                    index: 2,
-                    position: 2,
-                },
-                PhysicalItem::Field {
-                    index: 0,
-                    position: 3,
-                },
-            ]
-        );
-
-        for (source, needle) in [
-            (
-                "layout H { field length: U8 { position: 1; } field payload: region(missing) { position: 2; } }",
-                "unknown region length field",
-            ),
-            (
-                "layout H { field payload: region(length) { position: 1; } field length: U8 { position: 2; } }",
-                "must physically precede",
-            ),
-            (
-                "layout H { field base: U8 { position: 1; } field length: region(base) { position: 2; } field payload: region(length) { position: 3; } }",
-                "cannot be region length sources",
-            ),
-            (
-                "absolute layout H { field length: U8 { offset: 0; } field payload: region(length) { offset: 1; } }",
-                "regions are unsupported in absolute",
-            ),
-            (
-                "layout H { field length: U8 { position: 1; } field payload: region(length) { position: 2; projections { bit x: 0; } } }",
-                "region fields cannot own bit projections",
-            ),
-        ] {
-            error(source, needle);
-        }
-    }
-
-    #[test]
-    fn dynamic_mutation_namespace_and_region_source_ownership_are_normalized() {
-        for source in [
-            "layout H { field r#parse_prefix_mut: prefix(crate::P) { position: 1; } }",
-            "layout H { field value: prefix(crate::P) { position: 1; } field parse_exact_mut: U8 { position: 2; } }",
-            "layout H { field value: prefix(crate::P) { position: 1; } field flags: U8 { position: 2; projections { bit set_flags: 0; } } }",
-        ] {
-            error(
-                source,
-                if source.contains("set_flags") {
-                    "generated field setter conflicts"
-                } else {
-                    "reserved generated member"
-                },
-            );
-        }
-        model("layout H { field length: U8 { position: 1; } field payload: region(length) { position: 2; } field set_length: U8 { position: 3; } }")
-            .expect("a source setter is omitted, so its hypothetical collision is legal");
-        error(
-            "layout H { field set_foo: prefix(crate::P) { position: 1; } field foo_encoded: U8 { position: 2; } }",
-            "generated field setter conflicts",
-        );
-
-        let value = model("layout H { field payload: region(length) { position: 3; } field length: prefix(crate::P) { position: 1; } field again: region(length) { position: 2; } field fixed: U8 { position: 4; } }").unwrap();
-        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
-            panic!("expected sequential layout")
-        };
-        assert!(layout.data.fields[1].is_region_length_source);
-        assert!(!layout.data.fields[0].is_region_length_source);
-        assert!(!layout.data.fields[2].is_region_length_source);
-        assert!(!layout.data.fields[3].is_region_length_source);
-    }
-
-    #[test]
-    fn dynamic_region_mutable_accessor_names_normalize_and_reject_collisions() {
-        let value = model(
-            "layout H { field length: U8 { position: 1; } field r#payload: region(length) { position: 2; } }",
-        )
-        .unwrap();
-        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
-            panic!("expected sequential layout")
-        };
-        assert_eq!(
-            layout.data.fields[1]
-                .region_mut_name
-                .as_ref()
-                .map(ToString::to_string),
-            Some("payload_mut".to_owned())
-        );
-
-        error(
-            "layout H { field length: U8 { position: 1; } field r#payload: region(length) { position: 2; } field payload_mut: U8 { position: 3; } }",
-            "generated region mutable accessor conflicts with an existing getter",
-        );
-        error(
-            "layout H { field length: U8 { position: 1; } field r#parse_prefix: region(length) { position: 2; } }",
-            "reserved generated member",
-        );
-        error(
-            "layout H { field length: U8 { position: 1; } field payload: region(length) { position: 2; } field flags: U8 { position: 3; projections { bit payload_mut: 0; } } }",
-            "generated region mutable accessor conflicts with an existing getter",
-        );
-        error(
-            "layout H { field length: U8 { position: 1; } field set_tail: region(length) { position: 2; } field tail_mut: U8 { position: 3; } }",
-            "generated region mutable accessor conflicts with an existing setter",
-        );
-    }
-
-    #[test]
-    fn dynamic_builder_namespace_tracks_only_emitted_fluent_methods() {
-        error(
-            "layout H { field r#new: U8 { position: 1; } field dynamic: prefix(crate::P) { position: 2; } }",
-            "generated builder member",
-        );
-        error(
-            "layout H { field r#build_into: region(length) { position: 2; } field length: U8 { position: 1; } }",
-            "generated builder member",
-        );
-        error(
-            "layout H { field foo: U8 { position: 1; } field r#foo: U8 { position: 2; } field dynamic: prefix(crate::P) { position: 3; } }",
-            "duplicate field identifier",
-        );
-        model("layout H { field new: U8 { position: 1; } field payload: region(new) { position: 2; } }")
-            .expect("source fields omit builder fluent methods");
-        model("layout H { field build_into: U8 { position: 1; } field payload: region(build_into) { position: 2; } }")
-            .expect("source fields omit builder fluent methods");
-    }
-
-    #[test]
-    fn normalizes_terminal_remainder_and_rejects_invalid_uses() {
-        let value = model("layout H { field payload: remainder; }").unwrap();
-        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
-            panic!("expected sequential layout")
-        };
-        assert!(layout.has_dynamic);
-        assert!(layout.data.fields[0].is_remainder());
-
-        let value = model("layout H { field payload: remainder { position: 2; } field head: U8 { position: 1; } }").unwrap();
-        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
-            panic!("expected sequential layout")
-        };
-        assert!(layout.data.fields[0].is_remainder());
-        assert_eq!(
-            layout.physical_order.last(),
-            Some(&PhysicalItem::Field {
-                index: 0,
-                position: 2
-            })
-        );
-
-        for (source, needle) in [
-            (
-                "absolute layout H { field payload: remainder { offset: 0; } }",
-                "remainder fields are unsupported in absolute layouts",
-            ),
-            (
-                "layout H { field payload: remainder { position: 1; } field head: U8 { position: 2; } }",
-                "remainder fields must be physically terminal",
-            ),
-            (
-                "layout H { field payload: remainder { position: 1; } padding { position: 2; length: 1; } }",
-                "remainder fields must be physically terminal",
-            ),
-            (
-                "layout H { field payload: remainder { position: 1; } align { position: 2; boundary: 2; } }",
-                "remainder fields must be physically terminal",
-            ),
-            (
-                "layout H { field one: remainder { position: 1; } field two: remainder { position: 2; } }",
-                "at most one remainder field",
-            ),
-            (
-                "layout H { field payload: remainder as crate::Payload; }",
-                "mappings are unsupported on remainder fields",
-            ),
-            (
-                "layout H { field payload: remainder { projections { bit value: 0; } } }",
-                "remainder fields cannot own bit projections",
-            ),
-            (
-                "layout H { field payload: remainder { position: 1; } field tail: region(payload) { position: 2; } }",
-                "region and remainder fields cannot be region length sources",
-            ),
-        ] {
-            error(source, needle);
-        }
-    }
-
     #[test]
     fn normalizes_padding_alignment_and_shared_physical_positions() {
         let value = model(
@@ -2599,5 +2358,66 @@ mod tests {
                 "`position` is required for every sequential entry when any position is explicit",
             );
         }
+    }
+
+    #[test]
+    fn normalizes_byte_ranges_and_validates_sources() {
+        let value = model("layout H { field payload: bytes(current_pos..current_pos + length) { position: 2; } field length: U8 as crate::Length { position: 1; } field end: BeI16 { position: 3; } field absolute: bytes(current_pos..end) { position: 4; } }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential layout")
+        };
+        assert!(layout.data.fields[1].is_derived_range_source);
+        assert!(layout.data.fields[2].is_derived_range_source);
+        assert!(matches!(
+            layout.data.fields[0].kind,
+            FieldKind::ByteRange {
+                end: ByteRangeEnd::Relative { source: 1, .. }
+            }
+        ));
+        assert!(matches!(
+            layout.data.fields[3].kind,
+            FieldKind::ByteRange {
+                end: ByteRangeEnd::Absolute { source: 2, .. }
+            }
+        ));
+
+        for (source, needle) in [
+            (
+                "layout H { field length: prefix(crate::P) { position: 1; } field payload: bytes(current_pos..current_pos + length) { position: 2; } }",
+                "direct builtin",
+            ),
+            (
+                "layout H { field length: bytes(2) { position: 1; } field payload: bytes(current_pos..current_pos + length) { position: 2; } }",
+                "direct builtin",
+            ),
+            (
+                "layout H { field payload: bytes(current_pos..current_pos + length) { position: 1; } field length: U8 { position: 2; } }",
+                "must physically precede",
+            ),
+            (
+                "layout H { field payload: bytes(buf_start..buf_end); }",
+                "start must be `current_pos`",
+            ),
+            (
+                "layout H { field first: bytes(current_pos..buf_end) { position: 1; } field tail: U8 { position: 2; } }",
+                "physically terminal",
+            ),
+            (
+                "layout H { field length: U8 { position: 1; } field relative: bytes(current_pos..current_pos + length) { position: 2; } field absolute: bytes(current_pos..length) { position: 3; } }",
+                "cannot mix relative and absolute",
+            ),
+        ] {
+            error(source, needle);
+        }
+
+        model("layout H { field length: U8 { position: 1; } field first: bytes(current_pos..current_pos + length) { position: 2; } field second: bytes(current_pos..current_pos + length) { position: 3; } }").unwrap();
+        error(
+            "layout H { field payload: remainder; }",
+            "unknown bare codec",
+        );
+        error(
+            "layout H { field payload: region(length); field length: U8; }",
+            "expected curly braces",
+        );
     }
 }

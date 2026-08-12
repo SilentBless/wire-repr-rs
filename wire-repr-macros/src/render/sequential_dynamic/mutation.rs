@@ -22,7 +22,7 @@ pub(super) fn render_layout(
     let boundaries: Vec<_> = data
         .fields
         .iter()
-        .filter(|field| field.is_prefix() || field.is_region())
+        .filter(|field| field.is_prefix() || field.is_byte_range())
         .map(|field| &field.boundary)
         .collect();
     let boundary_initializers = boundaries.clone();
@@ -66,7 +66,14 @@ pub(super) fn render_layout(
                 let mut remaining = input_bytes;
                 #(#validation)*
                 let represented_len = input_bytes.len() - remaining.len();
-                let (bytes, suffix) = input.split_at_mut(represented_len);
+                let available = input.len();
+                let Some((bytes, suffix)) = input.split_at_mut_checked(represented_len) else {
+                    return Err(#error_name::InputTooShort {
+                        position: 1,
+                        expected: represented_len,
+                        available,
+                    });
+                };
                 Ok((Self { bytes, #(#boundary_initializers,)* }, suffix))
             }
 
@@ -74,12 +81,18 @@ pub(super) fn render_layout(
             #[inline]
             #[must_use]
             #visibility fn parse_exact_mut(input: &'wire mut [u8]) -> ::core::result::Result<Self, #error_name> {
+                #(#zero_width)*
                 let actual = input.len();
-                let (view, suffix) = Self::parse_prefix_mut(input)?;
-                if !suffix.is_empty() {
-                    return Err(#error_name::TrailingBytes { expected: view.bytes.len(), actual });
+                let input_bytes: &[u8] = input;
+                let mut remaining = input_bytes;
+                #(#validation)*
+                if !remaining.is_empty() {
+                    return Err(#error_name::TrailingBytes {
+                        expected: actual - remaining.len(),
+                        actual,
+                    });
                 }
-                Ok(view)
+                Ok(Self { bytes: input, #(#boundary_initializers,)* })
             }
 
             #[doc = "Returns the exact validated bytes represented by this mutable view."]
@@ -130,7 +143,7 @@ pub(super) fn render_layout(
 
 fn eligible_codec(field: &Field) -> Option<&Codec> {
     let codec = field.codec()?;
-    (!codec.is_prefix() && !field.is_region_length_source).then_some(codec)
+    (!codec.is_prefix() && !field.is_derived_range_source).then_some(codec)
 }
 
 fn render_encode_variant(field: &Field, _codec: &Codec) -> Option<TokenStream> {
@@ -196,11 +209,11 @@ fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<TokenStream> 
     match &field.kind {
         FieldKind::Codec(codec) if codec.is_prefix() => {
             let codec = codec_tokens(codec);
-            let encoded_getter = &field.encoded_getter;
+            let raw_getter = &field.raw_getter;
             let end = &field.boundary;
             vec![
-                quote! { #[doc = "Returns the decoded value of this validated prefix field."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> <#codec as ::wire_repr::PrefixCodec>::Value<'_> { <#codec as ::wire_repr::PrefixCodec>::decode(self.#encoded_getter()) } },
-                quote! { #[doc = "Returns the exact validated encoding of this prefix field."] #[inline] #[must_use] #visibility fn #encoded_getter(&self) -> &[u8] { &self.bytes[(#start)..self.#end] } },
+                quote! { #[doc = "Returns the decoded value of this validated prefix field."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> <#codec as ::wire_repr::PrefixCodec>::Value<'_> { <#codec as ::wire_repr::PrefixCodec>::decode(self.#raw_getter()) } },
+                quote! { #[doc = "Returns the exact validated raw wire bytes of this prefix field (the original wire representation)."] #[inline] #[must_use] #visibility fn #raw_getter(&self) -> &[u8] { &self.bytes[(#start)..self.#end] } },
             ]
         }
         FieldKind::Codec(_) => {
@@ -223,24 +236,30 @@ fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<TokenStream> 
                 quote! { #[doc = "Returns the decoded value of this validated fixed field."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> <#codec as ::wire_repr::FixedCodec>::Value<'_> { <#codec as ::wire_repr::FixedCodec>::decode(&self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]) } },
             ]
         }
-        FieldKind::Region { .. } => {
-            let end = &field.boundary;
-            let region_mut_name = field
-                .region_mut_name
-                .as_ref()
-                .expect("validated region mutable accessor name");
-            vec![
-                quote! { #[doc = "Returns the exact opaque bytes in this validated region."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> &[u8] { &self.bytes[(#start)..self.#end] } },
-                quote! { #[doc = "Returns mutable access to exactly this validated region without changing its framing."] #(#docs)* #[inline] #visibility fn #region_mut_name(&mut self) -> &mut [u8] { &mut self.bytes[(#start)..self.#end] } },
-            ]
-        }
-        FieldKind::Remainder => {
-            let Some(remainder_mut_name) = field.region_mut_name.as_ref() else {
+        FieldKind::ByteRange { .. } => {
+            let Some(range_mut_name) = field.range_mut_name.as_ref() else {
                 return Vec::new();
             };
+            let terminal = matches!(
+                layout.physical_order.last(),
+                Some(crate::ir::PhysicalItem::Field { index, .. })
+                    if *index == field.declaration_index
+            );
+            let immutable_bytes = if terminal {
+                quote!(&self.bytes[(#start)..])
+            } else {
+                let end = &field.boundary;
+                quote!(&self.bytes[(#start)..self.#end])
+            };
+            let mutable_bytes = if terminal {
+                quote!(&mut self.bytes[(#start)..])
+            } else {
+                let end = &field.boundary;
+                quote!(&mut self.bytes[(#start)..self.#end])
+            };
             vec![
-                quote! { #[doc = "Returns all caller-bounded bytes remaining after the preceding layout."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> &[u8] { &self.bytes[(#start)..] } },
-                quote! { #[doc = "Returns mutable access to all caller-bounded bytes remaining after the preceding layout."] #(#docs)* #[inline] #visibility fn #remainder_mut_name(&mut self) -> &mut [u8] { &mut self.bytes[(#start)..] } },
+                quote! { #[doc = "Returns the exact opaque bytes in this validated range."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> &[u8] { #immutable_bytes } },
+                quote! { #[doc = "Returns mutable access to exactly this validated range without changing its framing."] #(#docs)* #[inline] #visibility fn #range_mut_name(&mut self) -> &mut [u8] { #mutable_bytes } },
             ]
         }
     }

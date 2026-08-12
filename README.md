@@ -169,7 +169,7 @@ fallible conversion layer. Mapped byte values are owned arrays or wrappers; unma
 
 Declared `scalar Name: Codec;` has a different job: it creates a reusable nominal wrapper
 that owns a codec. `as Type` maps one eligible built-in physical field through `From`; it
-does not apply to declared scalar, custom/direct, prefix, or region fields.
+does not apply to declared scalar, custom/direct, prefix, or byte range fields.
 
 ### Bit projections
 
@@ -199,34 +199,43 @@ field name: prefix(crate::Terminated);
 ```
 
 The generated view preserves the exact accepted bytes. `name()` returns the decoded
-value, while `name_encoded()` exposes its original encoding. Parsing validates the
+value, while `name_raw()` exposes the exact validated raw wire bytes: the original wire
+representation. Parsing validates the
 prefix extent once and rejects any codec claim beyond the remaining input.
 
-### Bounded regions
+### Byte ranges
 
-A region borrows an opaque span whose length comes from an earlier physical field:
+Sequential layouts have three byte-range forms:
+
+- `bytes(current_pos..current_pos + source)` is a relative payload length;
+- `bytes(current_pos..source)` is an exclusive absolute payload endpoint measured from
+  representation byte zero;
+- `bytes(current_pos..buf_end)` consumes the supplied view-buffer tail.
+
+The first two forms require an eligible physically preceding source: a built-in fixed
+integer, or a total semantic mapping over one. Framing uses the raw physical integer
+(`u32` for `U24`) and a checked conversion to `usize`. Prefix, custom/direct, declared
+scalar, nominal, and byte-range sources are unsupported. `bytes(0)` remains invalid,
+while dynamic ranges may be empty.
 
 ```rust
 wire_repr::wire_repr! {
     pub layout Frame {
         field payload_length: BeU16;
-        field payload: region(payload_length);
+        field payload: bytes(current_pos..current_pos + payload_length);
         field checksum: BeU32;
     }
 }
 ```
 
-Dynamic builders accept the region bytes and derive its length source automatically.
-A source may be declared later in explicit-position source order, but it must physically
-precede every region it frames. Regions may be empty and remain available as exact
-borrowed bytes for a consumer-owned inner parser.
+A relative builder derives the payload length. An absolute builder derives the physical
+payload end, including preceding fixed and prefix widths, padding, alignment, and prior
+ranges. A derived source has neither builder input nor setter. Shared sources use the same
+algebra and must receive identical derived values. A source may be declared later in
+explicit-position declaration order, but it must physically precede every range it frames.
 
-### Terminal remainder
-
-A sequential layout may end with one opaque `remainder` field. It owns every byte left
-in the caller-supplied input after its preceding entries; it is not length-framed and may
-be empty. For example, an Ethernet-like envelope keeps its payload caller-bounded rather
-than guessing a transport boundary:
+`buf_end` has no source, may occur once, and must be physically last. It owns every byte
+left in the caller-supplied input after preceding entries, including an empty span:
 
 ```rust
 wire_repr::wire_repr! {
@@ -234,45 +243,34 @@ wire_repr::wire_repr! {
         field destination: bytes(6);
         field source: bytes(6);
         field ether_type: BeU16;
-        field payload: remainder;
+        field payload: bytes(current_pos..buf_end);
     }
 }
-
-let input = [
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-    0x08, 0x00, 0x45, 0x00,
-];
-let (frame, suffix) = EthernetEnvelopeView::parse_prefix(&input).expect("frame");
-
-assert_eq!(frame.payload(), &[0x45, 0x00]);
-assert!(suffix.is_empty());
 ```
 
-Because the remainder consumes all caller-bounded input, `parse_prefix` returns an empty
-suffix and `parse_exact` accepts the same input. It does not identify an external packet,
-transport, or FCS boundary.
+Because `buf_end` consumes the supplied view buffer, `parse_prefix` returns an empty suffix
+and `parse_exact` accepts the same input. It does not identify an external packet,
+transport, or FCS boundary. Conversely, `parse_prefix` for a relative or absolute range
+returns the suffix after the complete represented layout; it does not automatically stop at
+an absolute range endpoint when later physical fields exist.
 
 > [!TIP]
-> Keep unsupported or application-specific material as `bytes(N)` or `region(length)`,
-> then parse it with a small consumer-owned view. The framework should not learn domain
-> policy merely to move a slice boundary.
+> Keep unsupported variable-width-source framing—such as a WebAssembly section size encoded
+> as ULEB128—consumer-owned. The framework does not support prefix range sources.
 
 ## ✍️ Mutation and building
 
-Generated mutable views preserve the same represented extent as immutable views.
-Same-width fixed fields receive typed setters when changing them cannot invalidate
-region framing. Prefix fields, regions, remainders, and region length sources do not
-receive in-place setters; regions and remainders expose mutable slices of exactly their
-validated spans, and mutable views never expose unrestricted access to the full backing
-slice.
+Generated mutable views preserve the same represented extent as immutable views. Same-width
+fixed fields receive typed setters only when changing them cannot invalidate range framing.
+Prefix fields, byte ranges, `buf_end`, and byte-range sources do not receive in-place
+setters; ranges instead expose mutable slices of exactly their validated spans and cannot
+resize or reframe the view.
 
-Builders preflight codec plans, checked arithmetic, derived region lengths, remainder
-lengths, and output capacity before writing. A successful build returns the bounded
-mutable view together with its disjoint suffix. A failed build leaves every caller-owned
-output byte unchanged.
-Padding, alignment bytes, absolute gaps, and suffixes are therefore preserved rather
-than silently normalized.
+Builders preflight every codec plan, dynamic extent, source conversion, checked arithmetic,
+and output-capacity requirement before writing. Relative sources derive payload lengths;
+absolute sources derive physical exclusive payload ends; `buf_end` has no source. Successful
+builds return the bounded mutable view and disjoint suffix. Failures leave all caller-owned
+output unchanged. Padding, alignment bytes, absolute gaps, and suffixes are preserved.
 
 ## 🔬 What reaches the CPU
 
@@ -330,7 +328,7 @@ machinery—not fragile textual assembly snapshots tied to register allocation o
 > runtime.
 
 - Repeated sequences and arbitrary conditional fields are not supported.
-- Prefix fields and bounded regions are sequential-only.
+- Prefix fields and byte ranges are sequential-only.
 - Absolute layouts remain fixed-width and explicit-offset-only.
 - The framework does not own checksums, semantic relationships, protocol state, I/O, or
   allocation policy.

@@ -76,6 +76,21 @@ impl From<Length> for u8 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Endpoint(u16);
+
+impl From<u16> for Endpoint {
+    fn from(value: u16) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Endpoint> for u16 {
+    fn from(value: Endpoint) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Code(u8);
 
 impl From<u8> for Code {
@@ -111,8 +126,28 @@ wire_repr! {
 
     pub layout Dynamic {
         field length: U8 as crate::Length;
-        field payload: region(length);
+        field payload: bytes(current_pos..current_pos + length);
         field code: U8 as crate::Code;
+    }
+
+    pub layout AbsoluteEndpoint {
+        field tag: U8 { position: 1; }
+        field end: BeU16 as crate::Endpoint { position: 2; }
+        padding { position: 3; length: 1; }
+        align { position: 4; boundary: 4; }
+        field payload: bytes(current_pos..end) { position: 5; }
+        field tail: U8 { position: 6; }
+    }
+
+    pub layout EndpointCases {
+        field tag: U8 { position: 1; }
+        field end: U8 { position: 2; }
+        field payload: bytes(current_pos..end) { position: 3; }
+    }
+
+    pub layout SignedEndpoint {
+        field end: BeI16 { position: 1; }
+        field payload: bytes(current_pos..end) { position: 2; }
     }
 }
 
@@ -248,7 +283,7 @@ fn absolute_mappings_use_offsets_for_both_builder_forms_and_mutation() {
 }
 
 #[test]
-fn dynamic_mappings_derive_region_lengths_without_losing_boundaries() {
+fn dynamic_mappings_derive_range_lengths_without_losing_boundaries() {
     let input = [3, b'a', b'b', b'c', 7, 0xee];
     let (view, suffix) = DynamicView::parse_prefix(&input).unwrap();
     assert_eq!(suffix, &[0xee]);
@@ -280,4 +315,67 @@ fn dynamic_mappings_derive_region_lengths_without_losing_boundaries() {
     assert_eq!(built.code(), Code(7));
     assert_eq!(built.as_bytes(), &[4, b'w', b'x', b'y', b'z', 7]);
     assert_eq!(suffix, [0xa5]);
+}
+
+#[test]
+fn absolute_endpoint_mapped_raw_source_preserves_physical_endpoints_and_suffix() {
+    let input = [0xaa, 0, 6, 0xa5, b'x', b'y', 9, 0xee];
+    let (view, suffix) = AbsoluteEndpointView::parse_prefix(&input).unwrap();
+    assert_eq!(view.end(), Endpoint(6));
+    assert_eq!(view.end_raw(), 6);
+    assert_eq!(view.payload(), b"xy");
+    assert_eq!(view.tail(), 9);
+    assert_eq!(view.as_bytes(), &input[..7]);
+    assert_eq!(suffix, &[0xee]);
+    assert!(matches!(
+        AbsoluteEndpointView::parse_exact(&input),
+        Err(AbsoluteEndpointError::TrailingBytes {
+            expected: 7,
+            actual: 8
+        })
+    ));
+
+    let mut output = [0xa5; 9];
+    let (view, suffix) = AbsoluteEndpointBuilder::new()
+        .tag(0xaa)
+        .payload(b"xy")
+        .tail(9)
+        .build_into(&mut output)
+        .unwrap();
+    assert_eq!(view.as_bytes(), &[0xaa, 0, 6, 0xa5, b'x', b'y', 9]);
+    assert_eq!(view.end(), Endpoint(6));
+    assert_eq!(view.end_raw(), 6);
+    assert_eq!(suffix, &[0xa5, 0xa5]);
+}
+
+#[test]
+fn absolute_endpoint_parse_boundaries_and_signed_conversion_are_precise() {
+    let empty = EndpointCasesView::parse_exact(&[0xaa, 2]).unwrap();
+    assert!(empty.payload().is_empty());
+    assert_eq!(empty.as_bytes(), &[0xaa, 2]);
+
+    assert!(matches!(
+        EndpointCasesView::parse_prefix(&[0xaa, 1]),
+        Err(EndpointCasesError::RangeEndBeforeStart {
+            position: 3,
+            source_position: 2,
+            end: 1,
+            start: 2,
+        })
+    ));
+    assert!(matches!(
+        EndpointCasesView::parse_prefix(&[0xaa, 6]),
+        Err(EndpointCasesError::InputTooShort {
+            position: 3,
+            expected: 4,
+            available: 0,
+        })
+    ));
+    assert!(matches!(
+        SignedEndpointView::parse_prefix(&[0xff, 0xff]),
+        Err(SignedEndpointError::InvalidRangeSource {
+            position: 2,
+            source_position: 1,
+        })
+    ));
 }

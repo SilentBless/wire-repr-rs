@@ -11,10 +11,10 @@ use super::EncodePlan;
 /// is total for every exact-width byte pattern. A codec that violates these requirements
 /// is contract-invalid.
 ///
-/// When a layout builder derives a region length through
+/// When a layout builder derives a byte-range source through
 /// `Self::Value<'static>: TryFrom<usize>`, the complete conversion and codec round trip
-/// must preserve that length: converting the decoded planned representation back to
-/// `usize` must produce the original region length.
+/// must preserve that source value: converting the decoded planned representation back to
+/// `usize` must produce the original relative length or absolute endpoint.
 ///
 /// [`Self::plan`] completes all fallible encoding work before a caller mutates an output
 /// buffer. Layout parsing establishes exact-width bounds before calling [`Self::decode`].

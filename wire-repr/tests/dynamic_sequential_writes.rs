@@ -106,8 +106,8 @@ impl FixedCodec for Wrong {
 
 wire_repr! {
     pub layout DynamicWrite {
-        field length: prefix(Length) { position: 1; }
-        field body: region(length) { position: 2; }
+        field length: U8 { position: 1; }
+        field body: bytes(current_pos..current_pos + length) { position: 2; }
         padding { position: 3; length: 1; }
         align { position: 4; boundary: 4; }
         field tail: BeU16 {
@@ -124,8 +124,8 @@ wire_repr! {
         field wrong: codec(Wrong) { position: 3; }
     }
     pub layout NoEligibleSetters {
-        field length: prefix(Length) { position: 1; }
-        field body: region(length) { position: 2; }
+        field length: U8 { position: 1; }
+        field body: bytes(current_pos..current_pos + length) { position: 2; }
     }
 }
 
@@ -138,7 +138,7 @@ fn mutable_dynamic_view_preserves_boundaries_and_updates_only_eligible_spans() {
         view.as_bytes(),
         &[2, b'a', b'b', 0xee, 0x12, 0x34, 0xca, 0xfe]
     );
-    assert_eq!(view.length_encoded(), &[2]);
+    assert_eq!(view.length(), 2);
     assert_eq!(view.length(), 2);
     assert_eq!(view.body(), b"ab");
     assert_eq!(view.tail(), 0x1234);
@@ -151,21 +151,21 @@ fn mutable_dynamic_view_preserves_boundaries_and_updates_only_eligible_spans() {
     view.set_borrowed(&replacement).unwrap();
     assert_eq!(view.as_bytes(), &[2, b'a', b'b', 0xee, 0xab, 0xcd, 1, 2]);
     let immutable = view.into_view();
-    assert_eq!(immutable.length_encoded(), &[2]);
+    assert_eq!(immutable.length(), 2);
     assert_eq!(immutable.body(), b"ab");
     assert_eq!(immutable.tail(), 0xabcd);
     assert_eq!(immutable.borrowed(), &[1, 2]);
 }
 
 #[test]
-fn mutable_region_accessor_updates_only_the_validated_region() {
+fn mutable_range_accessor_updates_only_the_validated_range() {
     let mut input = [2, b'a', b'b', 0xee, 0x12, 0x34, 0xca, 0xfe, 0x99];
     {
         let (mut view, suffix) = DynamicWriteViewMut::parse_prefix_mut(&mut input).unwrap();
         assert_eq!(suffix, [0x99]);
-        let region = view.body_mut();
-        assert_eq!(region, b"ab");
-        region.copy_from_slice(b"XY");
+        let range = view.body_mut();
+        assert_eq!(range, b"ab");
+        range.copy_from_slice(b"XY");
         assert_eq!(view.length(), 2);
         assert_eq!(view.body(), b"XY");
         assert_eq!(
@@ -177,7 +177,7 @@ fn mutable_region_accessor_updates_only_the_validated_region() {
 }
 
 #[test]
-fn mutable_zero_length_region_is_an_exact_empty_span() {
+fn mutable_zero_length_range_is_an_exact_empty_span() {
     let mut input = [0, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 0xca, 0xfe, 0x99];
     {
         let (mut view, suffix) = DynamicWriteViewMut::parse_prefix_mut(&mut input).unwrap();

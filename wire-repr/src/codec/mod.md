@@ -40,6 +40,6 @@ Custom codec implementations are trusted to follow the laws documented on [`Fixe
 that can affect safe slicing or atomic output, but they do not turn a law-violating codec
 into a valid one.
 
-A codec should own only one field's wire representation. Framing between fields, bounded
-regions, derived lengths, checksums, and domain relationships remain layout or consumer
+A codec should own only one field's wire representation. Framing between fields, bounded byte
+ranges, derived endpoints, checksums, and domain relationships remain layout or consumer
 responsibilities.

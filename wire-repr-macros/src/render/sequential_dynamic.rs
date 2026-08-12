@@ -9,7 +9,7 @@ mod mutation;
 use super::{
     codec_tokens, effective_fixed_codec_tokens, mapping_raw_type_tokens, projection_getters,
 };
-use crate::ir::{Field, FieldKind, PhysicalItem, SequentialLayout};
+use crate::ir::{ByteRangeEnd, Field, FieldKind, PhysicalItem, SequentialLayout};
 
 pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let data = &layout.data;
@@ -17,12 +17,14 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let visibility = &data.visibility;
     let view_name = &data.view_name;
     let error_name = &data.error_name;
-    let boundaries = data
+    let boundaries: Vec<_> = data
         .fields
         .iter()
-        .filter(|field| field.is_prefix() || field.is_region())
-        .map(|field| &field.boundary);
+        .filter(|field| field.is_prefix() || field.is_byte_range())
+        .map(|field| &field.boundary)
+        .collect();
     let boundary_initializers = boundaries.clone();
+    let exact_boundary_initializers = boundaries.clone();
     let error_variants = data.fields.iter().filter_map(|field| {
         let codec = field.codec()?;
         if !field.is_prefix() {
@@ -140,12 +142,23 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                 #[doc = "The one-based physical position of the invalid field."]
                 position: usize,
             },
-            #[doc = "Reports a region length that cannot be represented as usize."]
-            InvalidRegionLength {
-                #[doc = "The one-based physical position of the region."]
+            #[doc = "Reports a range source value that cannot be represented as usize."]
+            InvalidRangeSource {
+                #[doc = "The one-based physical position of the range."]
                 position: usize,
-                #[doc = "The one-based physical position of its length field."]
+                #[doc = "The one-based physical position of its source field."]
                 source_position: usize,
+            },
+            #[doc = "Reports an absolute range endpoint before the range start."]
+            RangeEndBeforeStart {
+                #[doc = "The one-based physical position of the range."]
+                position: usize,
+                #[doc = "The one-based physical position of its endpoint field."]
+                source_position: usize,
+                #[doc = "The decoded exclusive absolute endpoint."]
+                end: usize,
+                #[doc = "The physical start of the range."]
+                start: usize,
             },
             #[doc = "Reports a prefix codec extent that exceeds the available input."]
             InvalidPrefixExtent {
@@ -174,9 +187,13 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                         formatter,
                         "fixed codec at position {position} has zero width",
                     ),
-                    Self::InvalidRegionLength { position, source_position } => write!(
+                    Self::InvalidRangeSource { position, source_position } => write!(
                         formatter,
-                        "region at position {position} has a length from position {source_position} that does not fit usize",
+                        "range at position {position} has a source value from position {source_position} that does not fit usize",
+                    ),
+                    Self::RangeEndBeforeStart { position, source_position, end, start } => write!(
+                        formatter,
+                        "range at position {position} has endpoint {end} from position {source_position} before its start {start}",
                     ),
                     Self::InvalidPrefixExtent { position, claimed, available } => write!(
                         formatter,
@@ -211,14 +228,17 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             #visibility fn parse_exact(
                 input: &'wire [u8],
             ) -> ::core::result::Result<Self, #error_name> {
-                let (view, suffix) = Self::parse_prefix(input)?;
-                if !suffix.is_empty() {
+                #(#zero_width)*
+                let input_bytes = input;
+                let mut remaining = input_bytes;
+                #(#validation)*
+                if !remaining.is_empty() {
                     return Err(#error_name::TrailingBytes {
-                        expected: view.bytes.len(),
-                        actual: input.len(),
+                        expected: input_bytes.len() - remaining.len(),
+                        actual: input_bytes.len(),
                     });
                 }
-                Ok(view)
+                Ok(Self { bytes: input_bytes, #(#exact_boundary_initializers,)* })
             }
 
             #[doc = "Returns the exact validated bytes represented by this view."]
@@ -280,53 +300,116 @@ fn render_field_validation(
                 remaining = suffix;
             }
         }
-        FieldKind::Remainder => quote! {
-            let _ = remaining;
-            remaining = &[];
-        },
-        FieldKind::Region { length_source, .. } => {
+        FieldKind::ByteRange {
+            end: ByteRangeEnd::BufEnd,
+        } => {
+            let boundary = &field.boundary;
+            quote! {
+                let #boundary = input_bytes.len();
+                remaining = &[];
+            }
+        }
+        FieldKind::ByteRange {
+            end:
+                ByteRangeEnd::Relative {
+                    source: length_source,
+                    ..
+                },
+        } => {
             let source = &layout.data.fields[*length_source];
             let Some(source_codec) = source.codec() else {
                 return TokenStream::new();
             };
             let source_codec = codec_tokens(source_codec);
             let source_start = parse_field_start(layout, *length_source);
-            let source_value = if source.is_prefix() {
-                let source_end = &source.boundary;
-                quote! {
-                    <#source_codec as ::wire_repr::PrefixCodec>::decode(
-                        &input_bytes[(#source_start)..#source_end],
-                    )
-                }
-            } else {
-                quote! {
-                    <#source_codec as ::wire_repr::FixedCodec>::decode(
-                        &input_bytes[(#source_start)..((#source_start) + <#source_codec as ::wire_repr::FixedCodec>::WIDTH)],
-                    )
-                }
-            };
             let source_position = source.placement;
             let boundary = &field.boundary;
             quote! {
-                let source_value = #source_value;
+                let source_value = <#source_codec as ::wire_repr::FixedCodec>::decode(
+                    &input_bytes[(#source_start)..((#source_start) + <#source_codec as ::wire_repr::FixedCodec>::WIDTH)],
+                );
                 let Ok(expected) = ::core::convert::TryInto::<usize>::try_into(source_value) else {
-                    return Err(#error_name::InvalidRegionLength {
+                    return Err(#error_name::InvalidRangeSource {
                         position: #position,
                         source_position: #source_position,
                     });
                 };
-                let region_start = input_bytes.len() - remaining.len();
+                let range_start = input_bytes.len() - remaining.len();
                 let available = remaining.len();
-                if available < expected {
+                let Some(range_end) = range_start.checked_add(expected) else {
+                    return Err(#error_name::InputTooShort {
+                        position: #position,
+                        expected,
+                        available,
+                    });
+                };
+                if range_end > input_bytes.len() {
                     return Err(#error_name::InputTooShort {
                         position: #position,
                         expected,
                         available,
                     });
                 }
-                let (_, suffix) = remaining.split_at(expected);
+                let Some((_, suffix)) = remaining.split_at_checked(expected) else {
+                    return Err(#error_name::InputTooShort {
+                        position: #position,
+                        expected,
+                        available,
+                    });
+                };
                 remaining = suffix;
-                let #boundary = region_start + expected;
+                let #boundary = range_end;
+            }
+        }
+        FieldKind::ByteRange {
+            end: ByteRangeEnd::Absolute { source, .. },
+        } => {
+            let source_index = *source;
+            let source = &layout.data.fields[source_index];
+            let Some(source_codec) = source.codec() else {
+                return TokenStream::new();
+            };
+            let source_codec = codec_tokens(source_codec);
+            let source_start = parse_field_start(layout, source_index);
+            let source_position = source.placement;
+            let boundary = &field.boundary;
+            quote! {
+                let source_value = <#source_codec as ::wire_repr::FixedCodec>::decode(
+                    &input_bytes[(#source_start)..((#source_start) + <#source_codec as ::wire_repr::FixedCodec>::WIDTH)],
+                );
+                let Ok(range_end) = ::core::convert::TryInto::<usize>::try_into(source_value) else {
+                    return Err(#error_name::InvalidRangeSource {
+                        position: #position,
+                        source_position: #source_position,
+                    });
+                };
+                let range_start = input_bytes.len() - remaining.len();
+                if range_end < range_start {
+                    return Err(#error_name::RangeEndBeforeStart {
+                        position: #position,
+                        source_position: #source_position,
+                        end: range_end,
+                        start: range_start,
+                    });
+                }
+                let expected = range_end - range_start;
+                let available = remaining.len();
+                if range_end > input_bytes.len() {
+                    return Err(#error_name::InputTooShort {
+                        position: #position,
+                        expected,
+                        available,
+                    });
+                }
+                let Some((_, suffix)) = remaining.split_at_checked(expected) else {
+                    return Err(#error_name::InputTooShort {
+                        position: #position,
+                        expected,
+                        available,
+                    });
+                };
+                remaining = suffix;
+                let #boundary = range_end;
             }
         }
     }
@@ -340,7 +423,7 @@ pub(super) fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<To
     match &field.kind {
         FieldKind::Codec(codec) if codec.is_prefix() => {
             let codec = codec_tokens(codec);
-            let encoded_getter = &field.encoded_getter;
+            let raw_getter = &field.raw_getter;
             let end = &field.boundary;
             vec![
                 quote! {
@@ -349,14 +432,14 @@ pub(super) fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<To
                     #[inline]
                     #[must_use]
                     #visibility fn #name(&self) -> <#codec as ::wire_repr::PrefixCodec>::Value<'_> {
-                        <#codec as ::wire_repr::PrefixCodec>::decode(self.#encoded_getter())
+                        <#codec as ::wire_repr::PrefixCodec>::decode(self.#raw_getter())
                     }
                 },
                 quote! {
-                    #[doc = "Returns the exact validated encoding of this prefix field."]
+                    #[doc = "Returns the exact validated raw wire bytes of this prefix field (the original wire representation)."]
                     #[inline]
                     #[must_use]
-                    #visibility fn #encoded_getter(&self) -> &'wire [u8] {
+                    #visibility fn #raw_getter(&self) -> &'wire [u8] {
                         let bytes: &'wire [u8] = self.bytes;
                         &bytes[(#start)..self.#end]
                     }
@@ -385,29 +468,27 @@ pub(super) fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<To
                 quote! { #[doc = "Returns the decoded value of this validated fixed field."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> <#codec as ::wire_repr::FixedCodec>::Value<'_> { <#codec as ::wire_repr::FixedCodec>::decode(&self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]) } },
             ]
         }
-        FieldKind::Region { .. } => {
-            let end = &field.boundary;
+        FieldKind::ByteRange { .. } => {
+            let terminal = matches!(
+                layout.physical_order.last(),
+                Some(crate::ir::PhysicalItem::Field { index, .. })
+                    if *index == field.declaration_index
+            );
+            let bytes = if terminal {
+                quote!(&bytes[(#start)..])
+            } else {
+                let end = &field.boundary;
+                quote!(&bytes[(#start)..self.#end])
+            };
             vec![quote! {
-                #[doc = "Returns the exact opaque bytes in this validated region."]
-                #(#docs)*
-                #[inline]
-                #[must_use]
+                #[doc = "Returns the exact opaque bytes in this validated byte range."]
+                #(#docs)* #[inline] #[must_use]
                 #visibility fn #name(&self) -> &'wire [u8] {
                     let bytes: &'wire [u8] = self.bytes;
-                    &bytes[(#start)..self.#end]
+                    #bytes
                 }
             }]
         }
-        FieldKind::Remainder => vec![quote! {
-            #[doc = "Returns all caller-bounded bytes remaining after the preceding layout."]
-            #(#docs)*
-            #[inline]
-            #[must_use]
-            #visibility fn #name(&self) -> &'wire [u8] {
-                let bytes: &'wire [u8] = self.bytes;
-                &bytes[(#start)..]
-            }
-        }],
     }
 }
 
@@ -420,7 +501,7 @@ fn field_start(layout: &SequentialLayout, field_index: usize) -> TokenStream {
         .find_map(|(position, item)| match item {
             PhysicalItem::Field { index, .. }
                 if layout.data.fields[*index].is_prefix()
-                    || layout.data.fields[*index].is_region() =>
+                    || layout.data.fields[*index].is_byte_range() =>
             {
                 Some((position, *index))
             }
@@ -447,7 +528,7 @@ fn parse_field_start(layout: &SequentialLayout, field_index: usize) -> TokenStre
         .find_map(|(position, item)| match item {
             PhysicalItem::Field { index, .. }
                 if layout.data.fields[*index].is_prefix()
-                    || layout.data.fields[*index].is_region() =>
+                    || layout.data.fields[*index].is_byte_range() =>
             {
                 Some((position, *index))
             }

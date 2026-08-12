@@ -5,11 +5,11 @@ wire_repr! {
         field destination: bytes(6);
         field source: bytes(6);
         field ether_type: BeU16;
-        field payload: remainder;
+        field payload: bytes(current_pos..buf_end);
     }
 
-    pub layout PositionedRemainder {
-        field payload: remainder { position: 4; }
+    pub layout PositionedTerminalRange {
+        field payload: bytes(current_pos..buf_end) { position: 4; }
         align { position: 3; boundary: 4; }
         padding { position: 2; length: 2; }
         field head: U8 { position: 1; }
@@ -20,7 +20,7 @@ const DESTINATION: &[u8; 6] = &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 const SOURCE: &[u8; 6] = &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 
 #[test]
-fn implicit_terminal_remainder_borrows_every_byte_after_the_header() {
+fn implicit_terminal_range_borrows_every_byte_after_the_header() {
     let input = [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x00, 0x45,
         0x00, 0x12,
@@ -42,7 +42,7 @@ fn implicit_terminal_remainder_borrows_every_byte_after_the_header() {
 }
 
 #[test]
-fn terminal_remainder_may_be_empty() {
+fn terminal_range_may_be_empty() {
     let input = [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x00,
     ];
@@ -53,7 +53,7 @@ fn terminal_remainder_may_be_empty() {
 }
 
 #[test]
-fn builder_distinguishes_an_empty_remainder_from_a_missing_field() {
+fn builder_distinguishes_an_empty_terminal_range_from_a_missing_field() {
     let mut output = [0xa5; 16];
     let (view, suffix) = EthernetEnvelopeBuilder::new()
         .destination(DESTINATION)
@@ -69,7 +69,7 @@ fn builder_distinguishes_an_empty_remainder_from_a_missing_field() {
 }
 
 #[test]
-fn mutable_remainder_accessor_is_confined_to_the_remainder() {
+fn mutable_terminal_range_accessor_is_confined_to_the_terminal_range() {
     let mut input = [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x00, 0x45,
         0x00, 0x12,
@@ -93,7 +93,7 @@ fn mutable_remainder_accessor_is_confined_to_the_remainder() {
 }
 
 #[test]
-fn remainder_builder_copies_atomically_and_preserves_the_output_suffix() {
+fn terminal_range_builder_copies_atomically_and_preserves_the_output_suffix() {
     let mut output = [0xa5; 20];
     let (view, suffix) = EthernetEnvelopeBuilder::new()
         .destination(DESTINATION)
@@ -116,7 +116,7 @@ fn remainder_builder_copies_atomically_and_preserves_the_output_suffix() {
 }
 
 #[test]
-fn remainder_builder_failures_leave_output_unchanged() {
+fn terminal_range_builder_failures_leave_output_unchanged() {
     let initial = [0x5a; 16];
     let mut output = initial;
     assert!(matches!(
@@ -147,11 +147,11 @@ fn remainder_builder_failures_leave_output_unchanged() {
 }
 
 #[test]
-fn physical_reordering_padding_and_alignment_preserve_the_remainder_boundary() {
+fn physical_reordering_padding_and_alignment_preserve_the_terminal_range_boundary() {
     let mut input = [0x11, 0xa1, 0xa2, 0xa3, 0x20, 0x21];
     {
         let mut view =
-            PositionedRemainderViewMut::parse_exact_mut(&mut input).expect("valid layout");
+            PositionedTerminalRangeViewMut::parse_exact_mut(&mut input).expect("valid layout");
         assert_eq!(view.head(), 0x11);
         assert_eq!(view.payload(), &[0x20, 0x21]);
         assert_eq!(view.payload().as_ptr(), view.as_bytes()[4..].as_ptr());
@@ -160,7 +160,7 @@ fn physical_reordering_padding_and_alignment_preserve_the_remainder_boundary() {
     assert_eq!(input, [0x11, 0xa1, 0xa2, 0xa3, 0x30, 0x31]);
 
     let mut output = [0xa5; 8];
-    let (view, suffix) = PositionedRemainderBuilder::new()
+    let (view, suffix) = PositionedTerminalRangeBuilder::new()
         .payload(&[0x40, 0x41])
         .head(0x12)
         .build_into(&mut output)

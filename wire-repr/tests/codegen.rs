@@ -47,12 +47,28 @@ wire_repr! {
         field mapped: BeU32 as crate::CodegenMapped;
     }
 
-    /// A caller-bounded terminal payload used only by the release-codegen gate.
-    pub layout CodegenRemainderPacket {
+    /// A relative byte range used only by the release-codegen gate.
+    pub layout CodegenRelativeRange {
+        /// The raw range length under test.
+        field length: U8;
+        /// Bytes ending at the current position plus `length`.
+        field payload: bytes(current_pos..current_pos + length);
+    }
+
+    /// An absolute byte range used only by the release-codegen gate.
+    pub layout CodegenAbsoluteRange {
+        /// The exclusive endpoint from representation byte zero.
+        field end: U8;
+        /// Bytes ending at `end`.
+        field payload: bytes(current_pos..end);
+    }
+
+    /// A terminal byte range used only by the release-codegen gate.
+    pub layout CodegenTerminalRange {
         /// The fixed header byte under test.
         field header: U8;
         /// Every caller-bounded byte after the header.
-        field payload: remainder;
+        field payload: bytes(current_pos..buf_end);
     }
 }
 
@@ -238,36 +254,176 @@ pub fn handwritten_mapped_builder(output: &mut [u8], value: u32) -> bool {
     }
 }
 
-/// Generated terminal-remainder getter probe.
+/// Generated relative range getter probe.
 #[inline(never)]
-pub fn generated_remainder_getter(bytes: &[u8]) -> Option<u8> {
-    CodegenRemainderPacketView::parse_exact(bytes)
+pub fn generated_relative_range_getter(bytes: &[u8]) -> Option<u8> {
+    CodegenRelativeRangeView::parse_exact(bytes)
         .ok()?
         .payload()
         .first()
         .copied()
 }
 
-/// Equivalent handwritten terminal-remainder getter probe.
+/// Equivalent handwritten relative range getter probe.
 #[inline(never)]
-pub fn handwritten_remainder_getter(bytes: &[u8]) -> Option<u8> {
+pub fn handwritten_relative_range_getter(bytes: &[u8]) -> Option<u8> {
+    let (&length, payload) = bytes.split_first()?;
+    if payload.len() != usize::from(length) {
+        return None;
+    }
+    payload.first().copied()
+}
+
+/// Generated relative range mutation probe.
+#[inline(never)]
+pub fn generated_relative_range_mutation(bytes: &mut [u8], value: u8) -> bool {
+    match CodegenRelativeRangeViewMut::parse_exact_mut(bytes) {
+        Ok(mut view) => match view.payload_mut().first_mut() {
+            Some(byte) => {
+                *byte = value;
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Equivalent handwritten relative range mutation probe.
+#[inline(never)]
+pub fn handwritten_relative_range_mutation(bytes: &mut [u8], value: u8) -> bool {
+    let Some((length, payload)) = bytes.split_first_mut() else {
+        return false;
+    };
+    let length = *length;
+    if payload.len() != usize::from(length) {
+        return false;
+    }
+    let Some(byte) = payload.first_mut() else {
+        return false;
+    };
+    *byte = value;
+    true
+}
+
+/// Generated absolute range getter probe.
+#[inline(never)]
+pub fn generated_absolute_range_getter(bytes: &[u8]) -> Option<u8> {
+    CodegenAbsoluteRangeView::parse_exact(bytes)
+        .ok()?
+        .payload()
+        .first()
+        .copied()
+}
+
+/// Equivalent handwritten absolute range getter probe.
+#[inline(never)]
+pub fn handwritten_absolute_range_getter(bytes: &[u8]) -> Option<u8> {
+    let (&end, remaining) = bytes.split_first()?;
+    let start = bytes.len() - remaining.len();
+    let end = usize::from(end);
+    if end < start {
+        return None;
+    }
+    let expected = end - start;
+    if remaining.len() < expected {
+        return None;
+    }
+    let (_, suffix) = remaining.split_at(expected);
+    if !suffix.is_empty() {
+        return None;
+    }
+    remaining.first().copied()
+}
+
+/// Generated absolute range mutation probe.
+#[inline(never)]
+pub fn generated_absolute_range_mutation(bytes: &mut [u8], value: u8) -> bool {
+    match CodegenAbsoluteRangeViewMut::parse_exact_mut(bytes) {
+        Ok(mut view) => match view.payload_mut().first_mut() {
+            Some(byte) => {
+                *byte = value;
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Equivalent handwritten absolute range mutation probe.
+#[inline(never)]
+pub fn handwritten_absolute_range_mutation(bytes: &mut [u8], value: u8) -> bool {
+    let Some((end, payload)) = bytes.split_first_mut() else {
+        return false;
+    };
+    let end = *end;
+    if payload.len().checked_add(1) != Some(usize::from(end)) {
+        return false;
+    }
+    let Some(byte) = payload.first_mut() else {
+        return false;
+    };
+    *byte = value;
+    true
+}
+
+/// Generated absolute range builder probe, including derived-source failures.
+#[inline(never)]
+pub fn generated_absolute_range_builder(output: &mut [u8], payload: &[u8]) -> bool {
+    CodegenAbsoluteRangeBuilder::new()
+        .payload(payload)
+        .build_into(output)
+        .is_ok()
+}
+
+/// Equivalent handwritten absolute range builder probe.
+#[inline(never)]
+pub fn handwritten_absolute_range_builder(output: &mut [u8], payload: &[u8]) -> bool {
+    let Some(end) = payload.len().checked_add(1) else {
+        return false;
+    };
+    let Ok(end) = u8::try_from(end) else {
+        return false;
+    };
+    if output.len() < usize::from(end) {
+        return false;
+    }
+    output[0] = end;
+    output[1..usize::from(end)].copy_from_slice(payload);
+    true
+}
+
+/// Generated terminal range getter probe.
+#[inline(never)]
+pub fn generated_terminal_range_getter(bytes: &[u8]) -> Option<u8> {
+    CodegenTerminalRangeView::parse_exact(bytes)
+        .ok()?
+        .payload()
+        .first()
+        .copied()
+}
+
+/// Equivalent handwritten terminal range getter probe.
+#[inline(never)]
+pub fn handwritten_terminal_range_getter(bytes: &[u8]) -> Option<u8> {
     let (_, payload) = bytes.split_first()?;
     payload.first().copied()
 }
 
-/// Generated terminal-remainder builder probe, including short-output behavior.
+/// Generated terminal range builder probe, including short-output behavior.
 #[inline(never)]
-pub fn generated_remainder_builder(output: &mut [u8], header: u8, payload: &[u8]) -> bool {
-    CodegenRemainderPacketBuilder::new()
+pub fn generated_terminal_range_builder(output: &mut [u8], header: u8, payload: &[u8]) -> bool {
+    CodegenTerminalRangeBuilder::new()
         .header(header)
         .payload(payload)
         .build_into(output)
         .is_ok()
 }
 
-/// Equivalent handwritten terminal-remainder builder probe.
+/// Equivalent handwritten terminal range builder probe.
 #[inline(never)]
-pub fn handwritten_remainder_builder(output: &mut [u8], header: u8, payload: &[u8]) -> bool {
+pub fn handwritten_terminal_range_builder(output: &mut [u8], header: u8, payload: &[u8]) -> bool {
     let Some(expected) = 1usize.checked_add(payload.len()) else {
         return false;
     };
@@ -482,30 +638,120 @@ fn generated_probes_match_handwritten_safe_rust() {
         &[0xa1, 0x10, 0x20][..],
     ] {
         assert_eq!(
-            generated_remainder_getter(input),
-            handwritten_remainder_getter(input)
+            generated_terminal_range_getter(input),
+            handwritten_terminal_range_getter(input)
         );
     }
 
     let payload = [0x10, 0x20, 0x30];
-    let mut generated_remainder_output = [0xa5; 6];
-    let mut handwritten_remainder_output = [0xa5; 6];
+    let mut generated_terminal_range_output = [0xa5; 6];
+    let mut handwritten_terminal_range_output = [0xa5; 6];
     assert_eq!(
-        generated_remainder_builder(&mut generated_remainder_output, 0xa1, &payload),
-        handwritten_remainder_builder(&mut handwritten_remainder_output, 0xa1, &payload)
+        generated_terminal_range_builder(&mut generated_terminal_range_output, 0xa1, &payload),
+        handwritten_terminal_range_builder(&mut handwritten_terminal_range_output, 0xa1, &payload)
     );
-    assert_eq!(generated_remainder_output, handwritten_remainder_output);
     assert_eq!(
-        generated_remainder_output,
+        generated_terminal_range_output,
+        handwritten_terminal_range_output
+    );
+    assert_eq!(
+        generated_terminal_range_output,
         [0xa1, 0x10, 0x20, 0x30, 0xa5, 0xa5]
     );
 
-    let mut generated_remainder_short = [0xa5; 3];
-    let mut handwritten_remainder_short = [0xa5; 3];
+    let mut generated_terminal_range_short = [0xa5; 3];
+    let mut handwritten_terminal_range_short = [0xa5; 3];
     assert_eq!(
-        generated_remainder_builder(&mut generated_remainder_short, 0xa1, &payload),
-        handwritten_remainder_builder(&mut handwritten_remainder_short, 0xa1, &payload)
+        generated_terminal_range_builder(&mut generated_terminal_range_short, 0xa1, &payload),
+        handwritten_terminal_range_builder(&mut handwritten_terminal_range_short, 0xa1, &payload)
     );
-    assert_eq!(generated_remainder_short, handwritten_remainder_short);
-    assert_eq!(generated_remainder_short, [0xa5; 3]);
+    assert_eq!(
+        generated_terminal_range_short,
+        handwritten_terminal_range_short
+    );
+    assert_eq!(generated_terminal_range_short, [0xa5; 3]);
+}
+
+#[test]
+fn generated_byte_range_probes_match_handwritten_safe_rust() {
+    let relative = [2, 0x10, 0x20];
+    assert_eq!(
+        black_box(generated_relative_range_getter(black_box(&relative))),
+        black_box(handwritten_relative_range_getter(black_box(&relative)))
+    );
+    for invalid in [&[][..], &[0][..], &[2, 0x10][..], &[1, 0x10, 0x20][..]] {
+        assert_eq!(
+            generated_relative_range_getter(invalid),
+            handwritten_relative_range_getter(invalid)
+        );
+    }
+    let mut generated_relative = relative;
+    let mut handwritten_relative = relative;
+    assert_eq!(
+        generated_relative_range_mutation(&mut generated_relative, 0xab),
+        handwritten_relative_range_mutation(&mut handwritten_relative, 0xab)
+    );
+    assert_eq!(generated_relative, handwritten_relative);
+    let mut generated_relative_invalid = [2, 0x10];
+    let mut handwritten_relative_invalid = generated_relative_invalid;
+    assert_eq!(
+        generated_relative_range_mutation(&mut generated_relative_invalid, 0xab),
+        handwritten_relative_range_mutation(&mut handwritten_relative_invalid, 0xab)
+    );
+    assert_eq!(generated_relative_invalid, handwritten_relative_invalid);
+
+    let absolute = [3, 0x10, 0x20];
+    assert_eq!(
+        black_box(generated_absolute_range_getter(black_box(&absolute))),
+        black_box(handwritten_absolute_range_getter(black_box(&absolute)))
+    );
+    for invalid in [&[][..], &[0][..], &[3, 0x10][..], &[2, 0x10, 0x20][..]] {
+        assert_eq!(
+            generated_absolute_range_getter(invalid),
+            handwritten_absolute_range_getter(invalid)
+        );
+    }
+    let mut generated_absolute = absolute;
+    let mut handwritten_absolute = absolute;
+    assert_eq!(
+        generated_absolute_range_mutation(&mut generated_absolute, 0xab),
+        handwritten_absolute_range_mutation(&mut handwritten_absolute, 0xab)
+    );
+    assert_eq!(generated_absolute, handwritten_absolute);
+    let mut generated_absolute_invalid = [3, 0x10];
+    let mut handwritten_absolute_invalid = generated_absolute_invalid;
+    assert_eq!(
+        generated_absolute_range_mutation(&mut generated_absolute_invalid, 0xab),
+        handwritten_absolute_range_mutation(&mut handwritten_absolute_invalid, 0xab)
+    );
+    assert_eq!(generated_absolute_invalid, handwritten_absolute_invalid);
+
+    let payload = [0x10, 0x20];
+    let mut generated_output = [0xa5; 4];
+    let mut handwritten_output = [0xa5; 4];
+    assert_eq!(
+        generated_absolute_range_builder(&mut generated_output, &payload),
+        handwritten_absolute_range_builder(&mut handwritten_output, &payload)
+    );
+    assert_eq!(generated_output, handwritten_output);
+    assert_eq!(generated_output, [3, 0x10, 0x20, 0xa5]);
+
+    let mut generated_short = [0xa5; 2];
+    let mut handwritten_short = [0xa5; 2];
+    assert_eq!(
+        generated_absolute_range_builder(&mut generated_short, &payload),
+        handwritten_absolute_range_builder(&mut handwritten_short, &payload)
+    );
+    assert_eq!(generated_short, handwritten_short);
+    assert_eq!(generated_short, [0xa5; 2]);
+
+    let oversized = [0; 255];
+    let mut generated_narrow = [0xa5; 256];
+    let mut handwritten_narrow = [0xa5; 256];
+    assert_eq!(
+        generated_absolute_range_builder(&mut generated_narrow, &oversized),
+        handwritten_absolute_range_builder(&mut handwritten_narrow, &oversized)
+    );
+    assert_eq!(generated_narrow, handwritten_narrow);
+    assert_eq!(generated_narrow, [0xa5; 256]);
 }

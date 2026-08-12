@@ -50,7 +50,7 @@ wire_repr! {
         /// The opaque four-byte PNG chunk type.
         field chunk_type: bytes(4) { position: 2; }
         /// The opaque chunk payload.
-        field data: region(data_length) { position: 3; }
+        field data: bytes(current_pos..current_pos + data_length) { position: 3; }
         /// The stored CRC-32/ISO-HDLC value.
         field crc: BeU32 { position: 4; }
     }

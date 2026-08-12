@@ -64,7 +64,7 @@ accepted by a custom [`PrefixCodec`]. Parsing performs structural validation; it
 not reconstruct bytes from decoded values or apply consumer policy.
 
 Fixed layouts expose `View::WIDTH`. Dynamic sequential layouts discover their represented
-extent while validating prefix fields, bounded regions, padding, and alignment.
+extent while validating prefix fields, byte ranges, padding, and alignment.
 
 ## Generated API
 
@@ -80,7 +80,8 @@ For `layout Packet`, [`wire_repr!`] generates a family centered on the declarati
 | `PacketWriteError` | Missing inputs, planning, extent, and capacity errors |
 
 A field getter has the declared field name. Prefix fields also expose
-`<field>_encoded()` so callers can inspect their exact accepted encoding. Bit projections
+`<field>_raw()` so callers can inspect the exact validated raw wire bytes (the original
+wire representation). Bit projections
 produce named `bool` or unsigned scalar getters without becoming independent byte owners.
 
 Mutable views provide `parse_prefix_mut`, `parse_exact_mut`, `as_view`, and `into_view`.
@@ -89,10 +90,12 @@ framing. Mutable views deliberately do not expose unrestricted access to their b
 slice.
 
 Builders use `new`, one fluent method per caller-supplied field, and `build_into`.
-Length fields used by `region(source)` are derived from region inputs rather than supplied
-separately. Builders finish all fallible planning and capacity checks before the first
-write, so an error leaves the complete destination unchanged. Success returns the bounded
-mutable view and its disjoint mutable suffix.
+They preflight all plans, extents, conversions, arithmetic, and capacity before writing, so
+an error leaves the complete destination unchanged. Relative range sources derive payload
+lengths; absolute sources derive physical exclusive payload ends, including prior fixed and
+prefix widths, padding, alignment, and ranges. Derived sources have no builder input or
+setter; shared sources use identical algebra and values. `buf_end` has no source. Success
+returns the bounded mutable view and its disjoint mutable suffix.
 
 Generated error variants retain field or physical-position context. Their exact surface
 is visible on each generated layout because it depends on the declared codecs and layout
@@ -107,7 +110,7 @@ Sequential layouts normally infer physical placement from declaration order:
 wire_repr! {
     pub layout Frame {
         field payload_length: BeU16;
-        field payload: region(payload_length);
+        field payload: bytes(current_pos..current_pos + payload_length);
         field checksum: BeU32;
     }
 }
@@ -130,7 +133,7 @@ wire_repr! {
 ```
 
 Absolute layouts are fixed-width. They do not infer offsets and do not support prefix
-fields, regions, padding, or alignment.
+fields, byte ranges, padding, or alignment.
 
 See [`wire_repr!`] for the declaration grammar and generated-name reference.
 
@@ -145,9 +148,21 @@ prefix fields use `prefix(path)` and implement [`PrefixCodec`]. Both contracts s
 fallible planning from infallible emission through [`EncodePlan`]. This separation is what
 lets generated setters and builders preserve whole-destination atomicity.
 
-`region(source)` borrows an opaque span whose length is decoded from an earlier physical
-field. Consumers can pass that span to a protocol-specific parser without teaching the
-layout compiler domain semantics.
+Sequential byte ranges borrow opaque spans in three forms:
+
+- `bytes(current_pos..current_pos + source)` uses `source` as a relative length;
+- `bytes(current_pos..source)` uses `source` as an exclusive absolute endpoint from
+  representation byte zero;
+- `bytes(current_pos..buf_end)` consumes the supplied view-buffer tail.
+
+The first two require a physically preceding built-in fixed integer or semantic mapping over
+one. Geometry uses the raw physical integer and checked `usize` conversion; prefix,
+custom/direct, declared scalar, nominal, and byte-range sources are unsupported. `bytes(0)`
+is invalid, although dynamic ranges may be empty. An absolute range does not itself end
+`parse_prefix`: the suffix follows the complete represented layout, including later physical
+fields. `buf_end` has no source, is physically terminal, and therefore produces an empty
+suffix. Variable-width-source framing such as ULEB128 section lengths remains
+consumer-owned.
 
 The [`codec`] module documents the implementor laws and extension boundary.
 
@@ -160,9 +175,9 @@ encoding, range errors, and atomicity; the mapped type is the nominal consumer-f
 
 Mapped fields generate `field()` for the semantic value and `field_raw()` for the raw codec
 value. Eligible mutable fields also generate semantic and `_raw` setters, and builders
-generate both fluent forms for the same input slot: the last call wins. A region-length
+generate both fluent forms for the same input slot: the last call wins. A byte-range
 source exposes both getters but has neither setter nor builder input because the builder
-derives its raw value from the region.
+derives its raw value from the byte range.
 
 Mappings are deliberately total: getters use `Semantic: From<Raw>` and setters/builders
 use `Raw: From<Semantic>`. Raw types are exact codec types, including `u32` for `U24` and
@@ -174,7 +189,7 @@ unmapped `bytes(N)` continues to return borrowed [`Bytes`] (`&[u8]`).
 Only built-in fixed integers and `bytes(N)` are eligible. Declared `scalar Name: Codec;`
 instead declares a reusable codec-owning nominal wrapper; it is not an `as Type` mapping,
 and mappings do not apply to declared scalar codecs, custom/direct codecs, prefix fields,
-or regions. A mapping compiles to direct `From` calls around the existing codec operations:
+or byte ranges. A mapping compiles to direct `From` calls around the existing codec operations:
 no runtime metadata, allocation, or dynamic dispatch is introduced.
 
 ## Deliberate limits

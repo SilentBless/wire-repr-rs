@@ -382,7 +382,7 @@ fn mixed_layout_preserves_exact_prefix_encoding_suffix_and_declaration_api() {
     assert_eq!(view.as_bytes(), &[7, 0, 41, 0x12, 0x34]);
     assert_eq!(suffix, &[0xaa]);
     assert_eq!(view.tag(), 7);
-    assert_eq!(view.value_encoded(), &[0, 41]);
+    assert_eq!(view.value_raw(), &[0, 41]);
     assert_eq!(MIXED_VALIDATIONS.load(Ordering::Relaxed), 1);
     assert_eq!(view.value(), 41);
     assert_eq!(MIXED_DECODE_LENGTH.load(Ordering::Relaxed), 2);
@@ -391,7 +391,7 @@ fn mixed_layout_preserves_exact_prefix_encoding_suffix_and_declaration_api() {
 
     let canonical =
         MixedView::parse_exact(&[7, 42, 0x12, 0x34]).expect("canonical prefix layout should parse");
-    assert_eq!(canonical.value_encoded(), &[42]);
+    assert_eq!(canonical.value_raw(), &[42]);
     assert_eq!(canonical.value(), 41);
 }
 
@@ -411,24 +411,24 @@ fn borrowing_and_multiple_prefix_boundaries_are_exact() {
     let borrowed_input = [b'a', b'b', 0, 9];
     let borrowed =
         BorrowedView::parse_exact(&borrowed_input).expect("borrowing prefix layout should parse");
-    assert_eq!(borrowed.body_encoded(), &[b'a', b'b', 0]);
+    assert_eq!(borrowed.body_raw(), &[b'a', b'b', 0]);
     assert_eq!(borrowed.body(), b"ab");
     assert_eq!(borrowed.body().as_ptr(), borrowed_input.as_ptr());
     assert_eq!(borrowed.tail(), 9);
 
     let multiple =
         MultipleView::parse_exact(&[42, 7, 0, 8]).expect("multiple prefix layout should parse");
-    assert_eq!(multiple.first_encoded(), &[42]);
+    assert_eq!(multiple.first_raw(), &[42]);
     assert_eq!(multiple.first(), 41);
     assert_eq!(multiple.middle(), 7);
-    assert_eq!(multiple.second_encoded(), &[0, 8]);
+    assert_eq!(multiple.second_raw(), &[0, 8]);
     assert_eq!(multiple.second(), 8);
 
     let adjacent =
         AdjacentView::parse_exact(&[42, 0, 8]).expect("adjacent prefix fields should parse");
-    assert_eq!(adjacent.first_encoded(), &[42]);
+    assert_eq!(adjacent.first_raw(), &[42]);
     assert_eq!(adjacent.first(), 41);
-    assert_eq!(adjacent.second_encoded(), &[0, 8]);
+    assert_eq!(adjacent.second_raw(), &[0, 8]);
     assert_eq!(adjacent.second(), 8);
 }
 

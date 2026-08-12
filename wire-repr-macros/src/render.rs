@@ -112,9 +112,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renders_checked_absolute_byte_range_validation() {
+        let parsed = syn::parse_str(
+            "pub layout AbsoluteRange { field end: BeI16; padding { length: 1; } field payload: bytes(current_pos..end); }",
+        )
+        .expect("absolute byte range syntax is valid");
+        let rendered =
+            render(crate::ir::normalize(parsed).expect("absolute byte range normalizes"))
+                .to_string();
+
+        assert!(rendered.contains("RangeEndBeforeStart"), "{rendered}");
+        assert!(rendered.contains("InvalidRangeSource"), "{rendered}");
+        assert!(rendered.contains("split_at_checked"), "{rendered}");
+        assert!(rendered.contains("split_at_mut_checked"), "{rendered}");
+        assert!(!rendered.contains("compile_error"), "{rendered}");
+    }
+
+    #[test]
     fn renders_inline_build_into_for_every_builder_layout() {
         let parsed = syn::parse_str(
-            "pub layout Sequential { field value: U8; } pub absolute layout Absolute { field value: U8 { offset: 0; } } pub layout Dynamic { field length: U8; field payload: region(length); }",
+            "pub layout Sequential { field value: U8; } pub absolute layout Absolute { field value: U8 { offset: 0; } } pub layout Dynamic { field length: U8; field payload: bytes(current_pos..current_pos + length); }",
         )
         .expect("test layout syntax is valid");
         let rendered =

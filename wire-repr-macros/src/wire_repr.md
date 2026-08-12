@@ -23,7 +23,7 @@ wire_repr! {
         padding { length: 2; }
         align { boundary: 4; }
         field payload_length: BeU16;
-        field payload: region(payload_length);
+        field payload: bytes(current_pos..current_pos + payload_length);
     }
 }
 ```
@@ -57,7 +57,7 @@ wire_repr! {
 ```
 
 Gaps are represented and preserved. Overlapping field extents are rejected. Absolute
-layouts are fixed-width and do not support prefix fields, regions, padding, or alignment.
+layouts are fixed-width and do not support prefix fields, byte ranges, padding, or alignment.
 
 # Field forms
 
@@ -71,26 +71,38 @@ field name: codec(path::ToFixedCodec);
 field name: bytes(N);
 field name: bytes(N) as path::Semantic;
 field name: prefix(path::ToPrefixCodec);
-field name: region(length_field);
+field name: bytes(current_pos..current_pos + source);
+field name: bytes(current_pos..source);
+field name: bytes(current_pos..buf_end);
 ```
 
 The built-in integer names are `U8`, `I8`, the `Be`/`Le` signed and unsigned
-16/32/64/128-bit codecs, and the unsigned `BeU24`/`LeU24` codecs. Custom `codec(path)`
-fields implement `wire_repr::FixedCodec`; `prefix(path)` fields implement
-`wire_repr::PrefixCodec`.
+16/32/64/128-bit codecs, and unsigned `BeU24`/`LeU24`. Custom `codec(path)` fields
+implement `wire_repr::FixedCodec`; `prefix(path)` fields implement `wire_repr::PrefixCodec`.
 
-`bytes(N)` is a fixed-width opaque borrowed span. `region(source)` is a dynamic opaque
-borrowed span framed by an earlier physical fixed or prefix field. A builder derives the
-source value from the region length, so the source does not receive a fluent input method.
-If multiple regions share one source, their lengths must agree. A mutable view exposes each
-region as `field_mut()`, which can change bytes but cannot resize or reframe the region.
+`bytes(N)` is a fixed-width opaque borrowed span. Byte ranges are dynamic opaque borrowed
+spans: `current_pos + source` is a relative length, `source` is an exclusive absolute
+endpoint from representation byte zero, and `buf_end` consumes the supplied view-buffer
+tail. The first two require a physically preceding built-in fixed integer or semantic mapping
+over one. Geometry uses the raw physical integer and checked conversion to `usize`; prefix,
+custom/direct, declared scalar, nominal, and byte-range sources are unsupported. `bytes(0)`
+is invalid, but dynamic ranges may be empty.
+
+Builders derive relative lengths or absolute physical endpoints; absolute derivation includes
+preceding fixed/prefix widths, padding, alignment, and ranges. Derived sources have no
+fluent input or setter. Shared sources require identical derived values under the same
+algebra. `buf_end` has no source, may occur once, and must be physically last. Its
+`parse_prefix` suffix is empty; other `parse_prefix` suffixes follow the complete represented
+layout, including physical entries after an absolute range. A mutable view exposes each range
+as `field_mut()`, which may change bytes but cannot resize or reframe the range. Unsupported
+variable-width-source framing, such as ULEB128 section lengths, remains consumer-owned.
 
 # Total semantic mappings
 
 `as TypePath` maps one eligible physical field to a nominal consumer type. It appears
 immediately after the built-in fixed integer codec or `bytes(N)` and before a field body
 containing `position`, `offset`, or `projections`. It is not permitted on declared scalar
-codecs, `codec(path)` fields, prefix fields, or regions.
+codecs, `codec(path)` fields, prefix fields, or byte ranges.
 
 The physical codec remains the wire owner. Mapping is total and direct: the semantic getter
 uses `Semantic: From<Raw>`; semantic setters and builders use `Raw: From<Semantic>`. Raw is
@@ -155,18 +167,19 @@ For a declaration named `Packet`, the macro generates:
 
 - `PacketView<'wire>` with `parse_prefix`, `parse_exact`, `as_bytes`, and field getters;
 - `PacketViewMut<'wire>` with `parse_prefix_mut`, `parse_exact_mut`, `as_bytes`, `as_view`,
-  `into_view`, eligible fixed-field setters, and mutable bounded-region accessors;
+  `into_view`, eligible fixed-field setters, and mutable byte-range accessors;
 - `PacketBuilder<'value>` with `new`, fluent field inputs, and `build_into`;
 - `PacketError`, `PacketMutationError`, and `PacketWriteError`.
 
 Fixed layouts also expose `PacketView::WIDTH`. Prefix fields generate both `field()` for the
-decoded value and `field_encoded()` for the exact accepted wire encoding. A bit projection
+decoded value and `field_raw()` for the exact validated raw wire bytes (the original wire
+representation). A bit projection
 generates a getter with the projection name. A mapped field generates `field()` for its
 semantic type and `field_raw()` for its raw codec type. If mutable, it generates both
 `set_field(semantic)` and `set_field_raw(raw)`. Its builder generates `field(semantic)` and
-`field_raw(raw)`; both set the same slot, so the last call wins. A mapped region-length
+`field_raw(raw)`; both set the same slot, so the last call wins. A mapped byte-range
 source has both getters but no setter or builder input because its raw value is derived from
-the region.
+the byte range.
 
 A successful prefix parser or builder returns the bounded representation and a disjoint
 suffix. Exact parsing rejects trailing bytes. Setters and builders plan every fallible
@@ -179,7 +192,7 @@ are preserved on their generated API owners.
 
 The macro rejects malformed or ambiguous layouts before generated code is type-checked,
 including zero, duplicate, or gapped explicit positions; mixed placement modes; invalid
-absolute offsets; overlapping projections; generated-name collisions; invalid region
+absolute offsets; overlapping projections; generated-name collisions; invalid byte range
 sources; unsupported field forms; and arithmetic overflow in statically known extents.
 
 Repeated sequences, tagged unions, arbitrary conditional fields, and inferred absolute

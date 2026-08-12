@@ -38,7 +38,7 @@ read and `Raw: From<Semantic>` on write. The physical codec retains byte ownersh
 planning, range errors, and whole-destination atomicity; mappings add no fallible layer.
 Mapped byte values are owned arrays or wrappers, while unmapped `bytes(N)` remains borrowed.
 `scalar Name: Codec;` instead declares a reusable codec-owning nominal wrapper. Mappings do
-not apply to declared scalar, custom/direct, prefix, or region fields.
+not apply to declared scalar, custom/direct, prefix, or byte range fields.
 
 ## Layout macro boundary
 
@@ -49,32 +49,44 @@ mapping eligibility and the exact `MappingRaw` type; renderers consume that norm
 rather than rediscovering codec categories. The hidden `OwnedBytes` helper exists only as
 macro support for mapped fixed bytes and is not a normal user API.
 Sequential layouts have two exclusive modes. If no physical entry supplies
-`position`, normalization infers contiguous one-based physical positions from
-physical source declaration order across fields and anonymous padding/alignment
-entries. If any entry supplies `position`, every physical entry must do so and
-the supplied positions must be contiguous; explicit mode may reorder physical
-placement independently of declaration order. In both modes normalization lowers
-to concrete contiguous one-based physical order before rendering, while
-preserving declaration order as the owner of generated API and documentation.
-Padding consumes a fixed nonzero length. Alignment is relative to the
-represented layout start and consumes the minimum bytes required by a nonzero
-boundary. Spacing bytes remain opaque exact input; named reserved spans use
-`bytes(N)` and remain consumer-interpreted. Sequential layouts may mix these
-entries with fixed codecs, custom prefix codecs, named opaque regions, and one
-terminal opaque remainder. A region is framed by the checked `usize` conversion of a
-physically preceding non-region field's decoded value. The source is decoded from its
-exact accepted wire span before region capacity is checked; this framing use is the only
-parse-time decode exception for prefix fields. Regions may be empty and expose only
-their exact borrowed bytes. A remainder is sequential-only, may occur at most once, and
-must be physically last. It owns every byte after prior physical entries within the
-caller-supplied input and exposes that exact opaque borrowed span, including an empty
-span. It differs from `region(length)`: it has no length source and does not establish,
-claim, or infer an external packet, FCS, transport, or other framing boundary.
-Dynamic sequential views store their represented bytes and one exclusive end
-boundary per prefix field or bounded region; they never cache semantic values or scan
-runtime metadata. A terminal remainder ends at the represented byte-slice boundary, so
-it needs no duplicate stored boundary. Exact prefix encodings remain directly available
-even when they are legal noncanonical forms.
+`position`, normalization infers contiguous one-based physical positions from physical
+source declaration order across fields and anonymous padding/alignment entries. If any
+entry supplies `position`, every physical entry must do so and supplied positions must be
+contiguous; explicit mode may reorder physical placement independently of declaration order.
+In both modes normalization lowers to concrete contiguous one-based physical order before
+rendering, while declaration order owns generated API and documentation.
+
+Padding consumes a fixed nonzero length. Alignment is relative to the represented layout
+start and consumes the minimum bytes required by a nonzero boundary. Spacing bytes remain
+opaque exact input; named reserved spans use `bytes(N)` and remain consumer-interpreted.
+Sequential layouts may mix these entries with fixed codecs, custom prefix codecs, and byte
+ranges. The complete byte-range algebra is:
+
+- `bytes(current_pos..current_pos + source)`: relative payload length;
+- `bytes(current_pos..source)`: exclusive absolute payload endpoint from representation
+  byte zero;
+- `bytes(current_pos..buf_end)`: supplied view-buffer tail.
+
+The first two forms require an eligible physically preceding source: a built-in fixed
+integer or semantic mapping over one. Framing uses its raw physical integer and checked
+`usize` conversion; mappings do not change geometry. Prefix, custom/direct, declared
+scalar, nominal, and byte-range sources are unsupported. `bytes(0)` is invalid; dynamic
+ranges may be empty. A source may appear later in declaration order under explicit
+placement, but must physically precede every framed range.
+
+A `buf_end` range has no source, occurs at most once, and must be physically last. It owns
+every byte after prior physical entries within the supplied input, including an empty span;
+it establishes no external packet, FCS, transport, or other boundary. `parse_prefix` returns
+the suffix after the complete represented layout—not automatically after an absolute range
+endpoint if later physical fields exist. Because `buf_end` is physically terminal, its suffix
+is empty. Variable-width-source framing (for example, a ULEB128 WebAssembly section size)
+remains consumer-owned.
+
+Dynamic sequential views store represented bytes and exact exclusive endpoints for every
+prefix field and byte range, including `buf_end`; they never cache semantic values or scan
+runtime metadata. Exact prefix encodings remain directly available even when legal
+noncanonical forms.
+
 Every absolute-layout field requires an explicit zero-based offset. Absolute
 layouts check offsets in ascending offset order; their width is the maximum
 field extent, gaps remain opaque represented bytes, and runtime codec-width
@@ -92,32 +104,33 @@ and custom codecs have no projection contract; there is no runtime bit-storage
 trait, metadata, or validation layer. Mappings do not alter physical storage: mapped integer
 projections operate on the decoded raw integer. Mapped fields expose semantic and raw
 getters; eligible mutable fields expose semantic and raw setters. Builder semantic and raw
-inputs share one slot and the last input wins. A mapped region-length source exposes both
+inputs share one slot and the last input wins. A mapped byte-range source exposes both
 getters but no setter or builder input; the builder derives its raw source value from the
-region.
+byte range.
 
 Generated mutable views expose immutable getters and only those typed
 same-width setters that cannot change framing. They expose no unrestricted
 mutable-byte access. Dynamic sequential views therefore omit setters for prefix
-fields, regions, remainders, and every fixed field used as a region length source; each
-region or remainder instead exposes a mutable slice of exactly its validated span, which
+fields, byte ranges, `buf_end` ranges, and every fixed field used as a byte range source; each
+byte range or `buf_end` range instead exposes a mutable slice of exactly its validated span, which
 cannot resize or reframe it. View conversion preserves dynamic boundaries without
 reparsing.
 
 Generated builders retain values and encoding plans through complete preflight,
-then commit physical fields in physical order. Missing values and codec planning
-follow declaration order; width and extent legality, shared-source agreement,
-checked arithmetic, and output capacity all precede mutation. Dynamic builders
-derive region length-source values from caller-provided region slices and accept
-caller-provided remainder slices directly; a remainder length participates in checked
-aggregate extent before its bytes are copied. Shared sources require equal region lengths,
-and source conversion and planning happen once. Padding, alignment bytes,
-absolute-layout gaps, and bytes after the represented prefix remain unchanged.
+then commit physical fields in physical order. Missing values and codec planning follow
+declaration order; all plans, extents, source conversions, checked arithmetic, shared-source
+agreement, and output capacity precede mutation. Relative sources derive payload lengths.
+Absolute sources derive physical exclusive payload ends, including preceding fixed and prefix
+widths, padding, alignment, and ranges. `buf_end` has no source and its supplied slice
+participates in aggregate extent. Derived sources have no builder input or setter; shared
+sources use identical algebra and values, and conversion/planning occur once. Padding,
+alignment bytes, absolute-layout gaps, and bytes after the represented prefix remain
+unchanged.
 
 The macro emits no runtime descriptors, schema walkers, allocation, dynamic
 dispatch, generated source files, or build scripts. Independently owned physical
-bitfields, nested region schemas, and repeated sequences are excluded. Prefix,
-region, padding, and alignment composition is sequential-only; absolute layouts
+bitfields, nested byte range schemas, and repeated sequences are excluded. Prefix,
+byte range, padding, and alignment composition is sequential-only; absolute layouts
 remain fixed-width.
 
 ## Constraints

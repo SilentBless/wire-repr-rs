@@ -31,58 +31,6 @@ impl PrefixCodec for TwoBytePrefix {
     }
 }
 
-struct LengthPrefix;
-
-impl PrefixCodec for LengthPrefix {
-    type Value<'wire>
-        = u8
-    where
-        Self: 'wire;
-    type DecodeError = Infallible;
-    type EncodeError = Infallible;
-    type Plan<'value>
-        = [u8; 1]
-    where
-        Self: 'value;
-
-    fn validate_prefix(_: &[u8]) -> Result<PrefixExtent, Self::DecodeError> {
-        Ok(PrefixExtent::new(NonZeroUsize::MIN))
-    }
-
-    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
-        bytes[0] - 0x80
-    }
-
-    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
-        Ok([value + 0x80])
-    }
-}
-
-static SHARED_SOURCE_PLANS: AtomicUsize = AtomicUsize::new(0);
-
-struct SharedLength;
-
-impl FixedCodec for SharedLength {
-    type Value<'wire>
-        = u8
-    where
-        Self: 'wire;
-    type EncodeError = Infallible;
-    type Plan<'value>
-        = [u8; 1]
-    where
-        Self: 'value;
-    const WIDTH: usize = 1;
-
-    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
-        bytes[0]
-    }
-    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
-        SHARED_SOURCE_PLANS.fetch_add(1, Ordering::Relaxed);
-        Ok([value])
-    }
-}
-
 static MISSING_PLANS: AtomicUsize = AtomicUsize::new(0);
 
 struct MissingCount;
@@ -133,31 +81,6 @@ impl FixedCodec for ZeroWidth {
     }
 }
 
-static REVERSE_SOURCE_PLANS: AtomicUsize = AtomicUsize::new(0);
-
-struct ReverseLength;
-
-impl FixedCodec for ReverseLength {
-    type Value<'wire>
-        = u8
-    where
-        Self: 'wire;
-    type EncodeError = Infallible;
-    type Plan<'value>
-        = [u8; 1]
-    where
-        Self: 'value;
-    const WIDTH: usize = 1;
-
-    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
-        bytes[0]
-    }
-    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
-        REVERSE_SOURCE_PLANS.fetch_add(1, Ordering::Relaxed);
-        Ok([value])
-    }
-}
-
 #[derive(Debug, Eq, PartialEq)]
 enum PlanError {
     Rejected,
@@ -179,44 +102,6 @@ impl FixedCodec for Failing {
 
     fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
         bytes[0]
-    }
-    fn plan<'value>(_: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
-        Err(PlanError::Rejected)
-    }
-}
-
-struct FailingLength(u8);
-
-impl TryFrom<usize> for FailingLength {
-    type Error = ();
-
-    fn try_from(value: usize) -> Result<Self, Self::Error> {
-        u8::try_from(value).map(Self).map_err(|_| ())
-    }
-}
-
-impl From<FailingLength> for usize {
-    fn from(value: FailingLength) -> Self {
-        usize::from(value.0)
-    }
-}
-
-struct SourceFailing;
-
-impl FixedCodec for SourceFailing {
-    type Value<'wire>
-        = FailingLength
-    where
-        Self: 'wire;
-    type EncodeError = PlanError;
-    type Plan<'value>
-        = [u8; 1]
-    where
-        Self: 'value;
-    const WIDTH: usize = 1;
-
-    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
-        FailingLength(bytes[0])
     }
     fn plan<'value>(_: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
         Err(PlanError::Rejected)
@@ -409,50 +294,50 @@ wire_repr! {
     pub layout Stem {
         /// A trailing fixed word.
         field tail: BeU16 { position: 7; }
-        /// The auto-derived region length.
+        /// The auto-derived range length.
         field length: U8 { position: 1; }
         /// An ordinary fixed prefix field.
         field tag: U8 { position: 2; }
         /// A planned variable-width prefix.
         field prefix: prefix(TwoBytePrefix) { position: 3; }
-        /// Opaque region bytes.
-        field body: region(length) { position: 4; }
+        /// Opaque range bytes.
+        field body: bytes(current_pos..current_pos + length) { position: 4; }
         padding { position: 5; length: 1; }
         align { position: 6; boundary: 4; }
     }
 
-    /// A layout with a prefix length source.
-    pub layout PrefixLength {
-        /// The auto-derived prefix length.
-        field length: prefix(LengthPrefix) { position: 1; }
-        /// The possibly empty region.
-        field body: region(length) { position: 2; }
+    /// A layout with a fixed length source.
+    pub layout EmptyRange {
+        /// The auto-derived fixed length.
+        field length: U8 { position: 1; }
+        /// The possibly empty range.
+        field body: bytes(current_pos..current_pos + length) { position: 2; }
     }
 
-    /// Two regions sharing one source.
-    pub layout SharedRegions {
+    /// Two ranges sharing one source.
+    pub layout SharedRanges {
         /// The auto-derived shared length.
-        field length: codec(SharedLength) { position: 1; }
-        /// The first region.
-        field first: region(length) { position: 2; }
-        /// The second region.
-        field second: region(length) { position: 3; }
+        field length: U8 { position: 1; }
+        /// The first range.
+        field first: bytes(current_pos..current_pos + length) { position: 2; }
+        /// The second range.
+        field second: bytes(current_pos..current_pos + length) { position: 3; }
     }
 
-    /// Shared-source conflicts follow region declaration order.
+    /// Shared-source conflicts follow range declaration order.
     pub layout SharedConflictOrder {
         /// The source whose conflict is declared later.
         field source_a: U8 { position: 1; }
         /// The source whose conflict is declared first.
         field source_b: U8 { position: 2; }
-        /// The first region for the second source.
-        field b_first: region(source_b) { position: 3; }
-        /// The first region for the first source.
-        field a_first: region(source_a) { position: 4; }
-        /// The first conflicting region in declaration order.
-        field b_second: region(source_b) { position: 5; }
-        /// A later conflicting region.
-        field a_second: region(source_a) { position: 6; }
+        /// The first range for the second source.
+        field b_first: bytes(current_pos..current_pos + source_b) { position: 3; }
+        /// The first range for the first source.
+        field a_first: bytes(current_pos..current_pos + source_a) { position: 4; }
+        /// The first conflicting range in declaration order.
+        field b_second: bytes(current_pos..current_pos + source_b) { position: 5; }
+        /// A later conflicting range.
+        field a_second: bytes(current_pos..current_pos + source_a) { position: 6; }
     }
 
     /// Inputs declared separately from their physical order.
@@ -462,7 +347,7 @@ wire_repr! {
         /// The auto-derived length.
         field length: U8 { position: 1; }
         /// Declared before the final ordinary codec.
-        field body: region(length) { position: 2; }
+        field body: bytes(current_pos..current_pos + length) { position: 2; }
         /// Declared last and physical fourth.
         field final_field: codec(MissingCount) { position: 4; }
     }
@@ -477,12 +362,12 @@ wire_repr! {
         field dynamic: prefix(TwoBytePrefix) { position: 3; }
     }
 
-    /// A region whose source cannot represent all lengths.
+    /// A range whose source cannot represent all lengths.
     pub layout ReverseFailure {
         /// The auto-derived narrow length.
-        field length: codec(ReverseLength) { position: 1; }
-        /// The large region.
-        field body: region(length) { position: 2; }
+        field length: U8 { position: 1; }
+        /// The large range.
+        field body: bytes(current_pos..current_pos + length) { position: 2; }
     }
 
     /// A planning-error layout.
@@ -493,13 +378,6 @@ wire_repr! {
         field dynamic: prefix(TwoBytePrefix) { position: 2; }
     }
 
-    /// A layout whose derived source rejects encoding.
-    pub layout SourcePlanningFailure {
-        /// The auto-derived source.
-        field length: codec(SourceFailing) { position: 1; }
-        /// The region which supplies its source value.
-        field body: region(length) { position: 2; }
-    }
 
     /// A fixed plan-length error layout.
     pub layout WrongFixedPlanning {
@@ -543,12 +421,12 @@ wire_repr! {
         field dynamic: prefix(TwoBytePrefix) { position: 3; }
     }
 
-    /// A builder with only a region input.
-    pub layout RegionOnly {
+    /// A builder with only a range input.
+    pub layout RangeOnly {
         /// The auto-derived length.
         field length: U8 { position: 1; }
         /// The sole user input.
-        field body: region(length) { position: 2; }
+        field body: bytes(current_pos..current_pos + length) { position: 2; }
     }
 }
 
@@ -570,7 +448,7 @@ fn stem_builder_commits_the_mixed_dynamic_layout_atomically() {
     );
     assert_eq!(view.length(), 2);
     assert_eq!(view.tag(), 0xa1);
-    assert_eq!(view.prefix_encoded(), &[0xf0, 0x55]);
+    assert_eq!(view.prefix_raw(), &[0xf0, 0x55]);
     assert_eq!(view.prefix(), 0x55);
     assert_eq!(view.body(), &[0xaa, 0xbb]);
     assert_eq!(view.tail(), 0x1234);
@@ -583,54 +461,49 @@ fn stem_builder_commits_the_mixed_dynamic_layout_atomically() {
 }
 
 #[test]
-fn prefix_length_source_derives_zero_length_regions() {
+fn fixed_source_derives_an_empty_range() {
     let mut output = [0xcc, 0xdd];
-    let (view, suffix) = PrefixLengthBuilder::new()
+    let (view, suffix) = EmptyRangeBuilder::new()
         .body(&[])
         .build_into(&mut output)
         .unwrap();
-    assert_eq!(view.as_bytes(), &[0x80]);
-    assert_eq!(view.length_encoded(), &[0x80]);
+    assert_eq!(view.as_bytes(), &[0]);
     assert_eq!(view.length(), 0);
     assert_eq!(view.body(), &[]);
     assert_eq!(suffix, &[0xdd]);
 }
 
 #[test]
-fn shared_regions_plan_once_or_reject_before_planning() {
-    SHARED_SOURCE_PLANS.store(0, Ordering::Relaxed);
+fn shared_ranges_plan_once_or_reject_before_planning() {
     let mut output = [0; 7];
-    let (view, suffix) = SharedRegionsBuilder::new()
+    let (view, suffix) = SharedRangesBuilder::new()
         .first(&[1, 2])
         .second(&[3, 4])
         .build_into(&mut output)
         .unwrap();
-    assert_eq!(SHARED_SOURCE_PLANS.load(Ordering::Relaxed), 1);
     assert_eq!(view.as_bytes(), &[2, 1, 2, 3, 4]);
     assert_eq!(suffix, &[0, 0]);
 
-    SHARED_SOURCE_PLANS.store(0, Ordering::Relaxed);
     let initial = [0xa5; 7];
     let mut output = initial;
     assert!(matches!(
-        SharedRegionsBuilder::new()
+        SharedRangesBuilder::new()
             .first(&[1])
             .second(&[2, 3])
             .build_into(&mut output),
-        Err(SharedRegionsWriteError::ConflictingRegionLengths {
+        Err(SharedRangesWriteError::ConflictingRangeSources {
             source_position: 1,
-            first_region_position: 2,
-            conflicting_region_position: 3,
+            first_range_position: 2,
+            conflicting_range_position: 3,
             expected: 1,
             actual: 2,
         })
     ));
-    assert_eq!(SHARED_SOURCE_PLANS.load(Ordering::Relaxed), 0);
     assert_eq!(output, initial);
 }
 
 #[test]
-fn shared_source_conflicts_follow_region_declaration_order() {
+fn shared_source_conflicts_follow_range_declaration_order() {
     let initial = [0x3c; 10];
     let mut output = initial;
     assert!(matches!(
@@ -640,10 +513,10 @@ fn shared_source_conflicts_follow_region_declaration_order() {
             .b_second(&[3, 4])
             .a_second(&[5, 6, 7])
             .build_into(&mut output),
-        Err(SharedConflictOrderWriteError::ConflictingRegionLengths {
+        Err(SharedConflictOrderWriteError::ConflictingRangeSources {
             source_position: 2,
-            first_region_position: 3,
-            conflicting_region_position: 5,
+            first_range_position: 3,
+            conflicting_range_position: 5,
             expected: 1,
             actual: 2,
         })
@@ -678,21 +551,19 @@ fn zero_width_precedes_missing_inputs_and_planning() {
 }
 
 #[test]
-fn unrepresentable_derived_region_length_is_atomic() {
-    REVERSE_SOURCE_PLANS.store(0, Ordering::Relaxed);
+fn unrepresentable_derived_range_length_is_atomic() {
     let initial = [0x6c; 257];
     let mut output = initial;
     assert!(matches!(
         ReverseFailureBuilder::new()
             .body(&[0; 256])
             .build_into(&mut output),
-        Err(ReverseFailureWriteError::InvalidRegionLength {
+        Err(ReverseFailureWriteError::InvalidRangeSource {
             position: 2,
             source_position: 1,
-            length: 256,
+            value: 256,
         })
     ));
-    assert_eq!(REVERSE_SOURCE_PLANS.load(Ordering::Relaxed), 0);
     assert_eq!(output, initial);
 }
 
@@ -706,15 +577,6 @@ fn planning_failures_and_plan_lengths_leave_output_unchanged() {
             .dynamic(0)
             .build_into(&mut output),
         Err(OrdinaryPlanningFailureWriteError::FieldValue(
-            PlanError::Rejected
-        ))
-    ));
-    assert_eq!(output, initial);
-    assert!(matches!(
-        SourcePlanningFailureBuilder::new()
-            .body(&[1])
-            .build_into(&mut output),
-        Err(SourcePlanningFailureWriteError::FieldLength(
             PlanError::Rejected
         ))
     ));
@@ -805,9 +667,9 @@ fn plans_follow_declarations_and_writes_follow_physical_order() {
 }
 
 #[test]
-fn region_only_builder_omits_its_auto_source_input() {
+fn range_only_builder_omits_its_auto_source_input() {
     let mut output = [0; 4];
-    let (view, suffix) = RegionOnlyBuilder::new()
+    let (view, suffix) = RangeOnlyBuilder::new()
         .body(&[7, 8, 9])
         .build_into(&mut output)
         .unwrap();

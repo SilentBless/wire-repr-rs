@@ -12,8 +12,6 @@ mod keyword {
     syn::custom_keyword!(bytes);
     syn::custom_keyword!(padding);
     syn::custom_keyword!(prefix);
-    syn::custom_keyword!(region);
-    syn::custom_keyword!(remainder);
     syn::custom_keyword!(projections);
     syn::custom_keyword!(bit);
     syn::custom_keyword!(bits);
@@ -127,10 +125,30 @@ pub(crate) enum Codec {
     Bytes(usize),
     /// A custom prefix codec path.
     Prefix(Path),
-    /// An opaque byte region bounded by a named field value.
-    Region(Ident),
-    /// An opaque terminal byte span consuming all caller-bounded input.
-    Remainder,
+    /// An opaque byte span with a restricted wire-relative range expression.
+    Range(ByteRangeSyntax),
+}
+
+/// Exact syntax for a dynamic byte range before semantic normalization.
+pub(crate) struct ByteRangeSyntax {
+    pub(crate) start: ByteRangeStart,
+    pub(crate) end: ByteRangeEnd,
+}
+
+/// A restricted byte-range start expression.
+pub(crate) enum ByteRangeStart {
+    CurrentPos,
+    BufStart(Span),
+    BufEnd(Span),
+    FieldStart(Span),
+    FieldEnd(Span),
+}
+
+/// A restricted byte-range end expression.
+pub(crate) enum ByteRangeEnd {
+    BufEnd,
+    Relative { source: Ident, span: Span },
+    Absolute { source: Ident, span: Span },
 }
 
 impl Parse for Invocation {
@@ -452,12 +470,92 @@ fn parse_projection(input: ParseStream<'_>) -> Result<Projection> {
     })
 }
 
-fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
-    if input.peek(keyword::remainder) {
-        return input
-            .parse::<keyword::remainder>()
-            .map(|_| Codec::Remainder);
+fn parse_byte_range(input: ParseStream<'_>) -> Result<ByteRangeSyntax> {
+    let start = parse_byte_range_start(input)?;
+    input
+        .parse::<Token![..]>()
+        .map_err(|_| Error::new(input.span(), "expected `..` in byte range"))?;
+    let end = parse_byte_range_end(input)?;
+    if !input.is_empty() {
+        return Err(Error::new(
+            input.span(),
+            "expected a restricted byte range expression",
+        ));
     }
+    Ok(ByteRangeSyntax { start, end })
+}
+
+fn parse_byte_range_start(input: ParseStream<'_>) -> Result<ByteRangeStart> {
+    let first: Ident = input
+        .parse()
+        .map_err(|_| Error::new(input.span(), "expected a byte range start"))?;
+    let span = first.span();
+    if first == "current_pos" {
+        return Ok(ByteRangeStart::CurrentPos);
+    }
+    if first == "buf_start" {
+        return Ok(ByteRangeStart::BufStart(span));
+    }
+    if first == "buf_end" {
+        return Ok(ByteRangeStart::BufEnd(span));
+    }
+    if !input.peek(Token![..]) && input.peek(Token![.]) {
+        input.parse::<Token![.]>()?;
+        let boundary: Ident = input
+            .parse()
+            .map_err(|_| Error::new(input.span(), "expected `start` or `end` after field name"))?;
+        return match boundary.to_string().as_str() {
+            "start" => Ok(ByteRangeStart::FieldStart(span)),
+            "end" => Ok(ByteRangeStart::FieldEnd(span)),
+            _ => Err(Error::new(
+                boundary.span(),
+                "expected `start` or `end` after field name",
+            )),
+        };
+    }
+    Err(Error::new(
+        span,
+        "expected `current_pos`, `buf_start`, `buf_end`, `field.start`, or `field.end`",
+    ))
+}
+
+fn parse_byte_range_end(input: ParseStream<'_>) -> Result<ByteRangeEnd> {
+    let first: Ident = input
+        .parse()
+        .map_err(|_| Error::new(input.span(), "expected a byte range end"))?;
+    let span = first.span();
+    if first == "buf_end" {
+        if input.peek(Token![+]) {
+            return Err(Error::new(
+                span,
+                "`buf_end` cannot have byte range arithmetic",
+            ));
+        }
+        return Ok(ByteRangeEnd::BufEnd);
+    }
+    if input.peek(Token![+]) {
+        input.parse::<Token![+]>()?;
+        let source: Ident = input
+            .parse()
+            .map_err(|_| Error::new(input.span(), "expected a range length field after `+`"))?;
+        if first != "current_pos" {
+            return Err(Error::new(
+                span,
+                "relative byte range end must start with `current_pos`",
+            ));
+        }
+        return Ok(ByteRangeEnd::Relative {
+            span: source.span(),
+            source,
+        });
+    }
+    Ok(ByteRangeEnd::Absolute {
+        source: first,
+        span,
+    })
+}
+
+fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
     if input.peek(Token![::])
         || input.peek(Token![crate])
         || input.peek(Token![self])
@@ -470,33 +568,35 @@ fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
         input.parse::<keyword::bytes>()?;
         let content;
         syn::parenthesized!(content in input);
-        let literal = content
-            .parse::<LitInt>()
-            .map_err(|_| Error::new(content.span(), "expected an unsuffixed base-10 byte width"))?;
-        if !content.is_empty() {
-            return Err(Error::new(content.span(), "expected one byte width"));
+        if content.peek(LitInt) {
+            let literal = content.parse::<LitInt>()?;
+            if !content.is_empty() {
+                return Err(Error::new(content.span(), "expected one byte width"));
+            }
+            if !literal.suffix().is_empty() {
+                return Err(Error::new(literal.span(), "byte width must be unsuffixed"));
+            }
+            if !literal
+                .to_string()
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+            {
+                return Err(Error::new(
+                    literal.span(),
+                    "byte width must be a base-10 literal",
+                ));
+            }
+            let width = literal
+                .base10_parse::<usize>()
+                .map_err(|_| Error::new(literal.span(), "byte width must fit in usize"))?;
+            if width == 0 {
+                return Err(Error::new(literal.span(), "byte width must be nonzero"));
+            }
+            return Ok(Codec::Bytes(width));
         }
-        if !literal.suffix().is_empty() {
-            return Err(Error::new(literal.span(), "byte width must be unsuffixed"));
-        }
-        if !literal
-            .to_string()
-            .bytes()
-            .all(|byte| byte.is_ascii_digit())
-        {
-            return Err(Error::new(
-                literal.span(),
-                "byte width must be a base-10 literal",
-            ));
-        }
-        let width = literal
-            .base10_parse::<usize>()
-            .map_err(|_| Error::new(literal.span(), "byte width must fit in usize"))?;
-        if width == 0 {
-            return Err(Error::new(literal.span(), "byte width must be nonzero"));
-        }
-        return Ok(Codec::Bytes(width));
+        return parse_byte_range(&content).map(Codec::Range);
     }
+
     if input.peek(keyword::prefix) {
         input.parse::<keyword::prefix>()?;
         let content;
@@ -507,26 +607,13 @@ fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
         }
         return Ok(Codec::Prefix(path));
     }
-    if input.peek(keyword::region) {
-        input.parse::<keyword::region>()?;
-        let content;
-        syn::parenthesized!(content in input);
-        let source = content.parse::<Ident>()?;
-        if !content.is_empty() {
-            return Err(Error::new(
-                content.span(),
-                "expected one region length field identifier",
-            ));
-        }
-        return Ok(Codec::Region(source));
-    }
     if input.peek(Token![::]) {
         return Ok(Codec::Custom(input.parse()?));
     }
     let first: Ident = input.parse().map_err(|_| {
         Error::new(
             input.span(),
-            "expected a builtin codec, `codec(path)`, `bytes(N)`, `prefix(path)`, or `region(field)`",
+            "expected a builtin codec, `codec(path)`, `bytes(N)`, or `prefix(path)`,",
         )
     })?;
     if first == "codec" {
@@ -865,25 +952,36 @@ mod tests {
     }
 
     #[test]
-    fn parses_region_sources_and_rejects_malformed_forms() {
+    fn parses_byte_ranges_and_rejects_legacy_or_expression_forms() {
         let parsed: Invocation = parse_str(
-            "layout H { field payload: region(length) { position: 2; } field length: U8 { position: 1; } }",
-        )
-        .unwrap();
+            "layout H { field relative: bytes(current_pos..current_pos + length) { position: 2; } field absolute: bytes(current_pos..end) { position: 3; } field terminal: bytes(current_pos..buf_end) { position: 4; } field length: U8 { position: 1; } field end: U8 { position: 5; } }",
+        ).unwrap();
+        let fields = &layouts(&parsed)[0].fields;
+        assert!(
+            matches!(&fields[0].codec, Codec::Range(ByteRangeSyntax { start: ByteRangeStart::CurrentPos, end: ByteRangeEnd::Relative { source, .. } }) if source == "length")
+        );
+        assert!(
+            matches!(&fields[1].codec, Codec::Range(ByteRangeSyntax { start: ByteRangeStart::CurrentPos, end: ByteRangeEnd::Absolute { source, .. } }) if source == "end")
+        );
         assert!(matches!(
-            &layouts(&parsed)[0].fields[0].codec,
-            Codec::Region(source) if source == "length"
+            &fields[2].codec,
+            Codec::Range(ByteRangeSyntax {
+                start: ByteRangeStart::CurrentPos,
+                end: ByteRangeEnd::BufEnd
+            })
         ));
-
+        parse_str::<Invocation>(
+            "layout H { field length: U8; field payload: bytes(current_pos..current_pos + length); }",
+        )
+        .expect("implicit sequential byte ranges are valid");
         for source in [
-            "layout H { field payload: region() { position: 1; } }",
-            "layout H { field payload: region(crate::length) { position: 1; } }",
-            "layout H { field payload: region(length extra) { position: 1; } }",
+            "layout H { field payload: bytes(current_pos..length + 1); }",
+            "layout H { field payload: bytes(current_pos..current_pos + length + 1); }",
+            "layout H { field payload: bytes(current_pos..crate::length); }",
         ] {
             assert!(parse_str::<Invocation>(source).is_err(), "{source}");
         }
     }
-
     #[test]
     fn parses_padding_and_alignment_entries_with_targeted_grammar_errors() {
         let parsed: Invocation = parse_str(
@@ -934,7 +1032,7 @@ mod tests {
     #[test]
     fn parses_implicit_sequential_fields_and_spacing() {
         let parsed: Invocation = parse_str(
-            "layout H { field length: U8; field prefix: prefix(crate::Prefix); field payload: region(length); field bytes: bytes(4); field custom: codec(crate::Codec); field flags: U8 { projections { bit enabled: 0; } } padding { length: 3; } align { boundary: 8; } }",
+            "layout H { field length: U8; field prefix: prefix(crate::Prefix); field payload: bytes(current_pos..current_pos + length); field bytes: bytes(4); field custom: codec(crate::Codec); field flags: U8 { projections { bit enabled: 0; } } padding { length: 3; } align { boundary: 8; } }",
         )
         .unwrap();
         let layout = &layouts(&parsed)[0];

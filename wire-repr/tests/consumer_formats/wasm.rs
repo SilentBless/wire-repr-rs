@@ -1,7 +1,7 @@
 use core::convert::Infallible;
 use core::num::NonZeroUsize;
 
-use wire_repr::{EncodePlan, PrefixCodec, PrefixExtent, wire_repr};
+use wire_repr::{EncodePlan, PrefixCodec, PrefixExtent};
 
 /// Structural failures while framing a `u32` ULEB128 prefix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,98 +96,8 @@ impl PrefixCodec for U32Leb128 {
     }
 }
 
-wire_repr! {
-    /// One opaque WebAssembly section framed by its standard section size.
-    pub layout WasmSection {
-        /// The opaque WebAssembly section identifier.
-        field id: U8 { position: 1; }
-        /// The ULEB128-encoded byte length of `contents`.
-        field size: prefix(U32Leb128) { position: 2; }
-        /// The opaque section payload.
-        field contents: region(size) { position: 3; }
-    }
-}
-
 #[test]
-fn custom_section_preserves_its_exact_borrowed_bytes_and_suffix() {
-    let section = [0, 10, 4, b'n', b'a', b'm', b'e', 1, 2, 3, 4, 5];
-    let suffix = [0xde, 0xad];
-    let mut input = section.to_vec();
-    input.extend_from_slice(&suffix);
-
-    let (view, parsed_suffix) =
-        WasmSectionView::parse_prefix(&input).expect("custom section parses");
-    assert_eq!(view.as_bytes(), section);
-    assert_eq!(view.id(), 0);
-    assert_eq!(view.size(), 10);
-    assert_eq!(view.contents(), &section[2..]);
-    assert_eq!(view.contents().as_ptr(), input[2..].as_ptr());
-    assert_eq!(parsed_suffix, suffix);
-    assert_eq!(parsed_suffix.as_ptr(), input[section.len()..].as_ptr());
-    assert!(matches!(
-        WasmSectionView::parse_exact(&input),
-        Err(WasmSectionError::TrailingBytes {
-            expected: 12,
-            actual: 14
-        })
-    ));
-}
-
-#[test]
-fn noncanonical_size_is_preserved_across_immutable_and_mutable_views() {
-    let mut bytes = [3, 0x85, 0, b'h', b'e', b'l', b'l', b'o'];
-    let immutable = WasmSectionView::parse_exact(&bytes).expect("legal noncanonical size parses");
-    assert_eq!(immutable.size_encoded(), &[0x85, 0]);
-    assert_eq!(immutable.size(), 5);
-    assert_eq!(immutable.as_bytes(), bytes);
-
-    let mutable =
-        WasmSectionViewMut::parse_exact_mut(&mut bytes).expect("mutable parse preserves bytes");
-    assert_eq!(mutable.as_view().size_encoded(), &[0x85, 0]);
-    let immutable = mutable.into_view();
-    assert_eq!(
-        immutable.as_bytes(),
-        &[3, 0x85, 0, b'h', b'e', b'l', b'l', b'o']
-    );
-}
-
-#[test]
-fn builder_derives_canonical_size_and_only_id_remains_mutable() {
-    let mut output = [0xcc; 10];
-    output[8..].copy_from_slice(&[0xa5, 0x5a]);
-    let (mut view, suffix) = WasmSectionBuilder::new()
-        .id(0)
-        .contents(&[4, b'n', b'a', b'm', b'e', 9])
-        .build_into(&mut output)
-        .expect("builder derives section size from contents");
-    assert_eq!(view.as_bytes(), &[0, 6, 4, b'n', b'a', b'm', b'e', 9]);
-    assert_eq!(view.size_encoded(), &[6]);
-    assert_eq!(view.size(), 6);
-    assert_eq!(&*suffix, &[0xa5, 0x5a]);
-    view.set_id(7).expect("fixed section id remains mutable");
-    assert_eq!(view.as_bytes(), &[7, 6, 4, b'n', b'a', b'm', b'e', 9]);
-    assert_eq!(&*suffix, &[0xa5, 0x5a]);
-}
-
-#[test]
-fn short_builder_output_does_not_modify_any_byte() {
-    let initial = [0x3c; 7];
-    let mut output = initial;
-    assert!(matches!(
-        WasmSectionBuilder::new()
-            .id(1)
-            .contents(b"abcdef")
-            .build_into(&mut output),
-        Err(WasmSectionWriteError::OutputTooShort {
-            expected: 8,
-            actual: 7
-        })
-    ));
-    assert_eq!(output, initial);
-}
-
-#[test]
-fn uleb_failures_map_through_the_section_parse_error() {
+fn uleb128_preserves_noncanonical_values_and_builds_canonically() {
     for bytes in [
         &[][..],
         &[0x80][..],
@@ -200,13 +110,13 @@ fn uleb_failures_map_through_the_section_parse_error() {
             Err(U32Leb128DecodeError::Incomplete)
         );
     }
-    assert_eq!(
-        U32Leb128::validate_prefix(&[0x85, 0])
-            .expect("complete prefix reports its exact span")
-            .encoded_len()
-            .get(),
-        2
-    );
+
+    let noncanonical = [0x85, 0];
+    let extent = U32Leb128::validate_prefix(&noncanonical)
+        .expect("complete noncanonical prefix reports its exact span");
+    assert_eq!(extent.encoded_len().get(), 2);
+    assert_eq!(U32Leb128::decode(&noncanonical), 5);
+
     let plan = U32Leb128::plan(u32::MAX).expect("every u32 has a canonical ULEB128 encoding");
     let mut encoded = [0; 5];
     plan.write_into(&mut encoded);
@@ -219,41 +129,12 @@ fn uleb_failures_map_through_the_section_parse_error() {
         5
     );
     assert_eq!(U32Leb128::decode(&encoded), u32::MAX);
-    for bytes in [
-        &[0][..],
-        &[0, 0x80][..],
-        &[0, 0x80, 0x80, 0x80, 0x80, 0x80][..],
-        &[0, 0xff, 0xff, 0xff, 0xff, 0x10][..],
-    ] {
-        let expected = match bytes.len() {
-            1 | 2 => U32Leb128DecodeError::Incomplete,
-            6 if bytes[5] == 0x80 => U32Leb128DecodeError::Malformed,
-            _ => U32Leb128DecodeError::Overflow,
-        };
-        assert!(matches!(
-            WasmSectionView::parse_prefix(bytes),
-            Err(WasmSectionError::FieldSize(error)) if error == expected
-        ));
-    }
-}
-
-#[test]
-fn valid_size_with_missing_contents_reports_region_framing() {
-    assert!(matches!(
-        WasmSectionView::parse_prefix(&[1, 3, 0xaa, 0xbb]),
-        Err(WasmSectionError::InputTooShort {
-            position: 3,
-            expected: 3,
-            available: 2
-        })
-    ));
-}
-
-#[test]
-fn zero_length_section_is_a_complete_nonstalling_layout() {
-    let view = WasmSectionView::parse_exact(&[9, 0]).expect("empty section parses");
-    assert_eq!(view.id(), 9);
-    assert_eq!(view.size(), 0);
-    assert!(view.contents().is_empty());
-    assert_eq!(view.as_bytes(), &[9, 0]);
+    assert_eq!(
+        U32Leb128::validate_prefix(&[0x80, 0x80, 0x80, 0x80, 0x80]),
+        Err(U32Leb128DecodeError::Malformed)
+    );
+    assert_eq!(
+        U32Leb128::validate_prefix(&[0xff, 0xff, 0xff, 0xff, 0x10]),
+        Err(U32Leb128DecodeError::Overflow)
+    );
 }
