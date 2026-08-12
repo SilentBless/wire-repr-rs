@@ -1,6 +1,6 @@
 #![doc = include_str!("mod.md")]
 
-mod fixed;
+pub(crate) mod fixed;
 mod integers;
 mod plan;
 mod prefix;

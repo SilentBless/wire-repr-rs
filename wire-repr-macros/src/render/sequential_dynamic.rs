@@ -6,7 +6,9 @@ use quote::quote;
 mod builder;
 mod mutation;
 
-use super::{codec_tokens, projection_getters};
+use super::{
+    codec_tokens, effective_fixed_codec_tokens, mapping_raw_type_tokens, projection_getters,
+};
 use crate::ir::{Field, FieldKind, PhysicalItem, SequentialLayout};
 
 pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
@@ -357,19 +359,27 @@ pub(super) fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<To
                 },
             ]
         }
-        FieldKind::Codec(codec) => {
-            let codec = codec_tokens(codec);
-            vec![quote! {
-                #[doc = "Returns the decoded value of this validated fixed field."]
-                #(#docs)*
-                #[inline]
-                #[must_use]
-                #visibility fn #name(&self) -> <#codec as ::wire_repr::FixedCodec>::Value<'_> {
-                    <#codec as ::wire_repr::FixedCodec>::decode(
-                        &self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)],
-                    )
-                }
-            }]
+        FieldKind::Codec(_) => {
+            let Some(codec) = effective_fixed_codec_tokens(field) else {
+                return Vec::new();
+            };
+            if let Some(mapping) = &field.mapping {
+                let (Some(raw_name), Some(raw)) =
+                    (field.raw_name.as_ref(), mapping_raw_type_tokens(field))
+                else {
+                    return Vec::new();
+                };
+                let semantic = &mapping.semantic;
+                return vec![quote! {
+                    #[doc = "Returns the semantic value of this validated fixed field."] #(#docs)* #[inline] #[must_use]
+                    #visibility fn #name(&self) -> #semantic { <#semantic as ::core::convert::From<#raw>>::from(self.#raw_name()) }
+                    #[doc = "Returns the raw fixed representation of this field."] #[inline] #[must_use]
+                    #visibility fn #raw_name(&self) -> #raw { <#codec as ::wire_repr::FixedCodec>::decode(&self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]) }
+                }];
+            }
+            vec![
+                quote! { #[doc = "Returns the decoded value of this validated fixed field."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> <#codec as ::wire_repr::FixedCodec>::Value<'_> { <#codec as ::wire_repr::FixedCodec>::decode(&self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]) } },
+            ]
         }
         FieldKind::Region { .. } => {
             let end = &field.boundary;

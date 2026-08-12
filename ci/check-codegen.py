@@ -20,6 +20,12 @@ PAIRS = (
     ("projection", "generated_projection", "handwritten_projection", True, 8),
     ("mutation", "generated_mutation", "handwritten_mutation", True, 4),
     ("builder", "generated_builder", "handwritten_builder", False, 4),
+    ("scalar_getter", "generated_scalar_getter", "handwritten_scalar_getter", True, 8),
+    ("scalar_mutation", "generated_scalar_mutation", "handwritten_scalar_mutation", True, 4),
+    ("scalar_builder", "generated_scalar_builder", "handwritten_scalar_builder", True, 4),
+    ("mapped_getter", "generated_mapped_getter", "handwritten_mapped_getter", True, 8),
+    ("mapped_mutation", "generated_mapped_mutation", "handwritten_mapped_mutation", True, 4),
+    ("mapped_builder", "generated_mapped_builder", "handwritten_mapped_builder", True, 4),
 )
 PANIC_MARKERS = (
     "panic",

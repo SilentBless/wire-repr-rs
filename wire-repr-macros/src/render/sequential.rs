@@ -3,7 +3,9 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use super::{codec_tokens, projection_getters};
+use super::{
+    codec_tokens, effective_fixed_codec_tokens, mapping_raw_type_tokens, projection_getters,
+};
 use crate::ir::{Field, PhysicalItem, SequentialLayout};
 
 pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
@@ -36,7 +38,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         .iter()
         .filter_map(|field| render_setter(layout, field, mutation_error_name));
     let builder_fields = data.fields.iter().filter_map(|field| {
-        let codec = codec_tokens(field.codec()?);
+        let codec = effective_fixed_codec_tokens(field)?;
         let name = &field.name;
         Some(quote!(#name: ::core::option::Option<<#codec as ::wire_repr::FixedCodec>::Value<'value>>))
     });
@@ -77,7 +79,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         let field = &data.fields[*index];
         let plan = plan_ident(*index);
         let start = field_offset(layout, *index);
-        let codec = codec_tokens(field.codec()?);
+        let codec = effective_fixed_codec_tokens(field)?;
         Some(quote! {
             ::wire_repr::EncodePlan::write_into(
                 &#plan,
@@ -194,7 +196,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             #(#fluent_methods)*
             #[doc = "Preflights every field, then writes this layout into the leading output bytes."]
             #visibility fn build_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), #write_error_name> {
-                let Self { #(#destructured,)* } = self;
+                let Self { #(#destructured,)* .. } = self;
                 #(#builder_zero_width)*
                 #(#write_extent_checks)*
                 #(#missing_checks)*
@@ -237,7 +239,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
 fn encode_error_variants<'a>(
     fields: impl Iterator<Item = &'a Field> + 'a,
 ) -> impl Iterator<Item = TokenStream> + 'a {
-    fields.filter_map(|field| { let codec = codec_tokens(field.codec()?); let variant = &field.error_variant; let name = field.name.to_string(); Some(quote! { #[doc = concat!("Reports an encoding failure for field `", #name, "`.")] #variant(<#codec as ::wire_repr::FixedCodec>::EncodeError), }) })
+    fields.filter_map(|field| { let codec = effective_fixed_codec_tokens(field)?; let variant = &field.error_variant; let name = field.name.to_string(); Some(quote! { #[doc = concat!("Reports an encoding failure for field `", #name, "`.")] #variant(<#codec as ::wire_repr::FixedCodec>::EncodeError), }) })
 }
 fn encode_display_arms<'a>(
     fields: impl Iterator<Item = &'a Field> + 'a,
@@ -259,7 +261,7 @@ fn builder_zero_width_checks<'a>(
             return None;
         };
         let field = &layout.data.fields[*index];
-        let codec = codec_tokens(field.codec()?);
+        let codec = effective_fixed_codec_tokens(field)?;
         let field_text = normalized_field_name(field);
         Some(quote! {
             if <#codec as ::wire_repr::FixedCodec>::WIDTH == 0 {
@@ -269,11 +271,24 @@ fn builder_zero_width_checks<'a>(
     })
 }
 fn render_getter(layout: &SequentialLayout, field: &Field) -> Option<TokenStream> {
-    let codec = codec_tokens(field.codec()?);
+    let codec = effective_fixed_codec_tokens(field)?;
     let docs = &field.docs;
     let visibility = &layout.data.visibility;
     let name = &field.name;
     let start = field_offset(layout, field.declaration_index);
+    if let Some(mapping) = &field.mapping {
+        let (Some(raw_name), Some(raw)) = (field.raw_name.as_ref(), mapping_raw_type_tokens(field))
+        else {
+            return None;
+        };
+        let semantic = &mapping.semantic;
+        return Some(quote! {
+            #[doc = "Returns the semantic value of this field."] #(#docs)* #[inline] #[must_use]
+            #visibility fn #name(&self) -> #semantic { <#semantic as ::core::convert::From<#raw>>::from(self.#raw_name()) }
+            #[doc = "Returns the raw fixed representation of this field."] #[inline] #[must_use]
+            #visibility fn #raw_name(&self) -> #raw { <#codec as ::wire_repr::FixedCodec>::decode(&self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]) }
+        });
+    }
     Some(
         quote! { #[doc = "Returns the decoded value of this field."] #(#docs)* #[must_use] #visibility fn #name(&self) -> <#codec as ::wire_repr::FixedCodec>::Value<'_> { <#codec as ::wire_repr::FixedCodec>::decode(&self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]) } },
     )
@@ -283,14 +298,27 @@ fn render_setter(
     field: &Field,
     error_name: &syn::Ident,
 ) -> Option<TokenStream> {
-    let codec = codec_tokens(field.codec()?);
+    let codec = effective_fixed_codec_tokens(field)?;
     let name = &field.setter_name;
     let variant = &field.error_variant;
     let field_text = normalized_field_name(field);
     let start = field_offset(layout, field.declaration_index);
     let visibility = &layout.data.visibility;
+    let raw_setter = field.raw_setter_name.as_ref();
+    let raw = mapping_raw_type_tokens(field);
+    let physical = quote! { let plan = <#codec as ::wire_repr::FixedCodec>::plan(value).map_err(#error_name::#variant)?; let actual = ::wire_repr::EncodePlan::encoded_len(&plan); let expected = <#codec as ::wire_repr::FixedCodec>::WIDTH; if actual != expected { return Err(#error_name::InvalidPlanLength { field: #field_text, expected, actual }); } ::wire_repr::EncodePlan::write_into(&plan, &mut self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]); Ok(()) };
+    if field.mapping.is_some() && (raw_setter.is_none() || raw.is_none()) {
+        return None;
+    }
+    if let (Some(mapping), Some(raw_setter), Some(raw)) = (&field.mapping, raw_setter, raw) {
+        let semantic = &mapping.semantic;
+        return Some(quote! {
+            #[doc = "Atomically replaces this field from its semantic value."] #visibility fn #name(&mut self, value: #semantic) -> ::core::result::Result<(), #error_name> { self.#raw_setter(<#raw as ::core::convert::From<#semantic>>::from(value)) }
+            #[doc = "Atomically replaces this field from its raw fixed representation."] #visibility fn #raw_setter(&mut self, value: #raw) -> ::core::result::Result<(), #error_name> { #physical }
+        });
+    }
     Some(
-        quote! { #[doc = "Atomically replaces this field after preparing its complete encoding."] #visibility fn #name<'value>(&mut self, value: <#codec as ::wire_repr::FixedCodec>::Value<'value>) -> ::core::result::Result<(), #error_name> { let plan = <#codec as ::wire_repr::FixedCodec>::plan(value).map_err(#error_name::#variant)?; let actual = ::wire_repr::EncodePlan::encoded_len(&plan); let expected = <#codec as ::wire_repr::FixedCodec>::WIDTH; if actual != expected { return Err(#error_name::InvalidPlanLength { field: #field_text, expected, actual }); } ::wire_repr::EncodePlan::write_into(&plan, &mut self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]); Ok(()) } },
+        quote! { #[doc = "Atomically replaces this field after preparing its complete encoding."] #visibility fn #name<'value>(&mut self, value: <#codec as ::wire_repr::FixedCodec>::Value<'value>) -> ::core::result::Result<(), #error_name> { #physical } },
     )
 }
 fn render_fluent_method(
@@ -298,9 +326,25 @@ fn render_fluent_method(
     visibility: &syn::Visibility,
     builder_name: &syn::Ident,
 ) -> Option<TokenStream> {
-    let codec = codec_tokens(field.codec()?);
+    let codec = effective_fixed_codec_tokens(field)?;
     let name = &field.name;
     let docs = &field.docs;
+    if field.mapping.is_some()
+        && (field.raw_name.is_none() || mapping_raw_type_tokens(field).is_none())
+    {
+        return None;
+    }
+    if let (Some(mapping), Some(raw), Some(raw_name)) = (
+        &field.mapping,
+        mapping_raw_type_tokens(field),
+        field.raw_name.as_ref(),
+    ) {
+        let semantic = &mapping.semantic;
+        return Some(quote! {
+            #[doc = "Supplies this field's semantic value to the builder."] #(#docs)* #[must_use] #visibility fn #name(mut self, value: #semantic) -> #builder_name<'value> { self.#name = ::core::option::Option::Some(<#raw as ::core::convert::From<#semantic>>::from(value)); self }
+            #[doc = "Supplies this field's raw fixed representation to the builder."] #[must_use] #visibility fn #raw_name(mut self, value: #raw) -> #builder_name<'value> { self.#name = ::core::option::Option::Some(value); self }
+        });
+    }
     Some(
         quote! { #[doc = "Supplies this field to the builder."] #(#docs)* #[must_use] #visibility fn #name(mut self, value: <#codec as ::wire_repr::FixedCodec>::Value<'value>) -> #builder_name<'value> { self.#name = ::core::option::Option::Some(value); self } },
     )
@@ -320,7 +364,7 @@ fn builder_preflight<'a>(
     error_name: &'a syn::Ident,
 ) -> impl Iterator<Item = TokenStream> + 'a {
     fields.enumerate().filter_map(move |(index, field)| {
-        let codec = codec_tokens(field.codec()?);
+        let codec = effective_fixed_codec_tokens(field)?;
         let value = &field.name;
         let plan = plan_ident(index);
         let variant = &field.error_variant;

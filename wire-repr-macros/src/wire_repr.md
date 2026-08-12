@@ -66,8 +66,10 @@ The supported field forms are:
 ```text
 field name: U8;
 field name: BeU16;
+field name: BeU16 as path::Semantic;
 field name: codec(path::ToFixedCodec);
 field name: bytes(N);
+field name: bytes(N) as path::Semantic;
 field name: prefix(path::ToPrefixCodec);
 field name: region(length_field);
 ```
@@ -82,6 +84,24 @@ borrowed span framed by an earlier physical fixed or prefix field. A builder der
 source value from the region length, so the source does not receive a fluent input method.
 If multiple regions share one source, their lengths must agree. A mutable view exposes each
 region as `field_mut()`, which can change bytes but cannot resize or reframe the region.
+
+# Total semantic mappings
+
+`as TypePath` maps one eligible physical field to a nominal consumer type. It appears
+immediately after the built-in fixed integer codec or `bytes(N)` and before a field body
+containing `position`, `offset`, or `projections`. It is not permitted on declared scalar
+codecs, `codec(path)` fields, prefix fields, or regions.
+
+The physical codec remains the wire owner. Mapping is total and direct: the semantic getter
+uses `Semantic: From<Raw>`; semantic setters and builders use `Raw: From<Semantic>`. Raw is
+the codec's exact type (`u32` for `U24`, `[u8; N]` for `bytes(N)`), not a narrowed or
+validated domain value. There is no fallible conversion layer. Thus physical encoding can
+still reject a raw value (for example, an out-of-range `U24`) and preserves its usual
+whole-destination atomicity. Mapped bytes are owned arrays/wrappers; unmapped `bytes(N)`
+returns its borrowed slice.
+
+Top-level `scalar Name: Codec;` is separate syntax that declares a reusable nominal wrapper
+owning a codec. It does not make that codec eligible for `as TypePath` mapping.
 
 # Projections
 
@@ -99,7 +119,8 @@ field flags: U8 {
 Projection numbering is semantic LSB0 after endian decoding. `bit` generates a `bool`
 getter; `bits` shifts the inclusive range down to bit zero and returns the storage scalar
 type. Projection ranges on one storage field may not overlap. The storage field remains
-the sole physical byte owner.
+the sole physical byte owner. On a mapped integer storage field, projections continue to
+operate on that physical decoded raw integer.
 
 When a sequential field uses both explicit placement and projections, both properties are
 inside the same field body:
@@ -140,7 +161,12 @@ For a declaration named `Packet`, the macro generates:
 
 Fixed layouts also expose `PacketView::WIDTH`. Prefix fields generate both `field()` for the
 decoded value and `field_encoded()` for the exact accepted wire encoding. A bit projection
-generates a getter with the projection name.
+generates a getter with the projection name. A mapped field generates `field()` for its
+semantic type and `field_raw()` for its raw codec type. If mutable, it generates both
+`set_field(semantic)` and `set_field_raw(raw)`. Its builder generates `field(semantic)` and
+`field_raw(raw)`; both set the same slot, so the last call wins. A mapped region-length
+source has both getters but no setter or builder input because its raw value is derived from
+the region.
 
 A successful prefix parser or builder returns the bounded representation and a disjoint
 suffix. Exact parsing rejects trailing bytes. Setters and builders plan every fallible

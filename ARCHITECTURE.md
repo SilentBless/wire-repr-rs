@@ -31,11 +31,23 @@ unchanged. Successful plans must emit a representation that decodes to the plann
 semantic value. Exact input encodings remain available
 to layout views and are not reconstructed from decoded values.
 
+An `as TypePath` mapping is a total nominal API adaptation, not a codec. Only built-in fixed
+integers and `bytes(N)` are eligible. Its raw type is the physical codec type exactly
+(`u32` for `U24`; `[u8; N]` for `bytes(N)`), and it uses direct `Semantic: From<Raw>` on
+read and `Raw: From<Semantic>` on write. The physical codec retains byte ownership,
+planning, range errors, and whole-destination atomicity; mappings add no fallible layer.
+Mapped byte values are owned arrays or wrappers, while unmapped `bytes(N)` remains borrowed.
+`scalar Name: Codec;` instead declares a reusable codec-owning nominal wrapper. Mappings do
+not apply to declared scalar, custom/direct, prefix, or region fields.
+
 ## Layout macro boundary
 
 Procedural-macro implementation belongs exclusively to `wire-repr-macros/`.
 The compiler parses canonical layout syntax, normalizes and checks it before
-rendering, preserves user documentation, and emits concrete operations.
+rendering, preserves user documentation, and emits concrete operations. Normalization owns
+mapping eligibility and the exact `MappingRaw` type; renderers consume that normalized fact
+rather than rediscovering codec categories. The hidden `OwnedBytes` helper exists only as
+macro support for mapped fixed bytes and is not a normal user API.
 Sequential layouts have two exclusive modes. If no physical entry supplies
 `position`, normalization infers contiguous one-based physical positions from
 physical source declaration order across fields and anonymous padding/alignment
@@ -71,7 +83,12 @@ storage field may own immutable bit projections. They own no bytes or parse
 errors, use LSB0 numbering over the decoded semantic integer regardless of
 endianness, and render as direct storage-getter shift/mask operations. Signed
 and custom codecs have no projection contract; there is no runtime bit-storage
-trait, metadata, or validation layer.
+trait, metadata, or validation layer. Mappings do not alter physical storage: mapped integer
+projections operate on the decoded raw integer. Mapped fields expose semantic and raw
+getters; eligible mutable fields expose semantic and raw setters. Builder semantic and raw
+inputs share one slot and the last input wins. A mapped region-length source exposes both
+getters but no setter or builder input; the builder derives its raw source value from the
+region.
 
 Generated mutable views expose immutable getters and only those typed
 same-width setters that cannot change framing. They expose no unrestricted

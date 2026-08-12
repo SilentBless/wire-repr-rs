@@ -36,7 +36,7 @@ Add the facade crate:
 
 ```toml
 [dependencies]
-wire-repr = { version = "0.1", default-features = false }
+wire-repr = { version = "0.2", default-features = false }
 ```
 
 Declare a sequential layout. Physical placement is inferred from declaration order:
@@ -145,6 +145,32 @@ Use `bytes(N)` when a field owns fixed-width bytes without interpreting them. It
 returns the original borrowed `&[u8]`. Builders and setters check only the exact width
 before mutation.
 
+### Total semantic mappings
+
+An eligible built-in fixed integer or `bytes(N)` field can expose a nominal
+domain-facing type while retaining its physical wire codec:
+
+```rust
+wire_repr::wire_repr! {
+    pub layout Message {
+        field kind: BeU16 as crate::Kind;
+        field address: bytes(4) as crate::Address;
+    }
+}
+```
+
+`as TypePath` comes immediately after the codec, before placement or projections. It is
+not a codec declaration: `kind()` returns `Kind`, `kind_raw()` returns the codec's raw
+`u16`, and the corresponding setters and builder methods accept either form. This requires
+total `Kind: From<u16>` and `u16: From<Kind>` conversions; `bytes(4)` similarly maps
+between its semantic type and `[u8; 4]`. The raw mapping is exact (`U24` is `u32`), with no
+fallible conversion layer. Mapped byte values are owned arrays or wrappers; unmapped
+`bytes(N)` remains borrowed `&[u8]`.
+
+Declared `scalar Name: Codec;` has a different job: it creates a reusable nominal wrapper
+that owns a codec. `as Type` maps one eligible built-in physical field through `From`; it
+does not apply to declared scalar, custom/direct, prefix, or region fields.
+
 ### Bit projections
 
 Unsigned built-in storage fields can expose named immutable projections:
@@ -160,7 +186,8 @@ field flags: U8 {
 
 Bit zero is the decoded value's least-significant bit regardless of wire endianness.
 The storage field remains the only byte owner; projection getters are direct shift/mask
-operations with no runtime metadata or dispatch.
+operations with no runtime metadata or dispatch. On a mapped integer field, projections
+still read the physical decoded raw integer, not the semantic wrapper.
 
 ### Prefix fields
 

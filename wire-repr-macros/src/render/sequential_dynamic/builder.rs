@@ -3,7 +3,7 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use super::super::codec_tokens;
+use super::super::{codec_tokens, effective_fixed_codec_tokens, mapping_raw_type_tokens};
 use crate::ir::{Field, FieldKind, PhysicalItem, SequentialLayout};
 
 pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
@@ -24,8 +24,8 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                     let codec = codec_tokens(codec);
                     quote!(#name: ::core::option::Option<<#codec as ::wire_repr::PrefixCodec>::Value<'value>>)
                 }
-                Some(codec) => {
-                    let codec = codec_tokens(codec);
+                Some(_) => {
+                    let Some(codec) = effective_fixed_codec_tokens(field) else { return quote!(); };
                     quote!(#name: ::core::option::Option<<#codec as ::wire_repr::FixedCodec>::Value<'value>>)
                 }
                 None => quote!(#name: ::core::option::Option<&'value [u8]>),
@@ -54,7 +54,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         if codec.is_prefix() {
             return None;
         }
-        let codec = codec_tokens(codec);
+        let codec = effective_fixed_codec_tokens(field)?;
         Some(quote! {
             if <#codec as ::wire_repr::FixedCodec>::WIDTH == 0 {
                 return Err(#write_error_name::InvalidCodecWidth { position: #position });
@@ -105,8 +105,17 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             })
         } else {
             let name = &field.name;
-            let plan_expression = plan_expression(codec, quote!(#name));
-            let length_check = plan_length_check(codec, &plan, &text, write_error_name);
+            let (plan_expression, length_check) = if codec.is_prefix() {
+                (
+                    plan_expression(codec, quote!(#name)),
+                    plan_length_check(codec, &plan, &text, write_error_name),
+                )
+            } else {
+                (
+                    fixed_plan_expression(field, quote!(#name))?,
+                    fixed_plan_length_check(field, &plan, &text, write_error_name)?,
+                )
+            };
             Some(quote! {
                 let #plan = #plan_expression.map_err(#write_error_name::#variant)?;
                 #length_check
@@ -121,29 +130,27 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         .fields
         .iter()
         .filter(|field| !field.is_region_length_source)
-        .map(|field| {
+        .flat_map(|field| {
             let name = &field.name;
             let docs = &field.docs;
+            if field.mapping.is_some() && (field.raw_name.is_none() || mapping_raw_type_tokens(field).is_none()) {
+                return Vec::new();
+            }
+            if let (Some(mapping), Some(raw), Some(raw_name)) = (&field.mapping, mapping_raw_type_tokens(field), field.raw_name.as_ref()) {
+                let semantic = &mapping.semantic;
+                return vec![quote! {
+                    #[doc = "Supplies this field's semantic value to the builder."] #(#docs)* #[must_use]
+                    #visibility fn #name(mut self, value: #semantic) -> Self { self.#name = ::core::option::Option::Some(<#raw as ::core::convert::From<#semantic>>::from(value)); self }
+                    #[doc = "Supplies this field's raw fixed representation to the builder."] #[must_use]
+                    #visibility fn #raw_name(mut self, value: #raw) -> Self { self.#name = ::core::option::Option::Some(value); self }
+                }];
+            }
             let value = match field.codec() {
-                Some(codec) if codec.is_prefix() => {
-                    let codec = codec_tokens(codec);
-                    quote!(<#codec as ::wire_repr::PrefixCodec>::Value<'value>)
-                }
-                Some(codec) => {
-                    let codec = codec_tokens(codec);
-                    quote!(<#codec as ::wire_repr::FixedCodec>::Value<'value>)
-                }
+                Some(codec) if codec.is_prefix() => { let codec = codec_tokens(codec); quote!(<#codec as ::wire_repr::PrefixCodec>::Value<'value>) }
+                Some(codec) => { let codec = codec_tokens(codec); quote!(<#codec as ::wire_repr::FixedCodec>::Value<'value>) }
                 None => quote!(&'value [u8]),
             };
-            quote! {
-                #[doc = "Supplies this field to the builder."]
-                #(#docs)*
-                #[must_use]
-                #visibility fn #name(mut self, value: #value) -> Self {
-                    self.#name = ::core::option::Option::Some(value);
-                    self
-                }
-            }
+            vec![quote! { #[doc = "Supplies this field to the builder."] #(#docs)* #[must_use] #visibility fn #name(mut self, value: #value) -> Self { self.#name = ::core::option::Option::Some(value); self } }]
         });
 
     quote! {
@@ -160,7 +167,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             #[doc = "Preflights the complete layout, then writes it into leading output bytes."]
             #visibility fn build_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), #write_error_name> {
                 #(#zero_width)*
-                let Self { #(#destructured,)* } = self;
+                let Self { #(#destructured,)* .. } = self;
                 #(#missing)*
                 #(#length_checks)*
                 #(#preflight)*
@@ -282,6 +289,24 @@ fn plan_expression(codec: &crate::ir::Codec, value: TokenStream) -> TokenStream 
     }
 }
 
+fn fixed_plan_expression(field: &Field, value: TokenStream) -> Option<TokenStream> {
+    let codec = effective_fixed_codec_tokens(field)?;
+    Some(quote!(<#codec as ::wire_repr::FixedCodec>::plan(#value)))
+}
+
+fn fixed_plan_length_check(
+    field: &Field,
+    plan: &syn::Ident,
+    field_name: &str,
+    error: &syn::Ident,
+) -> Option<TokenStream> {
+    let codec = effective_fixed_codec_tokens(field)?;
+    let field_name = field_name.to_owned();
+    Some(
+        quote! { let actual = ::wire_repr::EncodePlan::encoded_len(&#plan); let expected = <#codec as ::wire_repr::FixedCodec>::WIDTH; if actual != expected { return Err(#error::InvalidPlanLength { field: #field_name, expected, actual }); } },
+    )
+}
+
 fn plan_length_check(
     codec: &crate::ir::Codec,
     plan: &syn::Ident,
@@ -312,8 +337,10 @@ fn extent_checks(
                         let plan = plan_ident(*index);
                         quote!(::wire_repr::EncodePlan::encoded_len(&#plan))
                     }
-                    Some(codec) => {
-                        let codec = codec_tokens(codec);
+                    Some(_) => {
+                        let Some(codec) = effective_fixed_codec_tokens(field) else {
+                            continue;
+                        };
                         quote!(<#codec as ::wire_repr::FixedCodec>::WIDTH)
                     }
                     None => {
@@ -373,8 +400,8 @@ fn commits(layout: &SequentialLayout) -> Vec<TokenStream> {
                     let plan = plan_ident(*index);
                     quote!(::wire_repr::EncodePlan::encoded_len(&#plan))
                 }
-                Some(codec) => {
-                    let codec = codec_tokens(codec);
+                Some(_) => {
+                    let codec = effective_fixed_codec_tokens(field)?;
                     quote!(<#codec as ::wire_repr::FixedCodec>::WIDTH)
                 }
                 None => {
@@ -399,7 +426,11 @@ fn commits(layout: &SequentialLayout) -> Vec<TokenStream> {
 
 fn encode_variant(field: &Field) -> Option<TokenStream> {
     let codec = field.codec()?;
-    let codec = codec_tokens(codec);
+    let codec = if codec.is_prefix() {
+        codec_tokens(codec)
+    } else {
+        effective_fixed_codec_tokens(field)?
+    };
     let variant = &field.error_variant;
     let name = field_name(field);
     if field.is_prefix() {

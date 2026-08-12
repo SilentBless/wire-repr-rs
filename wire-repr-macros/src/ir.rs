@@ -9,7 +9,24 @@ use crate::syntax;
 
 /// Fully validated invocation in source declaration order.
 pub(crate) struct Invocation {
-    pub(crate) layouts: Vec<Layout>,
+    pub(crate) items: Vec<Item>,
+}
+
+/// A renderer-ready top-level declaration.
+pub(crate) enum Item {
+    /// A byte-backed layout declaration.
+    Layout(Layout),
+    /// A transparent nominal fixed integer scalar.
+    Scalar(Scalar),
+}
+
+/// A normalized scalar whose storage has already been resolved to a builtin integer codec.
+pub(crate) struct Scalar {
+    pub(crate) docs: Vec<Attribute>,
+    pub(crate) visibility: Visibility,
+    pub(crate) name: Ident,
+    pub(crate) storage: Builtin,
+    pub(crate) raw_type: IntegerType,
 }
 
 /// A renderer-ready layout with unambiguous placement semantics.
@@ -77,6 +94,12 @@ pub(crate) struct Field {
     pub(crate) docs: Vec<Attribute>,
     pub(crate) name: Ident,
     pub(crate) kind: FieldKind,
+    /// Optional semantic representation layered over the physical codec.
+    pub(crate) mapping: Option<Mapping>,
+    /// Generated physical-representation getter for a mapped field.
+    pub(crate) raw_name: Option<Ident>,
+    /// Generated physical-representation setter for a mapped field.
+    pub(crate) raw_setter_name: Option<Ident>,
     pub(crate) declaration_index: usize,
     pub(crate) placement: usize,
     pub(crate) placement_span: Span,
@@ -118,6 +141,19 @@ pub(crate) enum FieldKind {
         length_source: usize,
         length_source_span: Span,
     },
+}
+
+/// A semantic fixed mapping and its physical raw representation.
+pub(crate) struct Mapping {
+    pub(crate) semantic: Path,
+    pub(crate) raw: MappingRaw,
+}
+
+/// Physical raw representation preserved by a semantic fixed mapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MappingRaw {
+    Builtin(IntegerType),
+    Bytes(usize),
 }
 
 /// Renderer-ready immutable bit projection.
@@ -186,40 +222,156 @@ pub(crate) enum Builtin {
     LeI128,
 }
 
+/// Semantic integer type owned by a declared scalar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntegerType {
+    U8,
+    I8,
+    U16,
+    I16,
+    U32,
+    I32,
+    U64,
+    I64,
+    U128,
+    I128,
+}
+
 /// Normalizes parsed syntax and rejects semantic violations before rendering.
 pub(crate) fn normalize(parsed: syntax::Invocation) -> Result<Invocation> {
     let mut errors = None;
-    if parsed.layouts.is_empty() {
+    if parsed.items.is_empty() {
         push(
             &mut errors,
-            Error::new(Span::call_site(), "wire_repr requires at least one layout"),
+            Error::new(
+                Span::call_site(),
+                "wire_repr requires at least one declaration",
+            ),
         );
     }
     let mut stems = HashMap::new();
-    let mut generated_layout_names = HashMap::new();
-    let mut layouts = Vec::new();
-    for source in parsed.layouts {
-        if stems
-            .insert(source.name.to_string(), source.name.span())
-            .is_some()
-        {
-            push(
-                &mut errors,
-                Error::new(source.name.span(), "duplicate layout stem"),
-            );
-        }
-        if let Some(layout) = normalize_layout(source, &mut generated_layout_names, &mut errors) {
-            layouts.push(layout);
+    let mut generated_names = HashMap::new();
+    let scalar_names: HashMap<_, _> = parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syntax::Item::Scalar(scalar) => {
+                Some((normalized_name(&scalar.name), scalar.name.span()))
+            }
+            syntax::Item::Layout(_) => None,
+        })
+        .collect();
+    let mut items = Vec::new();
+    for source in parsed.items {
+        match source {
+            syntax::Item::Layout(source) => {
+                if stems
+                    .insert(normalized_name(&source.name), source.name.span())
+                    .is_some()
+                {
+                    push(
+                        &mut errors,
+                        Error::new(source.name.span(), "duplicate layout stem"),
+                    );
+                }
+                if let Some(layout) =
+                    normalize_layout(source, &scalar_names, &mut generated_names, &mut errors)
+                {
+                    items.push(Item::Layout(layout));
+                }
+            }
+            syntax::Item::Scalar(source) => {
+                if let Some(scalar) = normalize_scalar(source, &mut generated_names, &mut errors) {
+                    items.push(Item::Scalar(scalar));
+                }
+            }
         }
     }
     match errors {
         Some(error) => Err(error),
-        None => Ok(Invocation { layouts }),
+        None => Ok(Invocation { items }),
     }
+}
+
+fn normalize_scalar(
+    source: syntax::Scalar,
+    generated_names: &mut HashMap<String, Span>,
+    errors: &mut Option<Error>,
+) -> Option<Scalar> {
+    let storage = match source.storage {
+        syntax::Codec::Bare(name) => match builtin(&name) {
+            Some(storage) => storage,
+            None => {
+                push(
+                    errors,
+                    Error::new(
+                        name.span(),
+                        "scalar storage must be a supported builtin fixed integer codec",
+                    ),
+                );
+                return None;
+            }
+        },
+        syntax::Codec::Custom(path) => {
+            push(
+                errors,
+                Error::new_spanned(
+                    path,
+                    "scalar storage must be a builtin fixed integer codec, not a custom path",
+                ),
+            );
+            return None;
+        }
+        syntax::Codec::Bytes(_) => {
+            push(
+                errors,
+                Error::new(
+                    source.name.span(),
+                    "scalar storage must be a builtin fixed integer codec; `bytes(N)` is unsupported",
+                ),
+            );
+            return None;
+        }
+        syntax::Codec::Prefix(_) => {
+            push(
+                errors,
+                Error::new(
+                    source.name.span(),
+                    "scalar storage must be a builtin fixed integer codec; `prefix(path)` is unsupported",
+                ),
+            );
+            return None;
+        }
+        syntax::Codec::Region(_) => {
+            push(
+                errors,
+                Error::new(
+                    source.name.span(),
+                    "scalar storage must be a builtin fixed integer codec; `region(field)` is unsupported",
+                ),
+            );
+            return None;
+        }
+    };
+    let raw_type = scalar_raw_type(storage);
+    register_name(
+        generated_names,
+        &source.name,
+        errors,
+        "generated top-level name collision",
+    );
+    Some(Scalar {
+        docs: source.docs,
+        visibility: source.visibility,
+        name: source.name,
+        storage,
+        raw_type,
+    })
 }
 
 fn normalize_layout(
     source: syntax::Layout,
+    scalar_names: &HashMap<String, Span>,
     generated_layout_names: &mut HashMap<String, Span>,
     errors: &mut Option<Error>,
 ) -> Option<Layout> {
@@ -442,15 +594,66 @@ fn normalize_layout(
             );
             continue;
         }
+        let mapping = match field.mapping {
+            Some(semantic) => match &field.codec {
+                syntax::Codec::Bare(name) => match builtin(name) {
+                    Some(storage) => Some(Mapping {
+                        semantic,
+                        raw: MappingRaw::Builtin(scalar_raw_type(storage)),
+                    }),
+                    None if scalar_names.contains_key(&normalized_name(name)) => {
+                        push(
+                            errors,
+                            Error::new_spanned(
+                                semantic,
+                                "mappings are unsupported on declared scalar codecs",
+                            ),
+                        );
+                        None
+                    }
+                    None => None,
+                },
+                syntax::Codec::Bytes(width) => Some(Mapping {
+                    semantic,
+                    raw: MappingRaw::Bytes(*width),
+                }),
+                syntax::Codec::Custom(_) => {
+                    push(
+                        errors,
+                        Error::new_spanned(semantic, "mappings are unsupported on custom codecs"),
+                    );
+                    None
+                }
+                syntax::Codec::Prefix(_) => {
+                    push(
+                        errors,
+                        Error::new_spanned(semantic, "mappings are unsupported on prefix codecs"),
+                    );
+                    None
+                }
+                syntax::Codec::Region(_) => {
+                    push(
+                        errors,
+                        Error::new_spanned(semantic, "mappings are unsupported on region fields"),
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         let field_kind = match field.codec {
             syntax::Codec::Bare(name) => match builtin(&name) {
                 Some(value) => FieldKind::Codec(Codec::Builtin(value)),
+                None if scalar_names.contains_key(&normalized_name(&name)) => {
+                    let path: Path = syn::parse_quote!(#name);
+                    FieldKind::Codec(Codec::Custom(path))
+                }
                 None => {
                     push(
                         errors,
                         Error::new(
                             name.span(),
-                            "unknown bare codec; use a supported builtin or `codec(path::ToCodec)`",
+                            "unknown bare codec; use a supported builtin, a declared scalar, or a direct codec path",
                         ),
                     );
                     continue;
@@ -490,6 +693,26 @@ fn normalize_layout(
                     length_source_span: source.span(),
                 }
             }
+        };
+        let raw_name = if mapping.is_some() {
+            Some(generated_ident(
+                &format!("{generated_stem}_raw"),
+                field.name.span(),
+                "mapped field raw getter",
+                errors,
+            )?)
+        } else {
+            None
+        };
+        let raw_setter_name = if mapping.is_some() {
+            Some(generated_ident(
+                &format!("set_{generated_stem}_raw"),
+                field.name.span(),
+                "mapped field raw setter",
+                errors,
+            )?)
+        } else {
+            None
         };
         let is_prefix = matches!(
             &field_kind,
@@ -566,6 +789,9 @@ fn normalize_layout(
             docs: field.docs,
             name: field.name,
             kind: field_kind,
+            mapping,
+            raw_name,
+            raw_setter_name,
             declaration_index,
             placement,
             placement_span,
@@ -617,6 +843,7 @@ fn normalize_layout(
             *length_source = source_index;
         }
         fields[source_index].is_region_length_source = true;
+        fields[source_index].raw_setter_name = None;
     }
 
     let mut physical_order = Vec::new();
@@ -834,6 +1061,19 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
             getters.insert(name, projection.name.span());
         }
     }
+    for field in fields.iter().filter_map(|field| field.raw_name.as_ref()) {
+        let name = normalized_name(field);
+        if getters.contains_key(&name) {
+            push(
+                errors,
+                Error::new(
+                    field.span(),
+                    "mapped raw getter conflicts with an existing getter",
+                ),
+            );
+        }
+        getters.insert(name, field.span());
+    }
     let mut setters = HashMap::new();
     for field in fields.iter().filter(|field| {
         matches!(field.codec(), Some(codec) if !codec.is_prefix()) && !field.is_region_length_source
@@ -852,6 +1092,27 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
             push(
                 errors,
                 Error::new(field.name.span(), "generated field setter collision"),
+            );
+        }
+    }
+    for field in fields
+        .iter()
+        .filter_map(|field| field.raw_setter_name.as_ref())
+    {
+        let name = normalized_name(field);
+        if getters.contains_key(&name) {
+            push(
+                errors,
+                Error::new(
+                    field.span(),
+                    "mapped raw setter conflicts with an existing getter",
+                ),
+            );
+        }
+        if setters.insert(name, field.span()).is_some() {
+            push(
+                errors,
+                Error::new(field.span(), "mapped raw setter collision"),
             );
         }
     }
@@ -911,6 +1172,19 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
             );
         }
     }
+    for field in fields
+        .iter()
+        .filter(|field| !field.is_region_length_source)
+        .filter_map(|field| field.raw_name.as_ref())
+    {
+        let name = normalized_name(field);
+        if fluent.insert(name, field.span()).is_some() {
+            push(
+                errors,
+                Error::new(field.span(), "generated builder fluent method collision"),
+            );
+        }
+    }
 }
 
 fn validate_fixed_layout_namespace(fields: &[Field], errors: &mut Option<Error>) {
@@ -960,6 +1234,19 @@ fn validate_fixed_layout_namespace(fields: &[Field], errors: &mut Option<Error>)
             getters.insert(name, projection.name.span());
         }
     }
+    for field in fields.iter().filter_map(|field| field.raw_name.as_ref()) {
+        let name = normalized_name(field);
+        if getters.contains_key(&name) {
+            push(
+                errors,
+                Error::new(
+                    field.span(),
+                    "mapped raw getter conflicts with an existing getter",
+                ),
+            );
+        }
+        getters.insert(name, field.span());
+    }
     let mut setters = HashMap::new();
     for field in fields {
         let name = normalized_name(&field.setter_name);
@@ -976,6 +1263,40 @@ fn validate_fixed_layout_namespace(fields: &[Field], errors: &mut Option<Error>)
             push(
                 errors,
                 Error::new(field.name.span(), "generated field setter collision"),
+            );
+        }
+    }
+    for field in fields
+        .iter()
+        .filter_map(|field| field.raw_setter_name.as_ref())
+    {
+        let name = normalized_name(field);
+        if getters.contains_key(&name) {
+            push(
+                errors,
+                Error::new(
+                    field.span(),
+                    "mapped raw setter conflicts with an existing getter",
+                ),
+            );
+        }
+        if setters.insert(name, field.span()).is_some() {
+            push(
+                errors,
+                Error::new(field.span(), "mapped raw setter collision"),
+            );
+        }
+    }
+    let mut fluent: HashMap<_, _> = fields
+        .iter()
+        .map(|field| (normalized_name(&field.name), field.name.span()))
+        .collect();
+    for field in fields.iter().filter_map(|field| field.raw_name.as_ref()) {
+        let name = normalized_name(field);
+        if fluent.insert(name, field.span()).is_some() {
+            push(
+                errors,
+                Error::new(field.span(), "generated builder fluent method collision"),
             );
         }
     }
@@ -1089,6 +1410,21 @@ fn normalize_projections(
     Some(result)
 }
 
+fn scalar_raw_type(storage: Builtin) -> IntegerType {
+    match storage {
+        Builtin::U8 => IntegerType::U8,
+        Builtin::I8 => IntegerType::I8,
+        Builtin::BeU16 | Builtin::LeU16 => IntegerType::U16,
+        Builtin::BeI16 | Builtin::LeI16 => IntegerType::I16,
+        Builtin::BeU24 | Builtin::LeU24 | Builtin::BeU32 | Builtin::LeU32 => IntegerType::U32,
+        Builtin::BeI32 | Builtin::LeI32 => IntegerType::I32,
+        Builtin::BeU64 | Builtin::LeU64 => IntegerType::U64,
+        Builtin::BeI64 | Builtin::LeI64 => IntegerType::I64,
+        Builtin::BeU128 | Builtin::LeU128 => IntegerType::U128,
+        Builtin::BeI128 | Builtin::LeI128 => IntegerType::I128,
+    }
+}
+
 fn push(slot: &mut Option<Error>, error: Error) {
     if let Some(existing) = slot {
         existing.combine(error);
@@ -1102,7 +1438,7 @@ fn register_name(
     errors: &mut Option<Error>,
     message: &str,
 ) {
-    if names.insert(name.to_string(), name.span()).is_some() {
+    if names.insert(normalized_name(name), name.span()).is_some() {
         push(errors, Error::new(name.span(), message));
     }
 }
@@ -1237,15 +1573,197 @@ mod tests {
         }
     }
     #[test]
+    fn normalizes_fixed_mappings_with_physical_raw_types() {
+        let names = [
+            "U8", "I8", "BeU16", "LeU16", "BeI16", "LeI16", "BeU24", "LeU24", "BeU32", "LeU32",
+            "BeI32", "LeI32", "BeU64", "LeU64", "BeI64", "LeI64", "BeU128", "LeU128", "BeI128",
+            "LeI128",
+        ];
+        let fields: String = names
+            .iter()
+            .enumerate()
+            .map(|(index, codec)| format!("field f{index}: {codec} as crate::Semantic;"))
+            .collect();
+        let value = model(&format!(
+            "layout H {{ {fields} field bytes: bytes(16) as crate::Address; }}"
+        ))
+        .unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential layout")
+        };
+        let expected = [
+            IntegerType::U8,
+            IntegerType::I8,
+            IntegerType::U16,
+            IntegerType::U16,
+            IntegerType::I16,
+            IntegerType::I16,
+            IntegerType::U32,
+            IntegerType::U32,
+            IntegerType::U32,
+            IntegerType::U32,
+            IntegerType::I32,
+            IntegerType::I32,
+            IntegerType::U64,
+            IntegerType::U64,
+            IntegerType::I64,
+            IntegerType::I64,
+            IntegerType::U128,
+            IntegerType::U128,
+            IntegerType::I128,
+            IntegerType::I128,
+        ];
+        for (field, raw) in layout.data.fields.iter().zip(expected) {
+            assert!(
+                matches!(&field.mapping, Some(Mapping { raw: MappingRaw::Builtin(actual), .. }) if *actual == raw)
+            );
+            assert!(field.raw_name.is_some());
+            assert!(field.raw_setter_name.is_some());
+        }
+        assert!(matches!(
+            layout.data.fields.last().and_then(|field| field.mapping.as_ref()),
+            Some(Mapping { raw: MappingRaw::Bytes(16), semantic }) if semantic.segments.len() == 2
+        ));
+    }
+
+    #[test]
+    fn mapping_rejects_nonphysical_fixed_codecs_and_preserves_projections() {
+        for (source, needle) in [
+            (
+                "layout H { field value: crate::Codec as crate::Semantic; }",
+                "custom codecs",
+            ),
+            (
+                "scalar Nominal: U8; layout H { field value: Nominal as crate::Semantic; }",
+                "declared scalar codecs",
+            ),
+            (
+                "layout H { field value: prefix(crate::Codec) as crate::Semantic; }",
+                "prefix codecs",
+            ),
+            (
+                "layout H { field length: U8; field value: region(length) as crate::Semantic; }",
+                "region fields",
+            ),
+        ] {
+            error(source, needle);
+        }
+
+        let value = model(
+            "layout H { field flags: U8 as crate::Flags { projections { bit enabled: 0; } } }",
+        )
+        .unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential layout")
+        };
+        assert!(matches!(
+            layout.data.fields[0].codec(),
+            Some(Codec::Builtin(Builtin::U8))
+        ));
+        assert_eq!(layout.data.fields[0].projections.len(), 1);
+
+        let value = model("layout H { field length: U8 as crate::Length; field set_length_raw: U8; field payload: region(length); }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential layout")
+        };
+        let source = &layout.data.fields[0];
+        assert!(source.is_region_length_source);
+        assert!(source.raw_name.is_some());
+        assert!(source.raw_setter_name.is_none());
+    }
+
+    #[test]
+    fn mapped_raw_names_share_getter_setter_and_builder_namespaces() {
+        error(
+            "layout H { field kind: U8 as crate::Kind; field kind_raw: U8; }",
+            "mapped raw getter conflicts",
+        );
+        error(
+            "layout H { field flags: U8 { projections { bit kind_raw: 0; } } field kind: U8 as crate::Kind; }",
+            "mapped raw getter conflicts",
+        );
+        error(
+            "layout H { field kind: U8 as crate::Kind; field set_kind_raw: U8; }",
+            "mapped raw setter conflicts",
+        );
+        error(
+            "layout H { field r#kind: U8 as crate::Kind; field kind_raw: U8; }",
+            "mapped raw getter conflicts",
+        );
+        let builder_error =
+            match model("layout H { field kind: U8 as crate::Kind; field kind_raw: U8; }") {
+                Ok(_) => panic!("expected builder namespace error"),
+                Err(error) => error.into_compile_error().to_string(),
+            };
+        assert!(builder_error.contains("generated builder fluent method collision"));
+    }
+
+    #[test]
+    fn unmapped_fields_keep_no_mapping_or_raw_generated_names() {
+        let value = model("layout H { field value: U8; }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential layout")
+        };
+        let field = &layout.data.fields[0];
+        assert!(field.mapping.is_none());
+        assert!(field.raw_name.is_none());
+        assert!(field.raw_setter_name.is_none());
+    }
+
+    #[test]
+    fn normalizes_builtin_scalars_direct_paths_and_top_level_collisions() {
+        let value = model("layout Frame { field hardware: Hardware; field external: crate::External; } pub scalar Hardware: BeU16; pub scalar Size: LeU24;").unwrap();
+        assert!(
+            matches!(&value.items[0], Item::Layout(Layout::Sequential(layout)) if
+                matches!(layout.data.fields[0].codec(), Some(Codec::Custom(_)))
+                    && matches!(layout.data.fields[1].codec(), Some(Codec::Custom(_))))
+        );
+        assert!(matches!(
+            &value.items[1],
+            Item::Scalar(Scalar {
+                storage: Builtin::BeU16,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &value.items[2],
+            Item::Scalar(Scalar {
+                storage: Builtin::LeU24,
+                ..
+            })
+        ));
+        for (source, needle) in [
+            ("scalar S: bytes(2);", "bytes(N)"),
+            ("scalar S: prefix(crate::P);", "prefix(path)"),
+            ("scalar S: region(length);", "region(field)"),
+            ("scalar S: crate::Other;", "custom path"),
+            ("scalar S: Unknown;", "supported builtin"),
+            (
+                "layout Header { field value: U8; } scalar HeaderView: U8;",
+                "top-level name collision",
+            ),
+            (
+                "scalar r#Thing: U8; scalar Thing: U8;",
+                "top-level name collision",
+            ),
+        ] {
+            error(source, needle);
+        }
+    }
+
+    #[test]
     fn absolute_keeps_declaration_order_and_sorts_offsets() {
         let value = model("pub absolute layout Header { field tail: BeU16 { offset: 4; } field kind: U8 { offset: 0; } } layout Tail { field end: U8 { position: 1; } }").unwrap();
-        let Layout::Absolute(header) = &value.layouts[0] else {
+        let Item::Layout(Layout::Absolute(header)) = &value.items[0] else {
             panic!("expected absolute")
         };
         assert_eq!(header.data.fields[0].placement, 4);
         assert_eq!(header.data.fields[1].placement, 0);
         assert_eq!(header.offset_order, [1, 0]);
-        assert!(matches!(&value.layouts[1], Layout::Sequential(_)));
+        assert!(matches!(
+            &value.items[1],
+            Item::Layout(Layout::Sequential(_))
+        ));
     }
     #[test]
     fn absolute_offsets_allow_gaps_and_reject_duplicates() {
@@ -1274,8 +1792,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(value.layouts.len(), 2);
-        let Layout::Sequential(header) = &value.layouts[0] else {
+        assert_eq!(value.items.len(), 2);
+        let Item::Layout(Layout::Sequential(header)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
         assert_eq!(header.data.docs.len(), 1);
@@ -1321,10 +1839,10 @@ mod tests {
         let value = model(
             "layout Sequential { field bytes: bytes(16) { position: 1; } } absolute layout Absolute { field bytes: bytes(8) { offset: 0; } }",
         ).unwrap();
-        let Layout::Sequential(sequential) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(sequential)) = &value.items[0] else {
             panic!("expected sequential")
         };
-        let Layout::Absolute(absolute) = &value.layouts[1] else {
+        let Item::Layout(Layout::Absolute(absolute)) = &value.items[1] else {
             panic!("expected absolute")
         };
         assert!(matches!(
@@ -1340,7 +1858,7 @@ mod tests {
     #[test]
     fn raw_field_identifiers_keep_getter_spelling_and_normalize_generated_names() {
         let value = model("layout Header { field r#type: U8 { position: 1; } }").unwrap();
-        let Layout::Sequential(header) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(header)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
         let field = &header.data.fields[0];
@@ -1398,7 +1916,7 @@ mod tests {
             .map(|(index, name)| format!("field f{index}: {name} {{ position: {}; }}", index + 1))
             .collect();
         let value = model(&format!("layout L {{ {fields} }}")).unwrap();
-        let Layout::Sequential(layout) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
 
@@ -1411,7 +1929,7 @@ mod tests {
     #[test]
     fn validates_sequential_positions_names_and_empty_models() {
         for (source, needle) in [
-            ("", "at least one layout"),
+            ("", "at least one declaration"),
             ("layout L {}", "at least one field"),
             ("layout L { field a: U8 { position: 0; } }", "one-based"),
             (
@@ -1468,7 +1986,7 @@ mod tests {
     #[test]
     fn validates_unsigned_projection_storage_ranges_and_namespace() {
         let value = model("layout H { field top_flags: BeU24 { position: 1; projections { bit top: 23; } } field all_flags: BeU24 { position: 2; projections { bits all: 0..=23; } } }").unwrap();
-        let Layout::Sequential(layout) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential")
         };
         assert_eq!(
@@ -1585,7 +2103,7 @@ mod tests {
             "layout H { field tail: U8 { position: 2; } field r#type: prefix(crate::P) { position: 1; } } layout F { field value: U8 { position: 1; } }",
         )
         .unwrap();
-        let Layout::Sequential(dynamic) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(dynamic)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
         assert!(dynamic.has_dynamic);
@@ -1593,7 +2111,7 @@ mod tests {
         assert!(matches!(prefix.codec(), Some(Codec::Prefix(_))));
         assert_eq!(prefix.encoded_getter.to_string(), "type_encoded");
         assert_eq!(prefix.boundary.to_string(), "__wire_end_type");
-        let Layout::Sequential(fixed) = &value.layouts[1] else {
+        let Item::Layout(Layout::Sequential(fixed)) = &value.items[1] else {
             panic!("expected sequential layout")
         };
         assert!(!fixed.has_dynamic);
@@ -1625,7 +2143,7 @@ mod tests {
             "layout H { field second: region(length) { position: 3; } field length: U8 { position: 1; } field first: region(length) { position: 2; } }",
         )
         .unwrap();
-        let Layout::Sequential(layout) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
         assert!(layout.has_dynamic);
@@ -1731,7 +2249,7 @@ mod tests {
         );
 
         let value = model("layout H { field payload: region(length) { position: 3; } field length: prefix(crate::P) { position: 1; } field again: region(length) { position: 2; } field fixed: U8 { position: 4; } }").unwrap();
-        let Layout::Sequential(layout) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
         assert!(layout.data.fields[1].is_region_length_source);
@@ -1746,7 +2264,7 @@ mod tests {
             "layout H { field length: U8 { position: 1; } field r#payload: region(length) { position: 2; } }",
         )
         .unwrap();
-        let Layout::Sequential(layout) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
         assert_eq!(
@@ -1801,7 +2319,7 @@ mod tests {
             "layout H { align { position: 3; boundary: 1; } field tail: U8 { position: 4; } padding { position: 2; length: 3; } field head: U8 { position: 1; } }",
         )
         .unwrap();
-        let Layout::Sequential(layout) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
         assert_eq!(layout.data.fields[0].name, "tail");
@@ -1872,7 +2390,7 @@ mod tests {
             "layout H { field head: U8; padding { length: 3; } align { boundary: 8; } field tail: U8; }",
         )
         .unwrap();
-        let Layout::Sequential(layout) = &value.layouts[0] else {
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
         assert_eq!(layout.data.fields[0].name, "head");

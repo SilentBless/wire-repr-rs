@@ -151,6 +151,32 @@ layout compiler domain semantics.
 
 The [`codec`] module documents the implementor laws and extension boundary.
 
+### Total semantic mappings
+
+An eligible built-in fixed integer or `bytes(N)` field may add `as TypePath`, for example
+`field kind: BeU16 as crate::Kind;` or
+`field address: bytes(4) as crate::Address;`. The physical codec still owns byte decoding,
+encoding, range errors, and atomicity; the mapped type is the nominal consumer-facing API.
+
+Mapped fields generate `field()` for the semantic value and `field_raw()` for the raw codec
+value. Eligible mutable fields also generate semantic and `_raw` setters, and builders
+generate both fluent forms for the same input slot: the last call wins. A region-length
+source exposes both getters but has neither setter nor builder input because the builder
+derives its raw value from the region.
+
+Mappings are deliberately total: getters use `Semantic: From<Raw>` and setters/builders
+use `Raw: From<Semantic>`. Raw types are exact codec types, including `u32` for `U24` and
+`[u8; N]` for `bytes(N)`. There is no fallible semantic conversion layer. Consequently a
+semantic `U24` value can still produce an out-of-range raw `u32`, which the physical codec
+rejects without changing the destination. Mapped byte values are owned arrays or wrappers;
+unmapped `bytes(N)` continues to return borrowed [`Bytes`] (`&[u8]`).
+
+Only built-in fixed integers and `bytes(N)` are eligible. Declared `scalar Name: Codec;`
+instead declares a reusable codec-owning nominal wrapper; it is not an `as Type` mapping,
+and mappings do not apply to declared scalar codecs, custom/direct codecs, prefix fields,
+or regions. A mapping compiles to direct `From` calls around the existing codec operations:
+no runtime metadata, allocation, or dynamic dispatch is introduced.
+
 ## Deliberate limits
 
 `wire-repr` is a byte-representation compiler, not a runtime schema system. It does not

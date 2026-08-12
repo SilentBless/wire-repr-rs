@@ -4,7 +4,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::super::projection_getters;
-use super::{codec_tokens, field_start};
+use super::{codec_tokens, effective_fixed_codec_tokens, field_start, mapping_raw_type_tokens};
 use crate::ir::{Codec, Field, FieldKind, SequentialLayout};
 
 pub(super) fn render_layout(
@@ -40,13 +40,13 @@ pub(super) fn render_layout(
         .collect();
     let variants = eligible
         .iter()
-        .map(|(field, codec)| render_encode_variant(field, codec));
+        .filter_map(|(field, codec)| render_encode_variant(field, codec));
     let display_arms = eligible
         .iter()
         .map(|(field, _)| render_encode_display_arm(field));
     let setters = eligible
         .iter()
-        .map(|(field, codec)| render_setter(layout, field, codec, mutation_error_name));
+        .filter_map(|(field, codec)| render_setter(layout, field, codec, mutation_error_name));
 
     quote! {
         #[doc = "A mutable validated view of a dynamic sequential wire layout."]
@@ -133,14 +133,14 @@ fn eligible_codec(field: &Field) -> Option<&Codec> {
     (!codec.is_prefix() && !field.is_region_length_source).then_some(codec)
 }
 
-fn render_encode_variant(field: &Field, codec: &Codec) -> TokenStream {
-    let codec = codec_tokens(codec);
+fn render_encode_variant(field: &Field, _codec: &Codec) -> Option<TokenStream> {
+    let codec = effective_fixed_codec_tokens(field)?;
     let variant = &field.error_variant;
     let name = normalized_field_name(field);
-    quote! {
+    Some(quote! {
         #[doc = concat!("Reports an encoding failure for field `", #name, "`.")]
         #variant(<#codec as ::wire_repr::FixedCodec>::EncodeError),
-    }
+    })
 }
 
 fn render_encode_display_arm(field: &Field) -> TokenStream {
@@ -152,28 +152,40 @@ fn render_encode_display_arm(field: &Field) -> TokenStream {
 fn render_setter(
     layout: &SequentialLayout,
     field: &Field,
-    codec: &Codec,
+    _codec: &Codec,
     error_name: &syn::Ident,
-) -> TokenStream {
-    let codec = codec_tokens(codec);
+) -> Option<TokenStream> {
+    let codec = effective_fixed_codec_tokens(field)?;
     let name = &field.setter_name;
     let variant = &field.error_variant;
     let field_text = normalized_field_name(field);
     let start = field_start(layout, field.declaration_index);
     let visibility = &layout.data.visibility;
-    quote! {
-        #[doc = "Atomically replaces this field after preparing its complete encoding."]
-        #visibility fn #name<'value>(&mut self, value: <#codec as ::wire_repr::FixedCodec>::Value<'value>) -> ::core::result::Result<(), #error_name> {
-            let plan = <#codec as ::wire_repr::FixedCodec>::plan(value).map_err(#error_name::#variant)?;
-            let actual = ::wire_repr::EncodePlan::encoded_len(&plan);
-            let expected = <#codec as ::wire_repr::FixedCodec>::WIDTH;
-            if actual != expected {
-                return Err(#error_name::InvalidPlanLength { field: #field_text, expected, actual });
-            }
-            ::wire_repr::EncodePlan::write_into(&plan, &mut self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]);
-            Ok(())
-        }
+    let physical = quote! {
+        let plan = <#codec as ::wire_repr::FixedCodec>::plan(value).map_err(#error_name::#variant)?;
+        let actual = ::wire_repr::EncodePlan::encoded_len(&plan);
+        let expected = <#codec as ::wire_repr::FixedCodec>::WIDTH;
+        if actual != expected { return Err(#error_name::InvalidPlanLength { field: #field_text, expected, actual }); }
+        ::wire_repr::EncodePlan::write_into(&plan, &mut self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]);
+        Ok(())
+    };
+    if let (Some(mapping), Some(raw_setter), Some(raw)) = (
+        &field.mapping,
+        field.raw_setter_name.as_ref(),
+        mapping_raw_type_tokens(field),
+    ) {
+        let semantic = &mapping.semantic;
+        return Some(quote! {
+            #[doc = "Atomically replaces this field from its semantic value."] #visibility fn #name(&mut self, value: #semantic) -> ::core::result::Result<(), #error_name> { self.#raw_setter(<#raw as ::core::convert::From<#semantic>>::from(value)) }
+            #[doc = "Atomically replaces this field from its raw fixed representation."] #visibility fn #raw_setter(&mut self, value: #raw) -> ::core::result::Result<(), #error_name> { #physical }
+        });
     }
+    if field.mapping.is_some() {
+        return None;
+    }
+    Some(
+        quote! { #[doc = "Atomically replaces this field after preparing its complete encoding."] #visibility fn #name<'value>(&mut self, value: <#codec as ::wire_repr::FixedCodec>::Value<'value>) -> ::core::result::Result<(), #error_name> { #physical } },
+    )
 }
 
 fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<TokenStream> {
@@ -191,8 +203,22 @@ fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<TokenStream> 
                 quote! { #[doc = "Returns the exact validated encoding of this prefix field."] #[inline] #[must_use] #visibility fn #encoded_getter(&self) -> &[u8] { &self.bytes[(#start)..self.#end] } },
             ]
         }
-        FieldKind::Codec(codec) => {
-            let codec = codec_tokens(codec);
+        FieldKind::Codec(_) => {
+            let Some(codec) = effective_fixed_codec_tokens(field) else {
+                return Vec::new();
+            };
+            if let Some(mapping) = &field.mapping {
+                let (Some(raw_name), Some(raw)) =
+                    (field.raw_name.as_ref(), mapping_raw_type_tokens(field))
+                else {
+                    return Vec::new();
+                };
+                let semantic = &mapping.semantic;
+                return vec![quote! {
+                    #[doc = "Returns the semantic value of this validated fixed field."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> #semantic { <#semantic as ::core::convert::From<#raw>>::from(self.#raw_name()) }
+                    #[doc = "Returns the raw fixed representation of this field."] #[inline] #[must_use] #visibility fn #raw_name(&self) -> #raw { <#codec as ::wire_repr::FixedCodec>::decode(&self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]) }
+                }];
+            }
             vec![
                 quote! { #[doc = "Returns the decoded value of this validated fixed field."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> <#codec as ::wire_repr::FixedCodec>::Value<'_> { <#codec as ::wire_repr::FixedCodec>::decode(&self.bytes[(#start)..((#start) + <#codec as ::wire_repr::FixedCodec>::WIDTH)]) } },
             ]

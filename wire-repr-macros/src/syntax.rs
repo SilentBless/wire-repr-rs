@@ -20,7 +20,23 @@ mod keyword {
 
 /// Parsed invocation before semantic normalization.
 pub(crate) struct Invocation {
-    pub(crate) layouts: Vec<Layout>,
+    pub(crate) items: Vec<Item>,
+}
+
+/// A top-level declaration in source order.
+pub(crate) enum Item {
+    /// A byte-backed layout declaration.
+    Layout(Layout),
+    /// A transparent nominal fixed integer scalar.
+    Scalar(Scalar),
+}
+
+/// Parsed scalar declaration before semantic normalization.
+pub(crate) struct Scalar {
+    pub(crate) docs: Vec<Attribute>,
+    pub(crate) visibility: Visibility,
+    pub(crate) name: Ident,
+    pub(crate) storage: Codec,
 }
 
 /// Parsed layout declaration.
@@ -79,6 +95,7 @@ pub(crate) struct Field {
     pub(crate) docs: Vec<Attribute>,
     pub(crate) name: Ident,
     pub(crate) codec: Codec,
+    pub(crate) mapping: Option<Path>,
     pub(crate) placement: Placement,
     pub(crate) projections: Vec<Projection>,
 }
@@ -115,12 +132,55 @@ pub(crate) enum Codec {
 
 impl Parse for Invocation {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let mut layouts = Vec::new();
+        let mut items = Vec::new();
         while !input.is_empty() {
-            layouts.push(parse_layout(input)?);
+            items.push(parse_item(input)?);
         }
-        Ok(Self { layouts })
+        Ok(Self { items })
     }
+}
+
+fn parse_item(input: ParseStream<'_>) -> Result<Item> {
+    let fork = input.fork();
+    parse_docs(&fork)?;
+    fork.parse::<Visibility>()?;
+    if fork.peek(Token![struct]) {
+        let keyword: Token![struct] = fork.parse()?;
+        return Err(Error::new(
+            keyword.span,
+            "expected `layout` or `scalar`; `struct` is not wire_repr syntax",
+        ));
+    }
+    if !fork.peek(keyword::absolute) {
+        let keyword: Ident = fork
+            .parse()
+            .map_err(|_| Error::new(fork.span(), "expected `layout` or `scalar`"))?;
+        if keyword == "scalar" {
+            return parse_scalar(input).map(Item::Scalar);
+        }
+    }
+    parse_layout(input).map(Item::Layout)
+}
+
+fn parse_scalar(input: ParseStream<'_>) -> Result<Scalar> {
+    let docs = parse_docs(input)?;
+    let visibility = input.parse::<Visibility>()?;
+    let keyword: Ident = input
+        .parse()
+        .map_err(|_| Error::new(input.span(), "expected `scalar`"))?;
+    if keyword != "scalar" {
+        return Err(Error::new(keyword.span(), "expected `scalar`"));
+    }
+    let name = input.parse()?;
+    input.parse::<Token![:]>()?;
+    let storage = parse_codec(input)?;
+    input.parse::<Token![;]>()?;
+    Ok(Scalar {
+        docs,
+        visibility,
+        name,
+        storage,
+    })
 }
 
 fn parse_layout(input: ParseStream<'_>) -> Result<Layout> {
@@ -260,6 +320,12 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
     let name = input.parse()?;
     input.parse::<Token![:]>()?;
     let codec = parse_codec(input)?;
+    let mapping = if input.peek(Token![as]) {
+        input.parse::<Token![as]>()?;
+        Some(input.parse::<Path>()?)
+    } else {
+        None
+    };
     if input.peek(Token![;]) {
         let semicolon: Token![;] = input.parse()?;
         if kind == LayoutKind::Absolute {
@@ -269,6 +335,7 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
             docs,
             name,
             codec,
+            mapping,
             placement: Placement::Implicit(semicolon.span),
             projections: Vec::new(),
         });
@@ -340,6 +407,7 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
         docs,
         name,
         codec,
+        mapping,
         placement,
         projections,
     })
@@ -388,10 +456,7 @@ fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
         || input.peek(Token![super])
         || input.peek(Token![Self])
     {
-        return Err(Error::new(
-            input.span(),
-            "bare codec paths are not supported; use `codec(path::ToCodec)`",
-        ));
+        return input.parse::<Path>().map(Codec::Custom);
     }
     if input.peek(keyword::bytes) {
         input.parse::<keyword::bytes>()?;
@@ -447,6 +512,9 @@ fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
         }
         return Ok(Codec::Region(source));
     }
+    if input.peek(Token![::]) {
+        return Ok(Codec::Custom(input.parse()?));
+    }
     let first: Ident = input.parse().map_err(|_| {
         Error::new(
             input.span(),
@@ -463,10 +531,18 @@ fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
         return Ok(Codec::Custom(path));
     }
     if input.peek(Token![::]) {
-        return Err(Error::new(
-            first.span(),
-            "bare codec paths are not supported; use `codec(path::ToCodec)`",
-        ));
+        if first != "crate" && first != "self" && first != "super" && first != "Self" {
+            return Err(Error::new(
+                first.span(),
+                "direct codec paths must start with `::`, `crate`, `self`, `super`, or `Self`",
+            ));
+        }
+        let mut path: Path = syn::parse_quote!(#first);
+        while input.peek(Token![::]) {
+            input.parse::<Token![::]>()?;
+            path.segments.push(input.parse()?);
+        }
+        return Ok(Codec::Custom(path));
     }
     Ok(Codec::Bare(first))
 }
@@ -489,10 +565,79 @@ mod tests {
     use super::*;
     use syn::parse_str;
 
+    fn layouts(invocation: &Invocation) -> Vec<&Layout> {
+        invocation
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Layout(layout) => Some(layout),
+                Item::Scalar(_) => None,
+            })
+            .collect()
+    }
+
     fn parse_error(source: &str) -> Error {
         match parse_str::<Invocation>(source) {
             Ok(_) => panic!("expected syntax error"),
             Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn accepts_scalars_and_direct_fixed_codec_paths_in_mixed_order() {
+        let parsed: Invocation = parse_str("/// type\npub scalar Hardware: BeU16; layout Frame { field hardware: Hardware; } pub(crate) scalar Signed: LeI32;").unwrap();
+        assert_eq!(parsed.items.len(), 3);
+        assert!(
+            matches!(&parsed.items[0], Item::Scalar(Scalar { storage: Codec::Bare(name), .. }) if name == "BeU16")
+        );
+        assert!(
+            matches!(&parsed.items[1], Item::Layout(Layout { fields, .. }) if matches!(&fields[0].codec, Codec::Bare(name) if name == "Hardware"))
+        );
+        assert!(matches!(&parsed.items[2], Item::Scalar(_)));
+    }
+
+    #[test]
+    fn accepts_only_rooted_direct_fixed_codec_paths() {
+        for path in [
+            "::wire_repr::BeU16",
+            "crate::types::Kind",
+            "self::types::Kind",
+            "super::types::Kind",
+            "Self::Kind",
+        ] {
+            let source = format!("layout Header {{ field value: {path}; }}");
+            let parsed: Invocation = parse_str(&source).unwrap();
+            assert!(matches!(
+                &layouts(&parsed)[0].fields[0].codec,
+                Codec::Custom(_)
+            ));
+        }
+
+        assert!(
+            parse_error("layout Header { field value: typo::Codec; }")
+                .to_string()
+                .contains("direct codec paths must start")
+        );
+    }
+
+    #[test]
+    fn parses_fixed_mappings_before_placement_or_projections() {
+        let parsed: Invocation = parse_str(
+            "layout H { field kind: BeU16 as crate::Kind; field address: bytes(16) as crate::Address { position: 2; } field flags: U8 as crate::Flags { position: 3; projections { bit enabled: 0; } } field bits: U8 as crate::Bits { projections { bit set: 0; } } }",
+        )
+        .unwrap();
+        let fields = &layouts(&parsed)[0].fields;
+        assert!(matches!(&fields[0].mapping, Some(path) if path.segments.len() == 2));
+        assert!(matches!(&fields[1].codec, Codec::Bytes(16)));
+        assert!(matches!(&fields[1].mapping, Some(path) if path.segments.len() == 2));
+        assert_eq!(fields[2].projections.len(), 1);
+        assert_eq!(fields[3].projections.len(), 1);
+
+        for source in [
+            "layout H { field kind: U8 as; }",
+            "layout H { field kind: U8 as { position: 1; } }",
+        ] {
+            assert!(parse_str::<Invocation>(source).is_err(), "{source}");
         }
     }
 
@@ -510,25 +655,25 @@ mod tests {
         }
 
         let parsed: Invocation = parse_str("/// packet\nabsolute layout Private { #[doc = \"kind\"] field kind: U8 { offset: 0; } field code: codec(crate::Code) { offset: 2; } } pub absolute layout Public { field value: U8 { offset: 0; } } pub(crate) absolute layout Restricted { field value: U8 { offset: 0; } } layout Tail { field end: LeU16 { position: 1; } }").unwrap();
-        assert_eq!(parsed.layouts.len(), 4);
-        assert_eq!(parsed.layouts[0].kind, LayoutKind::Absolute);
+        assert_eq!(layouts(&parsed).len(), 4);
+        assert_eq!(layouts(&parsed)[0].kind, LayoutKind::Absolute);
         assert!(matches!(
-            &parsed.layouts[0].visibility,
+            &layouts(&parsed)[0].visibility,
             Visibility::Inherited
         ));
         assert!(matches!(
-            &parsed.layouts[1].visibility,
+            &layouts(&parsed)[1].visibility,
             Visibility::Public(_)
         ));
         assert!(matches!(
-            &parsed.layouts[2].visibility,
+            &layouts(&parsed)[2].visibility,
             Visibility::Restricted(_)
         ));
         assert!(matches!(
-            &parsed.layouts[0].fields[0].placement,
+            &layouts(&parsed)[0].fields[0].placement,
             Placement::Explicit(value) if value.base10_digits() == "0"
         ));
-        assert_eq!(parsed.layouts[3].kind, LayoutKind::Sequential);
+        assert_eq!(layouts(&parsed)[3].kind, LayoutKind::Sequential);
     }
 
     #[test]
@@ -554,15 +699,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(parsed.layouts.len(), 2);
-        assert_eq!(parsed.layouts[0].docs.len(), 1);
+        assert_eq!(layouts(&parsed).len(), 2);
+        assert_eq!(layouts(&parsed)[0].docs.len(), 1);
         assert!(matches!(
-            &parsed.layouts[0].visibility,
+            &layouts(&parsed)[0].visibility,
             Visibility::Restricted(_)
         ));
-        assert_eq!(parsed.layouts[0].fields[0].docs.len(), 1);
+        assert_eq!(layouts(&parsed)[0].fields[0].docs.len(), 1);
         assert!(matches!(
-            &parsed.layouts[0].fields[0].codec,
+            &layouts(&parsed)[0].fields[0].codec,
             Codec::Custom(path) if path.segments.len() == 2
         ));
     }
@@ -575,14 +720,6 @@ mod tests {
             (
                 "layout H { field f: { position: 1; } }",
                 "expected a builtin codec",
-            ),
-            (
-                "layout H { field f: crate::Code { position: 1; } }",
-                "use `codec(path::ToCodec)`",
-            ),
-            (
-                "layout H { field f: Code::Nested { position: 1; } }",
-                "use `codec(path::ToCodec)`",
             ),
             ("layout H { field f: U8 { position: 1 } }", "expected `;`"),
             (
@@ -607,9 +744,11 @@ mod tests {
     #[test]
     fn accepts_nested_projection_grammar_and_rejects_empty_or_unknown_forms() {
         let parsed: Invocation = parse_str("layout H { field flags: U8 { position: 1; projections { #[doc = \"enabled\"] bit r#type: 0; bits mode: 1..=3; } } } absolute layout A { field flags: LeU16 { offset: 0; projections { bit low: 0; } } }").unwrap();
-        assert_eq!(parsed.layouts[0].fields[0].projections.len(), 2);
+        assert_eq!(layouts(&parsed)[0].fields[0].projections.len(), 2);
         assert_eq!(
-            parsed.layouts[0].fields[0].projections[0].name.to_string(),
+            layouts(&parsed)[0].fields[0].projections[0]
+                .name
+                .to_string(),
             "r#type"
         );
         for (source, needle) in [
@@ -681,7 +820,7 @@ mod tests {
             parse_str("layout H { field value: prefix(crate::Terminated) { position: 1; } }")
                 .unwrap();
         assert!(matches!(
-            &parsed.layouts[0].fields[0].codec,
+            &layouts(&parsed)[0].fields[0].codec,
             Codec::Prefix(path) if path.segments.len() == 2
         ));
 
@@ -698,11 +837,11 @@ mod tests {
             "layout Sequential { field value: bytes(16) { position: 1; } } absolute layout Absolute { field value: bytes(16) { offset: 0; } }",
         ).unwrap();
         assert!(matches!(
-            parsed.layouts[0].fields[0].codec,
+            layouts(&parsed)[0].fields[0].codec,
             Codec::Bytes(16)
         ));
         assert!(matches!(
-            parsed.layouts[1].fields[0].codec,
+            layouts(&parsed)[1].fields[0].codec,
             Codec::Bytes(16)
         ));
 
@@ -724,7 +863,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            &parsed.layouts[0].fields[0].codec,
+            &layouts(&parsed)[0].fields[0].codec,
             Codec::Region(source) if source == "length"
         ));
 
@@ -743,7 +882,7 @@ mod tests {
             "layout H { align { position: 3; boundary: 8; } field tail: U8 { position: 4; } padding { position: 2; length: 3; } field head: U8 { position: 1; } }",
         )
         .unwrap();
-        let physical = &parsed.layouts[0].physical;
+        let physical = &layouts(&parsed)[0].physical;
         assert_eq!(physical.len(), 4);
         assert!(matches!(
             &physical[0],
@@ -790,7 +929,7 @@ mod tests {
             "layout H { field length: U8; field prefix: prefix(crate::Prefix); field payload: region(length); field bytes: bytes(4); field custom: codec(crate::Codec); field flags: U8 { projections { bit enabled: 0; } } padding { length: 3; } align { boundary: 8; } }",
         )
         .unwrap();
-        let layout = &parsed.layouts[0];
+        let layout = &layouts(&parsed)[0];
         assert!(
             layout
                 .fields

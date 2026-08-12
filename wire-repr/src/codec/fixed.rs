@@ -130,3 +130,78 @@ impl<const N: usize> FixedCodec for Bytes<N> {
         }
     }
 }
+
+/// Macro-support fixed-width codec for opaque owned byte arrays.
+///
+/// This implementation detail exists for generated mapped `bytes(N)` fields. `N` must be
+/// nonzero; zero-width instantiations fail during constant evaluation just like [`Bytes`].
+///
+/// ```compile_fail
+/// use wire_repr::{__private::OwnedBytes, FixedCodec};
+///
+/// let _ = <OwnedBytes<0> as FixedCodec>::WIDTH;
+/// ```
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OwnedBytes<const N: usize>;
+
+impl<const N: usize> FixedCodec for OwnedBytes<N> {
+    type Value<'wire>
+        = [u8; N]
+    where
+        Self: 'wire;
+    type EncodeError = core::convert::Infallible;
+    type Plan<'value>
+        = [u8; N]
+    where
+        Self: 'value;
+
+    const WIDTH: usize = {
+        assert!(N != 0, "OwnedBytes<N> requires a nonzero width");
+        N
+    };
+
+    #[inline]
+    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
+        const { assert!(N != 0, "OwnedBytes<N> requires a nonzero width") };
+        let mut value = [0_u8; N];
+        value.copy_from_slice(bytes);
+        value
+    }
+
+    #[inline]
+    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
+        const { assert!(N != 0, "OwnedBytes<N> requires a nonzero width") };
+        Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FixedCodec, OwnedBytes};
+    use crate::codec::EncodePlan;
+
+    #[test]
+    fn owned_bytes_decode_copies_exact_input() {
+        let mut source = [1, 2, 3, 4];
+        let decoded = <OwnedBytes<4> as FixedCodec>::decode(&source);
+
+        source[0] = 9;
+        assert_eq!(decoded, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn owned_bytes_plan_is_infallible_and_writes_exact_bytes() {
+        let plan = <OwnedBytes<4> as FixedCodec>::plan([1, 2, 3, 4]).unwrap();
+        let mut output = [0; 4];
+
+        assert_eq!(plan.encoded_len(), 4);
+        plan.write_into(&mut output);
+        assert_eq!(output, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn owned_bytes_width_is_nonzero() {
+        assert_eq!(<OwnedBytes<1> as FixedCodec>::WIDTH, 1);
+    }
+}

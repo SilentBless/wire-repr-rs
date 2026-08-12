@@ -7,6 +7,12 @@ extern crate self as wire_repr;
 /// Codec contracts and built-in codecs.
 pub mod codec;
 
+/// Implementation details used by code generated from [`wire_repr!`].
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::codec::fixed::OwnedBytes;
+}
+
 #[doc(inline)]
 pub use wire_repr_macros::wire_repr;
 

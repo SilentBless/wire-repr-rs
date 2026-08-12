@@ -1,24 +1,29 @@
 //! Layout-mode dispatch and shared codec token mapping.
 
 mod absolute;
+mod scalar;
 mod sequential;
 mod sequential_dynamic;
 
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ir::{Builtin, Codec, Field, Invocation, Layout, ProjectionKind, UnsignedType};
+use crate::ir::{
+    Builtin, Codec, Field, IntegerType, Invocation, Item, Layout, MappingRaw, ProjectionKind,
+    UnsignedType,
+};
 
 /// Renders a validated invocation into its public view families.
 pub(crate) fn render(invocation: Invocation) -> TokenStream {
-    let layouts = invocation.layouts.iter().map(|layout| match layout {
-        Layout::Sequential(layout) if layout.has_dynamic => {
+    let items = invocation.items.iter().map(|item| match item {
+        Item::Scalar(scalar) => scalar::render_scalar(scalar),
+        Item::Layout(Layout::Sequential(layout)) if layout.has_dynamic => {
             sequential_dynamic::render_layout(layout)
         }
-        Layout::Sequential(layout) => sequential::render_layout(layout),
-        Layout::Absolute(layout) => absolute::render_layout(layout),
+        Item::Layout(Layout::Sequential(layout)) => sequential::render_layout(layout),
+        Item::Layout(Layout::Absolute(layout)) => absolute::render_layout(layout),
     });
-    quote! { #(#layouts)* }
+    quote! { #(#items)* }
 }
 
 pub(super) fn codec_tokens(codec: &Codec) -> TokenStream {
@@ -48,12 +53,37 @@ pub(super) fn codec_tokens(codec: &Codec) -> TokenStream {
     }
 }
 
+/// Renders the fixed codec used to physically decode and encode a field.
+pub(super) fn effective_fixed_codec_tokens(field: &Field) -> Option<TokenStream> {
+    match field.mapping.as_ref().map(|mapping| mapping.raw) {
+        Some(MappingRaw::Bytes(width)) => Some(quote!(::wire_repr::__private::OwnedBytes<#width>)),
+        Some(MappingRaw::Builtin(_)) | None => field.codec().map(codec_tokens),
+    }
+}
+
+/// Renders the raw value preserved by a validated semantic mapping.
+pub(super) fn mapping_raw_type_tokens(field: &Field) -> Option<TokenStream> {
+    match field.mapping.as_ref()?.raw {
+        MappingRaw::Builtin(IntegerType::U8) => Some(quote!(u8)),
+        MappingRaw::Builtin(IntegerType::I8) => Some(quote!(i8)),
+        MappingRaw::Builtin(IntegerType::U16) => Some(quote!(u16)),
+        MappingRaw::Builtin(IntegerType::I16) => Some(quote!(i16)),
+        MappingRaw::Builtin(IntegerType::U32) => Some(quote!(u32)),
+        MappingRaw::Builtin(IntegerType::I32) => Some(quote!(i32)),
+        MappingRaw::Builtin(IntegerType::U64) => Some(quote!(u64)),
+        MappingRaw::Builtin(IntegerType::I64) => Some(quote!(i64)),
+        MappingRaw::Builtin(IntegerType::U128) => Some(quote!(u128)),
+        MappingRaw::Builtin(IntegerType::I128) => Some(quote!(i128)),
+        MappingRaw::Bytes(width) => Some(quote!([u8; #width])),
+    }
+}
+
 /// Renders direct immutable projection getters shared by both layout renderers.
 pub(super) fn projection_getters(field: &Field, visibility: &syn::Visibility) -> Vec<TokenStream> {
     field.projections.iter().map(|projection| {
         let docs = &projection.docs;
         let name = &projection.name;
-        let storage = &field.name;
+        let storage = field.raw_name.as_ref().unwrap_or(&field.name);
         let start = projection.start;
         let end = projection.end;
         let ty = unsigned_type_tokens(projection.value_type);
