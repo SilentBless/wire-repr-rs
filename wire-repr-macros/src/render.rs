@@ -106,3 +106,26 @@ fn unsigned_type_tokens(value_type: UnsignedType) -> TokenStream {
         UnsignedType::U128 => quote!(u128),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renders_inline_build_into_for_every_builder_layout() {
+        let parsed = syn::parse_str(
+            "pub layout Sequential { field value: U8; } pub absolute layout Absolute { field value: U8 { offset: 0; } } pub layout Dynamic { field length: U8; field payload: region(length); }",
+        )
+        .expect("test layout syntax is valid");
+        let rendered =
+            render(crate::ir::normalize(parsed).expect("test layouts normalize")).to_string();
+
+        assert_eq!(rendered.matches("fn build_into").count(), 3, "{rendered}");
+        assert_eq!(
+            rendered.matches("# [inline] pub fn build_into").count(),
+            3,
+            "{rendered}"
+        );
+        assert!(!rendered.contains("inline (always)"), "{rendered}");
+    }
+}

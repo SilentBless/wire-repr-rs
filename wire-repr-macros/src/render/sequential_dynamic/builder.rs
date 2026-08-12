@@ -165,6 +165,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             #(#fluent)*
 
             #[doc = "Preflights the complete layout, then writes it into leading output bytes."]
+            #[inline]
             #visibility fn build_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), #write_error_name> {
                 #(#zero_width)*
                 let Self { #(#destructured,)* .. } = self;

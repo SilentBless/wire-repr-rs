@@ -221,6 +221,7 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
             #visibility fn new() -> Self { Self { #(#builder_initializers,)* } }
             #(#fluent_methods)*
             #[doc = "Preflights every field, then writes this layout into the leading output bytes."]
+            #[inline]
             #visibility fn build_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), #write_error_name> {
                 let Self { #(#destructured,)* .. } = self;
                 #(#write_width)* #(#write_extents)* #(#write_overlaps)*
