@@ -13,6 +13,7 @@ mod keyword {
     syn::custom_keyword!(padding);
     syn::custom_keyword!(prefix);
     syn::custom_keyword!(region);
+    syn::custom_keyword!(remainder);
     syn::custom_keyword!(projections);
     syn::custom_keyword!(bit);
     syn::custom_keyword!(bits);
@@ -128,6 +129,8 @@ pub(crate) enum Codec {
     Prefix(Path),
     /// An opaque byte region bounded by a named field value.
     Region(Ident),
+    /// An opaque terminal byte span consuming all caller-bounded input.
+    Remainder,
 }
 
 impl Parse for Invocation {
@@ -450,6 +453,11 @@ fn parse_projection(input: ParseStream<'_>) -> Result<Projection> {
 }
 
 fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
+    if input.peek(keyword::remainder) {
+        return input
+            .parse::<keyword::remainder>()
+            .map(|_| Codec::Remainder);
+    }
     if input.peek(Token![::])
         || input.peek(Token![crate])
         || input.peek(Token![self])

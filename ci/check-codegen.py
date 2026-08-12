@@ -26,6 +26,8 @@ PAIRS = (
     ("mapped_getter", "generated_mapped_getter", "handwritten_mapped_getter", True, 8),
     ("mapped_mutation", "generated_mapped_mutation", "handwritten_mapped_mutation", True, 4),
     ("mapped_builder", "generated_mapped_builder", "handwritten_mapped_builder", True, 4),
+    ("remainder_getter", "generated_remainder_getter", "handwritten_remainder_getter", True, 8),
+    ("remainder_builder", "generated_remainder_builder", "handwritten_remainder_builder", False, 4),
 )
 PANIC_MARKERS = (
     "panic",

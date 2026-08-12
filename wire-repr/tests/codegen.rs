@@ -46,6 +46,14 @@ wire_repr! {
         /// The mapped big-endian word under test.
         field mapped: BeU32 as crate::CodegenMapped;
     }
+
+    /// A caller-bounded terminal payload used only by the release-codegen gate.
+    pub layout CodegenRemainderPacket {
+        /// The fixed header byte under test.
+        field header: U8;
+        /// Every caller-bounded byte after the header.
+        field payload: remainder;
+    }
 }
 
 /// Generated fixed getter probe.
@@ -228,6 +236,47 @@ pub fn handwritten_mapped_builder(output: &mut [u8], value: u32) -> bool {
         output[..4].copy_from_slice(&value.to_be_bytes());
         true
     }
+}
+
+/// Generated terminal-remainder getter probe.
+#[inline(never)]
+pub fn generated_remainder_getter(bytes: &[u8]) -> Option<u8> {
+    CodegenRemainderPacketView::parse_exact(bytes)
+        .ok()?
+        .payload()
+        .first()
+        .copied()
+}
+
+/// Equivalent handwritten terminal-remainder getter probe.
+#[inline(never)]
+pub fn handwritten_remainder_getter(bytes: &[u8]) -> Option<u8> {
+    let (_, payload) = bytes.split_first()?;
+    payload.first().copied()
+}
+
+/// Generated terminal-remainder builder probe, including short-output behavior.
+#[inline(never)]
+pub fn generated_remainder_builder(output: &mut [u8], header: u8, payload: &[u8]) -> bool {
+    CodegenRemainderPacketBuilder::new()
+        .header(header)
+        .payload(payload)
+        .build_into(output)
+        .is_ok()
+}
+
+/// Equivalent handwritten terminal-remainder builder probe.
+#[inline(never)]
+pub fn handwritten_remainder_builder(output: &mut [u8], header: u8, payload: &[u8]) -> bool {
+    let Some(expected) = 1usize.checked_add(payload.len()) else {
+        return false;
+    };
+    if output.len() < expected {
+        return false;
+    }
+    output[0] = header;
+    output[1..expected].copy_from_slice(payload);
+    true
 }
 
 #[test]
@@ -425,4 +474,38 @@ fn generated_probes_match_handwritten_safe_rust() {
         ))
     );
     assert_eq!(generated_mapped_short, handwritten_mapped_short);
+
+    for input in [
+        &[][..],
+        &[0xa1][..],
+        &[0xa1, 0x10][..],
+        &[0xa1, 0x10, 0x20][..],
+    ] {
+        assert_eq!(
+            generated_remainder_getter(input),
+            handwritten_remainder_getter(input)
+        );
+    }
+
+    let payload = [0x10, 0x20, 0x30];
+    let mut generated_remainder_output = [0xa5; 6];
+    let mut handwritten_remainder_output = [0xa5; 6];
+    assert_eq!(
+        generated_remainder_builder(&mut generated_remainder_output, 0xa1, &payload),
+        handwritten_remainder_builder(&mut handwritten_remainder_output, 0xa1, &payload)
+    );
+    assert_eq!(generated_remainder_output, handwritten_remainder_output);
+    assert_eq!(
+        generated_remainder_output,
+        [0xa1, 0x10, 0x20, 0x30, 0xa5, 0xa5]
+    );
+
+    let mut generated_remainder_short = [0xa5; 3];
+    let mut handwritten_remainder_short = [0xa5; 3];
+    assert_eq!(
+        generated_remainder_builder(&mut generated_remainder_short, 0xa1, &payload),
+        handwritten_remainder_builder(&mut handwritten_remainder_short, 0xa1, &payload)
+    );
+    assert_eq!(generated_remainder_short, handwritten_remainder_short);
+    assert_eq!(generated_remainder_short, [0xa5; 3]);
 }

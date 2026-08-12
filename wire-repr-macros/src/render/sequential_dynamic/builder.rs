@@ -333,21 +333,27 @@ fn extent_checks(
         let (position, advance) = match item {
             PhysicalItem::Field { index, position } => {
                 let field = &layout.data.fields[*index];
-                let advance = match field.codec() {
-                    Some(codec) if codec.is_prefix() => {
-                        let plan = plan_ident(*index);
-                        quote!(::wire_repr::EncodePlan::encoded_len(&#plan))
-                    }
-                    Some(_) => {
-                        let Some(codec) = effective_fixed_codec_tokens(field) else {
-                            continue;
-                        };
-                        quote!(<#codec as ::wire_repr::FixedCodec>::WIDTH)
-                    }
-                    None => {
+                let advance = match &field.kind {
+                    FieldKind::Remainder => {
                         let name = &field.name;
                         quote!(#name.len())
                     }
+                    _ => match field.codec() {
+                        Some(codec) if codec.is_prefix() => {
+                            let plan = plan_ident(*index);
+                            quote!(::wire_repr::EncodePlan::encoded_len(&#plan))
+                        }
+                        Some(_) => {
+                            let Some(codec) = effective_fixed_codec_tokens(field) else {
+                                continue;
+                            };
+                            quote!(<#codec as ::wire_repr::FixedCodec>::WIDTH)
+                        }
+                        None => {
+                            let name = &field.name;
+                            quote!(#name.len())
+                        }
+                    },
                 };
                 (*position, advance)
             }
@@ -396,29 +402,41 @@ fn commits(layout: &SequentialLayout) -> Vec<TokenStream> {
             let field = &layout.data.fields[*index];
             let start = format_ident!("__wire_start_{index}");
             let end = format_ident!("__wire_end_{index}");
-            let advance = match field.codec() {
-                Some(codec) if codec.is_prefix() => {
-                    let plan = plan_ident(*index);
-                    quote!(::wire_repr::EncodePlan::encoded_len(&#plan))
-                }
-                Some(_) => {
-                    let codec = effective_fixed_codec_tokens(field)?;
-                    quote!(<#codec as ::wire_repr::FixedCodec>::WIDTH)
-                }
-                None => {
+            let advance = match &field.kind {
+                FieldKind::Remainder => {
                     let name = &field.name;
                     quote!(#name.len())
                 }
+                _ => match field.codec() {
+                    Some(codec) if codec.is_prefix() => {
+                        let plan = plan_ident(*index);
+                        quote!(::wire_repr::EncodePlan::encoded_len(&#plan))
+                    }
+                    Some(_) => {
+                        let codec = effective_fixed_codec_tokens(field)?;
+                        quote!(<#codec as ::wire_repr::FixedCodec>::WIDTH)
+                    }
+                    None => {
+                        let name = &field.name;
+                        quote!(#name.len())
+                    }
+                },
             };
-            let write = match field.codec() {
-                Some(_) => {
-                    let plan = plan_ident(*index);
-                    quote!(::wire_repr::EncodePlan::write_into(&#plan, &mut bytes[#start..#end]);)
-                }
-                None => {
+            let write = match &field.kind {
+                FieldKind::Remainder => {
                     let name = &field.name;
                     quote!(bytes[#start..#end].copy_from_slice(#name);)
                 }
+                _ => match field.codec() {
+                    Some(_) => {
+                        let plan = plan_ident(*index);
+                        quote!(::wire_repr::EncodePlan::write_into(&#plan, &mut bytes[#start..#end]);)
+                    }
+                    None => {
+                        let name = &field.name;
+                        quote!(bytes[#start..#end].copy_from_slice(#name);)
+                    }
+                },
             };
             Some(quote! { let #end = #start + #advance; #write })
         })

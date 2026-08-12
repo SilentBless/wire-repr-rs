@@ -221,6 +221,38 @@ A source may be declared later in explicit-position source order, but it must ph
 precede every region it frames. Regions may be empty and remain available as exact
 borrowed bytes for a consumer-owned inner parser.
 
+### Terminal remainder
+
+A sequential layout may end with one opaque `remainder` field. It owns every byte left
+in the caller-supplied input after its preceding entries; it is not length-framed and may
+be empty. For example, an Ethernet-like envelope keeps its payload caller-bounded rather
+than guessing a transport boundary:
+
+```rust
+wire_repr::wire_repr! {
+    pub layout EthernetEnvelope {
+        field destination: bytes(6);
+        field source: bytes(6);
+        field ether_type: BeU16;
+        field payload: remainder;
+    }
+}
+
+let input = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+    0x08, 0x00, 0x45, 0x00,
+];
+let (frame, suffix) = EthernetEnvelopeView::parse_prefix(&input).expect("frame");
+
+assert_eq!(frame.payload(), &[0x45, 0x00]);
+assert!(suffix.is_empty());
+```
+
+Because the remainder consumes all caller-bounded input, `parse_prefix` returns an empty
+suffix and `parse_exact` accepts the same input. It does not identify an external packet,
+transport, or FCS boundary.
+
 > [!TIP]
 > Keep unsupported or application-specific material as `bytes(N)` or `region(length)`,
 > then parse it with a small consumer-owned view. The framework should not learn domain
@@ -230,13 +262,15 @@ borrowed bytes for a consumer-owned inner parser.
 
 Generated mutable views preserve the same represented extent as immutable views.
 Same-width fixed fields receive typed setters when changing them cannot invalidate
-region framing. Prefix fields, regions, and region length sources do not receive
-in-place setters, and mutable views never expose unrestricted access to the full backing
+region framing. Prefix fields, regions, remainders, and region length sources do not
+receive in-place setters; regions and remainders expose mutable slices of exactly their
+validated spans, and mutable views never expose unrestricted access to the full backing
 slice.
 
-Builders preflight codec plans, checked arithmetic, derived region lengths, and output
-capacity before writing. A successful build returns the bounded mutable view together
-with its disjoint suffix. A failed build leaves every caller-owned output byte unchanged.
+Builders preflight codec plans, checked arithmetic, derived region lengths, remainder
+lengths, and output capacity before writing. A successful build returns the bounded
+mutable view together with its disjoint suffix. A failed build leaves every caller-owned
+output byte unchanged.
 Padding, alignment bytes, absolute gaps, and suffixes are therefore preserved rather
 than silently normalized.
 

@@ -280,6 +280,10 @@ fn render_field_validation(
                 remaining = suffix;
             }
         }
+        FieldKind::Remainder => quote! {
+            let _ = remaining;
+            remaining = &[];
+        },
         FieldKind::Region { length_source, .. } => {
             let source = &layout.data.fields[*length_source];
             let Some(source_codec) = source.codec() else {
@@ -394,6 +398,16 @@ pub(super) fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<To
                 }
             }]
         }
+        FieldKind::Remainder => vec![quote! {
+            #[doc = "Returns all caller-bounded bytes remaining after the preceding layout."]
+            #(#docs)*
+            #[inline]
+            #[must_use]
+            #visibility fn #name(&self) -> &'wire [u8] {
+                let bytes: &'wire [u8] = self.bytes;
+                &bytes[(#start)..]
+            }
+        }],
     }
 }
 

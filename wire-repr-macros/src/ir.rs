@@ -121,7 +121,7 @@ impl Field {
     pub(crate) fn codec(&self) -> Option<&Codec> {
         match &self.kind {
             FieldKind::Codec(codec) => Some(codec),
-            FieldKind::Region { .. } => None,
+            FieldKind::Region { .. } | FieldKind::Remainder => None,
         }
     }
 
@@ -132,6 +132,10 @@ impl Field {
     pub(crate) const fn is_region(&self) -> bool {
         matches!(self.kind, FieldKind::Region { .. })
     }
+
+    pub(crate) const fn is_remainder(&self) -> bool {
+        matches!(self.kind, FieldKind::Remainder)
+    }
 }
 
 /// Fully resolved semantic kind of a named field.
@@ -141,6 +145,8 @@ pub(crate) enum FieldKind {
         length_source: usize,
         length_source_span: Span,
     },
+    /// Opaque caller-bounded bytes at the terminal physical position.
+    Remainder,
 }
 
 /// A semantic fixed mapping and its physical raw representation.
@@ -348,6 +354,16 @@ fn normalize_scalar(
                 Error::new(
                     source.name.span(),
                     "scalar storage must be a builtin fixed integer codec; `region(field)` is unsupported",
+                ),
+            );
+            return None;
+        }
+        syntax::Codec::Remainder => {
+            push(
+                errors,
+                Error::new(
+                    source.name.span(),
+                    "scalar storage must be a builtin fixed integer codec; `remainder` is unsupported",
                 ),
             );
             return None;
@@ -638,6 +654,16 @@ fn normalize_layout(
                     );
                     None
                 }
+                syntax::Codec::Remainder => {
+                    push(
+                        errors,
+                        Error::new_spanned(
+                            semantic,
+                            "mappings are unsupported on remainder fields",
+                        ),
+                    );
+                    None
+                }
             },
             None => None,
         };
@@ -693,6 +719,18 @@ fn normalize_layout(
                     length_source_span: source.span(),
                 }
             }
+            syntax::Codec::Remainder => {
+                if kind == syntax::LayoutKind::Absolute {
+                    push(
+                        errors,
+                        Error::new(
+                            field.name.span(),
+                            "remainder fields are unsupported in absolute layouts",
+                        ),
+                    );
+                }
+                FieldKind::Remainder
+            }
         };
         let raw_name = if mapping.is_some() {
             Some(generated_ident(
@@ -719,6 +757,7 @@ fn normalize_layout(
             FieldKind::Codec(codec) if codec.is_prefix()
         );
         let is_region = matches!(&field_kind, FieldKind::Region { .. });
+        let is_remainder = matches!(&field_kind, FieldKind::Remainder);
         if kind == syntax::LayoutKind::Absolute && is_prefix {
             push(
                 errors,
@@ -728,7 +767,7 @@ fn normalize_layout(
                 ),
             );
         }
-        if !is_region {
+        if !is_region && !is_remainder {
             register_name(
                 &mut variants,
                 &error_variant,
@@ -756,7 +795,7 @@ fn normalize_layout(
             "dynamic field boundary",
             errors,
         )?;
-        let region_mut_name = if is_region {
+        let region_mut_name = if is_region || is_remainder {
             Some(generated_ident(
                 &format!("{generated_stem}_mut"),
                 field.name.span(),
@@ -766,9 +805,11 @@ fn normalize_layout(
         } else {
             None
         };
-        let projections = if is_prefix || is_region {
+        let projections = if is_prefix || is_region || is_remainder {
             if !field.projections.is_empty() {
-                let message = if is_region {
+                let message = if is_remainder {
+                    "remainder fields cannot own bit projections"
+                } else if is_region {
                     "region fields cannot own bit projections"
                 } else {
                     "prefix codec fields cannot own bit projections"
@@ -814,7 +855,7 @@ fn normalize_layout(
                 length_source,
                 length_source_span,
             } => Some((region_index, *length_source, *length_source_span)),
-            FieldKind::Codec(_) => None,
+            FieldKind::Codec(_) | FieldKind::Remainder => None,
         })
         .collect();
     for (region_index, source_declaration, source_span) in pending_regions {
@@ -822,10 +863,13 @@ fn normalize_layout(
             continue;
         };
         let source_index = *source_index;
-        if fields[source_index].is_region() {
+        if fields[source_index].is_region() || fields[source_index].is_remainder() {
             push(
                 errors,
-                Error::new(source_span, "region fields cannot be region length sources"),
+                Error::new(
+                    source_span,
+                    "region and remainder fields cannot be region length sources",
+                ),
             );
             continue;
         }
@@ -953,6 +997,35 @@ fn normalize_layout(
             physical_order.push(item);
         }
         physical_order.sort_by_key(PhysicalItem::position);
+        let remainders: Vec<_> = physical_order
+            .iter()
+            .filter_map(|item| match item {
+                PhysicalItem::Field { index, .. } if fields[*index].is_remainder() => Some(*index),
+                _ => None,
+            })
+            .collect();
+        if remainders.len() > 1 {
+            for index in remainders.iter().skip(1) {
+                push(
+                    errors,
+                    Error::new(
+                        fields[*index].name.span(),
+                        "at most one remainder field is supported",
+                    ),
+                );
+            }
+        }
+        if let Some(&index) = remainders.first()
+            && !matches!(physical_order.last(), Some(PhysicalItem::Field { index: last, .. }) if *last == index)
+        {
+            push(
+                errors,
+                Error::new(
+                    fields[index].placement_span,
+                    "remainder fields must be physically terminal",
+                ),
+            );
+        }
         for expected in 1..=physical_order.len() {
             if !physical_placements.contains_key(&expected) {
                 push(
@@ -988,7 +1061,7 @@ fn normalize_layout(
 
     let has_dynamic = fields
         .iter()
-        .any(|field| field.is_prefix() || field.is_region());
+        .any(|field| field.is_prefix() || field.is_region() || field.is_remainder());
     if kind == syntax::LayoutKind::Absolute
         || (kind == syntax::LayoutKind::Sequential && !has_dynamic)
     {
@@ -1146,6 +1219,39 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
                 Error::new(
                     field.name.span(),
                     "generated region mutable accessor collision",
+                ),
+            );
+        }
+    }
+    for field in fields.iter().filter(|field| field.is_remainder()) {
+        let Some(accessor) = &field.region_mut_name else {
+            continue;
+        };
+        let name = normalized_name(accessor);
+        if getters.contains_key(&name) {
+            push(
+                errors,
+                Error::new(
+                    field.name.span(),
+                    "generated remainder mutable accessor conflicts with an existing getter",
+                ),
+            );
+        }
+        if setters.contains_key(&name) {
+            push(
+                errors,
+                Error::new(
+                    field.name.span(),
+                    "generated remainder mutable accessor conflicts with an existing setter",
+                ),
+            );
+        }
+        if region_accessors.insert(name, field.name.span()).is_some() {
+            push(
+                errors,
+                Error::new(
+                    field.name.span(),
+                    "generated remainder mutable accessor collision",
                 ),
             );
         }
@@ -2311,6 +2417,66 @@ mod tests {
             .expect("source fields omit builder fluent methods");
         model("layout H { field build_into: U8 { position: 1; } field payload: region(build_into) { position: 2; } }")
             .expect("source fields omit builder fluent methods");
+    }
+
+    #[test]
+    fn normalizes_terminal_remainder_and_rejects_invalid_uses() {
+        let value = model("layout H { field payload: remainder; }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential layout")
+        };
+        assert!(layout.has_dynamic);
+        assert!(layout.data.fields[0].is_remainder());
+
+        let value = model("layout H { field payload: remainder { position: 2; } field head: U8 { position: 1; } }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential layout")
+        };
+        assert!(layout.data.fields[0].is_remainder());
+        assert_eq!(
+            layout.physical_order.last(),
+            Some(&PhysicalItem::Field {
+                index: 0,
+                position: 2
+            })
+        );
+
+        for (source, needle) in [
+            (
+                "absolute layout H { field payload: remainder { offset: 0; } }",
+                "remainder fields are unsupported in absolute layouts",
+            ),
+            (
+                "layout H { field payload: remainder { position: 1; } field head: U8 { position: 2; } }",
+                "remainder fields must be physically terminal",
+            ),
+            (
+                "layout H { field payload: remainder { position: 1; } padding { position: 2; length: 1; } }",
+                "remainder fields must be physically terminal",
+            ),
+            (
+                "layout H { field payload: remainder { position: 1; } align { position: 2; boundary: 2; } }",
+                "remainder fields must be physically terminal",
+            ),
+            (
+                "layout H { field one: remainder { position: 1; } field two: remainder { position: 2; } }",
+                "at most one remainder field",
+            ),
+            (
+                "layout H { field payload: remainder as crate::Payload; }",
+                "mappings are unsupported on remainder fields",
+            ),
+            (
+                "layout H { field payload: remainder { projections { bit value: 0; } } }",
+                "remainder fields cannot own bit projections",
+            ),
+            (
+                "layout H { field payload: remainder { position: 1; } field tail: region(payload) { position: 2; } }",
+                "region and remainder fields cannot be region length sources",
+            ),
+        ] {
+            error(source, needle);
+        }
     }
 
     #[test]

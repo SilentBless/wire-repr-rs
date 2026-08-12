@@ -60,15 +60,21 @@ Padding consumes a fixed nonzero length. Alignment is relative to the
 represented layout start and consumes the minimum bytes required by a nonzero
 boundary. Spacing bytes remain opaque exact input; named reserved spans use
 `bytes(N)` and remain consumer-interpreted. Sequential layouts may mix these
-entries with fixed codecs, custom prefix codecs, and named opaque regions. A region is framed by the checked `usize`
-conversion of a physically preceding non-region field's decoded value. The
-source is decoded from its exact accepted wire span before region capacity is
-checked; this framing use is the only parse-time decode exception for prefix
-fields. Regions may be empty and expose only their exact borrowed bytes.
+entries with fixed codecs, custom prefix codecs, named opaque regions, and one
+terminal opaque remainder. A region is framed by the checked `usize` conversion of a
+physically preceding non-region field's decoded value. The source is decoded from its
+exact accepted wire span before region capacity is checked; this framing use is the only
+parse-time decode exception for prefix fields. Regions may be empty and expose only
+their exact borrowed bytes. A remainder is sequential-only, may occur at most once, and
+must be physically last. It owns every byte after prior physical entries within the
+caller-supplied input and exposes that exact opaque borrowed span, including an empty
+span. It differs from `region(length)`: it has no length source and does not establish,
+claim, or infer an external packet, FCS, transport, or other framing boundary.
 Dynamic sequential views store their represented bytes and one exclusive end
-boundary per prefix field or region; they never cache semantic values or scan
-runtime metadata. Exact prefix encodings remain directly available even when
-they are legal noncanonical forms.
+boundary per prefix field or bounded region; they never cache semantic values or scan
+runtime metadata. A terminal remainder ends at the represented byte-slice boundary, so
+it needs no duplicate stored boundary. Exact prefix encodings remain directly available
+even when they are legal noncanonical forms.
 Every absolute-layout field requires an explicit zero-based offset. Absolute
 layouts check offsets in ascending offset order; their width is the maximum
 field extent, gaps remain opaque represented bytes, and runtime codec-width
@@ -93,19 +99,20 @@ region.
 Generated mutable views expose immutable getters and only those typed
 same-width setters that cannot change framing. They expose no unrestricted
 mutable-byte access. Dynamic sequential views therefore omit setters for prefix
-fields, regions, and every fixed field used as a region length source; each
-region instead exposes a mutable slice of exactly its validated span, which
-cannot resize or reframe it. View conversion preserves dynamic boundaries
-without reparsing.
+fields, regions, remainders, and every fixed field used as a region length source; each
+region or remainder instead exposes a mutable slice of exactly its validated span, which
+cannot resize or reframe it. View conversion preserves dynamic boundaries without
+reparsing.
 
 Generated builders retain values and encoding plans through complete preflight,
 then commit physical fields in physical order. Missing values and codec planning
 follow declaration order; width and extent legality, shared-source agreement,
 checked arithmetic, and output capacity all precede mutation. Dynamic builders
-derive region length-source values from caller-provided region slices. Shared
-sources require equal region lengths, and source conversion and planning happen
-once. Padding, alignment bytes, absolute-layout gaps, and bytes after the
-represented prefix remain unchanged.
+derive region length-source values from caller-provided region slices and accept
+caller-provided remainder slices directly; a remainder length participates in checked
+aggregate extent before its bytes are copied. Shared sources require equal region lengths,
+and source conversion and planning happen once. Padding, alignment bytes,
+absolute-layout gaps, and bytes after the represented prefix remain unchanged.
 
 The macro emits no runtime descriptors, schema walkers, allocation, dynamic
 dispatch, generated source files, or build scripts. Independently owned physical

@@ -234,6 +234,15 @@ fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<TokenStream> 
                 quote! { #[doc = "Returns mutable access to exactly this validated region without changing its framing."] #(#docs)* #[inline] #visibility fn #region_mut_name(&mut self) -> &mut [u8] { &mut self.bytes[(#start)..self.#end] } },
             ]
         }
+        FieldKind::Remainder => {
+            let Some(remainder_mut_name) = field.region_mut_name.as_ref() else {
+                return Vec::new();
+            };
+            vec![
+                quote! { #[doc = "Returns all caller-bounded bytes remaining after the preceding layout."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> &[u8] { &self.bytes[(#start)..] } },
+                quote! { #[doc = "Returns mutable access to all caller-bounded bytes remaining after the preceding layout."] #(#docs)* #[inline] #visibility fn #remainder_mut_name(&mut self) -> &mut [u8] { &mut self.bytes[(#start)..] } },
+            ]
+        }
     }
 }
 
