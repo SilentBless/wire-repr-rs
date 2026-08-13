@@ -318,8 +318,44 @@ loads those bytes and converts them from big endian. The builder checks that two
 bytes are available and stores the big-endian value. The generated view, builder, and
 error types improve the source-level contract; they do not introduce a runtime engine.
 
-With Rust 1.91.0 targeting `x86_64-unknown-linux-gnu`, these generated fixed getter and
-builder probes optimize to the same operation bodies as their handwritten counterparts.
+With Rust 1.91.0 targeting `x86_64-unknown-linux-gnu`, those operations become the
+following optimized bodies (compiler-local labels simplified):
+
+<details>
+<summary>Generated and handwritten getter</summary>
+
+```asm
+cmpq    $2, %rsi        # require exactly two input bytes
+jne     .invalid
+movzwl  (%rdi), %edx    # load the u16
+rolw    $8, %dx         # convert big endian to native endian
+movw    $1, %ax         # return Some(value)
+retq
+.invalid:
+xorl    %eax, %eax      # return None
+retq
+```
+
+</details>
+
+<details>
+<summary>Generated and handwritten builder</summary>
+
+```asm
+cmpq    $2, %rsi        # require at least two output bytes
+jb      .short
+rolw    $8, %dx         # convert native endian to big endian
+movw    %dx, (%rdi)     # store the u16
+.short:
+cmpq    $2, %rsi
+setae   %al             # report success or short output
+retq
+```
+
+</details>
+
+The generated and handwritten fixed getter/builders optimize to the same operation
+bodies; the comments above only map the instructions back to the visible Rust behavior.
 The [probe source](wire-repr/tests/codegen.rs) also covers projections, mutation, and
 byte ranges. The [pinned release-codegen gate](ci/check-codegen.py) compares each probe
 against equivalent handwritten safe Rust, enforces narrow per-probe instruction budgets,
