@@ -278,41 +278,52 @@ Generated fixed-layout operations are ordinary safe Rust: direct byte loads, end
 conversion, shifts, masks, and bounded copies. There are no runtime descriptors, schema
 walkers, erased codecs, hidden allocation, or dynamic dispatch.
 
-For example, with Rust 1.91.0 targeting `x86_64-unknown-linux-gnu`, the generated
-big-endian `u16` getter and its handwritten safe-Rust equivalent compile to the same
-optimized body (compiler-local labels simplified):
+Here is the generated API beside the ordinary safe Rust it replaces:
 
-```asm
-cmpq    $2, %rsi
-jne     .invalid
-movzwl  (%rdi), %edx
-rolw    $8, %dx
-movw    $1, %ax
-retq
-.invalid:
-xorl    %eax, %eax
-retq
+```rust
+wire_repr::wire_repr! {
+    pub layout Counter {
+        field value: BeU16;
+    }
+}
+
+fn generated_read(bytes: &[u8]) -> Option<u16> {
+    CounterView::parse_exact(bytes).ok().map(|view| view.value())
+}
+
+fn handwritten_read(bytes: &[u8]) -> Option<u16> {
+    let bytes: &[u8; 2] = bytes.try_into().ok()?;
+    Some(u16::from_be_bytes(*bytes))
+}
+
+let wire = [0x12, 0x34];
+assert_eq!(generated_read(&wire), Some(0x1234));
+assert_eq!(generated_read(&wire), handwritten_read(&wire));
+
+let mut generated = [0u8; 2];
+CounterBuilder::new()
+    .value(0xbeef)
+    .build_into(&mut generated)
+    .unwrap();
+
+let mut handwritten = [0u8; 2];
+handwritten.copy_from_slice(&0xbeefu16.to_be_bytes());
+
+assert_eq!(generated, [0xbe, 0xef]);
+assert_eq!(generated, handwritten);
 ```
 
-The generated fixed builder is likewise merged by the optimizer with its handwritten
-equivalent. Its complete operation shape is a capacity check, endian conversion, and
-one store—no framework calls:
+At runtime, `CounterView` is only a checked borrow of the two input bytes. The getter
+loads those bytes and converts them from big endian. The builder checks that two output
+bytes are available and stores the big-endian value. The generated view, builder, and
+error types improve the source-level contract; they do not introduce a runtime engine.
 
-```asm
-cmpq    $2, %rsi
-jb      .short
-rolw    $8, %dx
-movw    %dx, (%rdi)
-.short:
-cmpq    $2, %rsi
-setae   %al
-retq
-```
-
-The [probe source](wire-repr/tests/codegen.rs) covers getters, projections, mutation,
-and builders. The [pinned release-codegen gate](ci/check-codegen.py) compares each one
-against equivalent handwritten safe Rust and rejects extra instructions, calls, panic
-paths, allocation, or dynamic dispatch:
+With Rust 1.91.0 targeting `x86_64-unknown-linux-gnu`, these generated fixed getter and
+builder probes optimize to the same operation bodies as their handwritten counterparts.
+The [probe source](wire-repr/tests/codegen.rs) also covers projections, mutation, and
+byte ranges. The [pinned release-codegen gate](ci/check-codegen.py) compares each probe
+against equivalent handwritten safe Rust, enforces narrow per-probe instruction budgets,
+and rejects extra calls, panic paths, allocation, or dynamic dispatch:
 
 ```sh
 python3 ci/check-codegen.py
