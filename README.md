@@ -36,7 +36,7 @@ Add the facade crate:
 
 ```toml
 [dependencies]
-wire-repr = { version = "0.2", default-features = false }
+wire-repr = { version = "0.4", default-features = false }
 ```
 
 Declare a sequential layout. Physical placement is inferred from declaration order:
@@ -271,6 +271,11 @@ and output-capacity requirement before writing. Relative sources derive payload 
 absolute sources derive physical exclusive payload ends; `buf_end` has no source. Successful
 builds return the bounded mutable view and disjoint suffix. Failures leave all caller-owned
 output unchanged. Padding, alignment bytes, absolute gaps, and suffixes are preserved.
+
+Builder-only borrowed contexts make external inputs explicit without adding parser or view
+state. Fallible derived fields run during preflight. Infallible post-write finalizers then patch
+eligible fixed integer fields in compile-time dependency order, which supports checksums and
+similar values without weakening whole-output atomicity.
 
 ## 🔬 What reaches the CPU
 
