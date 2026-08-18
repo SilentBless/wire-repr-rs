@@ -2,7 +2,7 @@
 
 use proc_macro2::Span;
 use syn::{
-    Attribute, Error, Ident, LitInt, Meta, Path, Result, Token, Visibility, braced,
+    Attribute, Error, Ident, LitInt, Meta, Path, Result, Token, Type, Visibility, braced,
     parse::{Parse, ParseStream},
 };
 
@@ -15,6 +15,12 @@ mod keyword {
     syn::custom_keyword!(projections);
     syn::custom_keyword!(bit);
     syn::custom_keyword!(bits);
+    syn::custom_keyword!(derive);
+    syn::custom_keyword!(derive_error);
+    syn::custom_keyword!(finalize);
+    syn::custom_keyword!(context);
+    syn::custom_keyword!(value);
+    syn::custom_keyword!(len);
 }
 
 /// Parsed invocation before semantic normalization.
@@ -44,8 +50,16 @@ pub(crate) struct Layout {
     pub(crate) visibility: Visibility,
     pub(crate) kind: LayoutKind,
     pub(crate) name: Ident,
+    pub(crate) contexts: Vec<Context>,
     pub(crate) fields: Vec<Field>,
     pub(crate) physical: Vec<PhysicalEntry>,
+}
+
+/// A generated-builder-only borrowed input declaration.
+pub(crate) struct Context {
+    pub(crate) docs: Vec<Attribute>,
+    pub(crate) name: Ident,
+    pub(crate) referent: Type,
 }
 
 /// A field or spacing placement before semantic normalization.
@@ -97,6 +111,51 @@ pub(crate) struct Field {
     pub(crate) mapping: Option<Path>,
     pub(crate) placement: Placement,
     pub(crate) projections: Vec<Projection>,
+    pub(crate) derivation: Option<Derivation>,
+    pub(crate) finalization: Option<Finalization>,
+}
+
+/// Builder-only fixed-field derivation declaration.
+pub(crate) struct Derivation {
+    pub(crate) function: Path,
+    pub(crate) operands: Vec<DeriveOperand>,
+    pub(crate) error: Path,
+}
+
+/// One explicit derived-field dependency.
+pub(crate) enum DeriveOperand {
+    Value { source: Ident, span: Span },
+    Len { source: Ident, span: Span },
+}
+
+/// Builder-only infallible post-write finalization declaration.
+pub(crate) struct Finalization {
+    pub(crate) function: Path,
+    pub(crate) operands: Vec<FinalizeOperand>,
+}
+
+/// One explicit finalizer input.
+pub(crate) enum FinalizeOperand {
+    Bytes {
+        start: FinalizeBoundary,
+        end: FinalizeBoundary,
+    },
+    Context {
+        source: Ident,
+        span: Span,
+    },
+    Value {
+        source: Ident,
+        span: Span,
+    },
+}
+
+/// A restricted finalizer byte boundary.
+pub(crate) enum FinalizeBoundary {
+    BufStart(Span),
+    BufEnd(Span),
+    FieldStart { source: Ident, span: Span },
+    FieldEnd { source: Ident, span: Span },
 }
 
 /// Parsed storage-owned bit projection.
@@ -233,17 +292,37 @@ fn parse_layout(input: ParseStream<'_>) -> Result<Layout> {
     let name = input.parse()?;
     let content;
     braced!(content in input);
+    let mut contexts = Vec::new();
     let mut fields = Vec::new();
     let mut physical = Vec::new();
     while !content.is_empty() {
-        if content.peek(keyword::padding) {
-            physical.push(parse_padding(&content)?);
-        } else if content.peek(keyword::align) {
-            physical.push(parse_alignment(&content)?);
+        let declaration = content.fork();
+        parse_docs(&declaration)?;
+        if declaration.peek(keyword::context) {
+            if !physical.is_empty() {
+                return Err(Error::new(
+                    declaration.span(),
+                    "`context` declarations must appear before physical layout entries",
+                ));
+            }
+            contexts.push(parse_context(&content)?);
         } else {
-            let declaration_index = fields.len();
-            fields.push(parse_field(&content, kind)?);
-            physical.push(PhysicalEntry::Field(declaration_index));
+            let visibility = declaration.parse::<Visibility>()?;
+            if !matches!(visibility, Visibility::Inherited) && declaration.peek(keyword::context) {
+                return Err(Error::new(
+                    declaration.span(),
+                    "`context` declarations do not support visibility",
+                ));
+            }
+            if content.peek(keyword::padding) {
+                physical.push(parse_padding(&content)?);
+            } else if content.peek(keyword::align) {
+                physical.push(parse_alignment(&content)?);
+            } else {
+                let declaration_index = fields.len();
+                fields.push(parse_field(&content, kind)?);
+                physical.push(PhysicalEntry::Field(declaration_index));
+            }
         }
     }
 
@@ -252,8 +331,23 @@ fn parse_layout(input: ParseStream<'_>) -> Result<Layout> {
         visibility,
         kind,
         name,
+        contexts,
         fields,
         physical,
+    })
+}
+
+fn parse_context(input: ParseStream<'_>) -> Result<Context> {
+    let docs = parse_docs(input)?;
+    input.parse::<keyword::context>()?;
+    let name = input.parse()?;
+    input.parse::<Token![:]>()?;
+    let referent = input.parse()?;
+    input.parse::<Token![;]>()?;
+    Ok(Context {
+        docs,
+        name,
+        referent,
     })
 }
 
@@ -359,6 +453,8 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
             mapping,
             placement: Placement::Implicit(semicolon.span),
             projections: Vec::new(),
+            derivation: None,
+            finalization: None,
         });
     }
 
@@ -368,7 +464,11 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
         LayoutKind::Sequential => "position",
         LayoutKind::Absolute => "offset",
     };
-    let placement = if content.peek(keyword::projections) {
+    let placement = if content.peek(keyword::projections)
+        || content.peek(keyword::derive)
+        || content.peek(keyword::derive_error)
+        || content.peek(keyword::finalize)
+    {
         if kind == LayoutKind::Absolute {
             return Err(Error::new(content.span(), "expected `offset`"));
         }
@@ -404,26 +504,118 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
         Placement::Explicit(placement)
     };
     let mut projections = Vec::new();
-    if content.peek(keyword::projections) {
-        content.parse::<keyword::projections>()?;
-        let projection_content;
-        braced!(projection_content in content);
-        if projection_content.is_empty() {
+    let mut derivation = None;
+    let mut derive_error = None;
+    let mut finalization = None;
+    while !content.is_empty() {
+        if content.peek(keyword::projections) {
+            if !projections.is_empty() {
+                return Err(Error::new(content.span(), "duplicate `projections` clause"));
+            }
+            content.parse::<keyword::projections>()?;
+            let projection_content;
+            braced!(projection_content in content);
+            if projection_content.is_empty() {
+                return Err(Error::new(
+                    projection_content.span(),
+                    "`projections` must contain at least one projection",
+                ));
+            }
+            while !projection_content.is_empty() {
+                projections.push(parse_projection(&projection_content)?);
+            }
+        } else if content.peek(keyword::derive) {
+            if finalization.is_some() {
+                return Err(Error::new(
+                    content.span(),
+                    "a field cannot have both `derive` and `finalize`",
+                ));
+            }
+            if derivation.is_some() {
+                return Err(Error::new(content.span(), "duplicate `derive` clause"));
+            }
+            content.parse::<keyword::derive>()?;
+            content.parse::<Token![:]>()?;
+            let function = content.parse::<Path>()?;
+            let operands_content;
+            syn::parenthesized!(operands_content in content);
+            let mut operands = Vec::new();
+            while !operands_content.is_empty() {
+                let operand_name: Ident = operands_content.parse()?;
+                let span = operand_name.span();
+                let operand_content;
+                syn::parenthesized!(operand_content in operands_content);
+                let source = operand_content.parse::<Ident>()?;
+                if !operand_content.is_empty() {
+                    return Err(Error::new(
+                        operand_content.span(),
+                        "expected one field identifier",
+                    ));
+                }
+                let operand = if operand_name == "value" {
+                    DeriveOperand::Value { source, span }
+                } else if operand_name == "len" {
+                    DeriveOperand::Len { source, span }
+                } else {
+                    return Err(Error::new(span, "expected `value(field)` or `len(range)`"));
+                };
+                operands.push(operand);
+                if operands_content.is_empty() {
+                    break;
+                }
+                operands_content.parse::<Token![,]>()?;
+            }
+            derivation = Some((function, operands));
+            content.parse::<Token![;]>()?;
+        } else if content.peek(keyword::finalize) {
+            if finalization.is_some() {
+                return Err(Error::new(content.span(), "duplicate `finalize` clause"));
+            }
+            if derivation.is_some() {
+                return Err(Error::new(
+                    content.span(),
+                    "a field cannot have both `derive` and `finalize`",
+                ));
+            }
+            finalization = Some(parse_finalization(&content)?);
+        } else if content.peek(keyword::derive_error) {
+            if finalization.is_some() {
+                return Err(Error::new(
+                    content.span(),
+                    "`derive_error` is only valid with `derive`, not `finalize`",
+                ));
+            }
+            if derive_error.is_some() {
+                return Err(Error::new(
+                    content.span(),
+                    "duplicate `derive_error` clause",
+                ));
+            }
+            content.parse::<keyword::derive_error>()?;
+            content.parse::<Token![:]>()?;
+            derive_error = Some(content.parse::<Path>()?);
+            content.parse::<Token![;]>()?;
+        } else if !projections.is_empty() {
+            return Err(Error::new(content.span(), "expected `projections` clause"));
+        } else {
             return Err(Error::new(
-                projection_content.span(),
-                "`projections` must contain at least one projection",
+                content.span(),
+                format!(
+                    "unexpected tokens after `{expected}`, `projections`, or derivation clauses"
+                ),
             ));
         }
-        while !projection_content.is_empty() {
-            projections.push(parse_projection(&projection_content)?);
-        }
     }
-    if !content.is_empty() {
-        return Err(Error::new(
-            content.span(),
-            format!("unexpected tokens after `{expected}` or `projections`"),
-        ));
-    }
+    let derivation = match (derivation, derive_error) {
+        (Some((function, operands)), Some(error)) => Some(Derivation {
+            function,
+            operands,
+            error,
+        }),
+        (Some(_), None) => return Err(Error::new(name.span(), "`derive` requires `derive_error`")),
+        (None, Some(_)) => return Err(Error::new(name.span(), "`derive_error` requires `derive`")),
+        (None, None) => None,
+    };
     Ok(Field {
         docs,
         name,
@@ -431,7 +623,136 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
         mapping,
         placement,
         projections,
+        derivation,
+        finalization,
     })
+}
+
+fn parse_finalization(input: ParseStream<'_>) -> Result<Finalization> {
+    input.parse::<keyword::finalize>()?;
+    input.parse::<Token![:]>()?;
+    let function = input.parse()?;
+    let operands_content;
+    syn::parenthesized!(operands_content in input);
+    if operands_content.is_empty() {
+        return Err(Error::new(
+            operands_content.span(),
+            "`finalize` requires at least one operand",
+        ));
+    }
+    let mut operands = Vec::new();
+    while !operands_content.is_empty() {
+        operands.push(parse_finalize_operand(&operands_content)?);
+        if operands_content.is_empty() {
+            break;
+        }
+        operands_content.parse::<Token![,]>()?;
+    }
+    input.parse::<Token![;]>()?;
+    Ok(Finalization { function, operands })
+}
+
+fn parse_finalize_operand(input: ParseStream<'_>) -> Result<FinalizeOperand> {
+    let operand_name: Ident = input.parse().map_err(|_| {
+        Error::new(
+            input.span(),
+            "expected `bytes(...)`, `context(name)`, or `value(field)`",
+        )
+    })?;
+    let span = operand_name.span();
+    let operand_content;
+    syn::parenthesized!(operand_content in input);
+    if operand_name == "bytes" {
+        let start = parse_finalize_boundary(&operand_content)?;
+        operand_content.parse::<Token![..]>().map_err(|_| {
+            Error::new(
+                operand_content.span(),
+                "expected `..` in finalizer bytes range",
+            )
+        })?;
+        let end = parse_finalize_boundary(&operand_content)?;
+        if !operand_content.is_empty() {
+            return Err(Error::new(
+                operand_content.span(),
+                "expected a restricted finalizer bytes range",
+            ));
+        }
+        return Ok(FinalizeOperand::Bytes { start, end });
+    }
+    let source: Ident = operand_content.parse().map_err(|_| {
+        Error::new(
+            operand_content.span(),
+            if operand_name == "context" {
+                "expected one context identifier"
+            } else if operand_name == "value" {
+                "expected one field identifier"
+            } else {
+                "expected `bytes(...)`, `context(name)`, or `value(field)`"
+            },
+        )
+    })?;
+    if !operand_content.is_empty() {
+        return Err(Error::new(
+            operand_content.span(),
+            if operand_name == "context" {
+                "expected one context identifier"
+            } else if operand_name == "value" {
+                "expected one field identifier"
+            } else {
+                "expected `bytes(...)`, `context(name)`, or `value(field)`"
+            },
+        ));
+    }
+    if operand_name == "context" {
+        Ok(FinalizeOperand::Context { source, span })
+    } else if operand_name == "value" {
+        Ok(FinalizeOperand::Value { source, span })
+    } else {
+        Err(Error::new(
+            span,
+            "expected `bytes(...)`, `context(name)`, or `value(field)`",
+        ))
+    }
+}
+
+fn parse_finalize_boundary(input: ParseStream<'_>) -> Result<FinalizeBoundary> {
+    let first: Ident = input.parse().map_err(|_| {
+        Error::new(
+            input.span(),
+            "expected `buf_start`, `buf_end`, `field.start`, or `field.end`",
+        )
+    })?;
+    let span = first.span();
+    if first == "buf_start" {
+        return Ok(FinalizeBoundary::BufStart(span));
+    }
+    if first == "buf_end" {
+        return Ok(FinalizeBoundary::BufEnd(span));
+    }
+    if !input.peek(Token![..]) && input.peek(Token![.]) {
+        input.parse::<Token![.]>()?;
+        let boundary: Ident = input
+            .parse()
+            .map_err(|_| Error::new(input.span(), "expected `start` or `end` after field name"))?;
+        return match boundary.to_string().as_str() {
+            "start" => Ok(FinalizeBoundary::FieldStart {
+                source: first,
+                span,
+            }),
+            "end" => Ok(FinalizeBoundary::FieldEnd {
+                source: first,
+                span,
+            }),
+            _ => Err(Error::new(
+                boundary.span(),
+                "expected `start` or `end` after field name",
+            )),
+        };
+    }
+    Err(Error::new(
+        span,
+        "expected `buf_start`, `buf_end`, `field.start`, or `field.end`",
+    ))
 }
 
 fn parse_projection(input: ParseStream<'_>) -> Result<Projection> {
@@ -737,6 +1058,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_implicit_sequential_derivations_but_keeps_absolute_offsets_explicit() {
+        let parsed: Invocation = parse_str(
+            "layout H { field source: U8; field derived: U8 { derive: crate::derive(value(source)); derive_error: crate::Error; } }",
+        )
+        .unwrap();
+        let derived = &layouts(&parsed)[0].fields[1];
+        assert!(matches!(derived.placement, Placement::Implicit(_)));
+        assert!(derived.derivation.is_some());
+
+        assert!(
+            parse_error(
+                "absolute layout H { field derived: U8 { derive: crate::derive(); derive_error: crate::Error; } }",
+            )
+            .to_string()
+            .contains("expected `offset`")
+        );
+    }
+
+    #[test]
     fn accepts_absolute_after_visibility_and_with_sequential_layouts() {
         for source in [
             "/// packet\nabsolute layout Private { #[doc = \"kind\"] field kind: U8 { offset: 0; } field code: codec(crate::Code) { offset: 2; } }",
@@ -873,11 +1213,11 @@ mod tests {
             ),
             (
                 "layout H { field f: U8 { position: 1; projections { bit x: 0; } projections { bit y: 1; } } }",
-                "unexpected tokens",
+                "duplicate `projections` clause",
             ),
             (
                 "layout H { field f: U8 { position: 1; projections { bit x: 0; } bit y: 1; } }",
-                "unexpected tokens",
+                "expected `projections` clause",
             ),
         ] {
             assert!(parse_error(source).to_string().contains(needle));
@@ -1070,6 +1410,93 @@ mod tests {
                     .to_string()
                     .contains("expected `offset`")
             );
+        }
+    }
+
+    #[test]
+    fn parses_builder_contexts_and_post_write_finalizers() {
+        let parsed: Invocation = parse_str(
+            "layout UdpPacket { #[doc = \"pseudo header\"] context pseudo: crate::PseudoHeader; context payload_bytes: [u8]; field checksum: BeU16 { finalize: crate::udp_checksum(bytes(buf_start..buf_end), bytes(payload.start..checksum.end), context(pseudo), value(checksum),); } field payload: bytes(current_pos..buf_end); }",
+        )
+        .unwrap();
+        let layout = &layouts(&parsed)[0];
+        assert_eq!(layout.contexts.len(), 2);
+        assert_eq!(layout.contexts[0].docs.len(), 1);
+        assert!(matches!(&layout.contexts[1].referent, Type::Slice(_)));
+        let finalization = layout.fields[0].finalization.as_ref().unwrap();
+        assert_eq!(finalization.operands.len(), 4);
+        assert!(matches!(
+            &finalization.operands[0],
+            FinalizeOperand::Bytes {
+                start: FinalizeBoundary::BufStart(_),
+                end: FinalizeBoundary::BufEnd(_),
+            }
+        ));
+        assert!(matches!(
+            &finalization.operands[1],
+            FinalizeOperand::Bytes {
+                start: FinalizeBoundary::FieldStart { source, .. },
+                end: FinalizeBoundary::FieldEnd { source: end, .. },
+            } if source == "payload" && end == "checksum"
+        ));
+        assert!(
+            matches!(&finalization.operands[2], FinalizeOperand::Context { source, .. } if source == "pseudo")
+        );
+        assert!(
+            matches!(&finalization.operands[3], FinalizeOperand::Value { source, .. } if source == "checksum")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_contexts_and_finalizers_locally() {
+        for (source, needle) in [
+            (
+                "layout H { field f: U8; context c: crate::C; }",
+                "must appear before physical",
+            ),
+            (
+                "layout H { padding { length: 1; } context c: crate::C; }",
+                "must appear before physical",
+            ),
+            (
+                "layout H { pub context c: crate::C; field f: U8; }",
+                "do not support visibility",
+            ),
+            (
+                "layout H { field f: U8 { finalize: crate::f(); } }",
+                "at least one operand",
+            ),
+            (
+                "layout H { field f: U8 { finalize: crate::f(bytes(current_pos..buf_end)); } }",
+                "expected `buf_start`",
+            ),
+            (
+                "layout H { field f: U8 { finalize: crate::f(bytes(buf_start + 1..buf_end)); } }",
+                "expected `..` in finalizer bytes range",
+            ),
+            (
+                "layout H { field f: U8 { finalize: crate::f(bytes(raw..buf_end)); } }",
+                "expected `buf_start`",
+            ),
+            (
+                "layout H { field f: U8 { finalize: crate::f(context()); } }",
+                "expected one context identifier",
+            ),
+            (
+                "layout H { field f: U8 { finalize: crate::f(value(a b)); } }",
+                "expected one field identifier",
+            ),
+            (
+                "layout H { field f: U8 { derive: crate::d(value(a)); derive_error: crate::E; finalize: crate::f(value(a)); } }",
+                "both `derive` and `finalize`",
+            ),
+            (
+                "layout H { field f: U8 { finalize: crate::f(value(a)); derive_error: crate::E; } }",
+                "only valid with `derive`",
+            ),
+        ] {
+            let error = parse_error(source);
+            assert!(error.to_string().contains(needle), "{source}: {error}");
         }
     }
 }

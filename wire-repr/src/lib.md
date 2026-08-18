@@ -101,6 +101,30 @@ Generated error variants retain field or physical-position context. Their exact 
 is visible on each generated layout because it depends on the declared codecs and layout
 shape.
 
+A post-write finalizer must return the target field's exact semantic integer type. This
+layout is rejected because a `BeU16` target requires `u16`, not `u32`:
+
+```rust,compile_fail
+use wire_repr::wire_repr;
+
+fn wrong_checksum_type(_: &[u8]) -> u32 {
+    0
+}
+
+wire_repr! {
+    /// A layout whose finalizer deliberately returns the wrong type.
+    pub layout IncorrectFinalizer {
+        /// The finalizer target.
+        field checksum: BeU16 {
+            finalize: wrong_checksum_type(bytes(buf_start..buf_start));
+        }
+    }
+}
+
+let mut output = [0; 2];
+let _ = IncorrectFinalizerBuilder::new().build_into(&mut output);
+```
+
 ## Layout kinds
 
 Sequential layouts normally infer physical placement from declaration order:

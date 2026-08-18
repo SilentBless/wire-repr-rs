@@ -122,9 +122,22 @@ declaration order; all plans, extents, source conversions, checked arithmetic, s
 agreement, and output capacity precede mutation. Relative sources derive payload lengths.
 Absolute sources derive physical exclusive payload ends, including preceding fixed and prefix
 widths, padding, alignment, and ranges. `buf_end` has no source and its supplied slice
-participates in aggregate extent. Derived sources have no builder input or setter; shared
-sources use identical algebra and values, and conversion/planning occur once. Padding,
-alignment bytes, absolute-layout gaps, and bytes after the represented prefix remain
+participates in aggregate extent. Pre-write-derived fixed fields have no ordinary builder input
+or setter; their fallible derivations run during preflight in dependency order. Shared range
+sources use identical algebra and values, and conversion/planning occur once.
+
+Explicit contexts are borrowed builder-only inputs stored as `Option<&'value Referent>`,
+including unsized referents. They are neither encoded bytes nor parser or view state, and a
+missing context fails preflight before output mutation. Post-write finalizers target only direct,
+unmapped, unprojected built-in fixed integers whose complete semantic domain is infallibly
+encodable; `BeU24` and `LeU24` are excluded. Finalizer targets have no ordinary input or setter.
+During physical commit, every finalizer target is written as zero; finalizers then run in stable
+compile-time DAG order. Operands may borrow explicit contexts, semantic field values, or represented byte spans;
+only a value dependency on another finalized field creates a finalizer-order edge. Each
+finalizer returns the target's exact semantic type and immediately performs an infallible patch.
+Its `buf_end` is the represented extent, and existing destination spans may be read but are not
+rewritten. Thus every operation that can fail still completes before the first destination write.
+Padding, alignment bytes, absolute-layout gaps, and bytes after the represented prefix remain
 unchanged.
 
 The macro emits no runtime descriptors, schema walkers, allocation, dynamic

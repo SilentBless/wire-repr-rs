@@ -97,6 +97,84 @@ layout, including physical entries after an absolute range. A mutable view expos
 as `field_mut()`, which may change bytes but cannot resize or reframe the range. Unsupported
 variable-width-source framing, such as ULEB128 section lengths, remains consumer-owned.
 
+
+
+# Builder contexts and post-write finalizers
+
+A layout may declare generated-builder-only borrowed inputs before every physical field,
+padding, or alignment entry:
+
+```rust,ignore
+pub layout UdpPacket {
+    /// Transport pseudo-header used only while building.
+    context pseudo: crate::PseudoHeader;
+    field checksum: BeU16 {
+        finalize: crate::udp_checksum(
+            bytes(buf_start..buf_end),
+            context(pseudo),
+        );
+    }
+    field payload: bytes(current_pos..buf_end);
+}
+```
+
+A context names its referent type rather than a reference; the generated builder will borrow it
+as `&'value T` (including unsized `T`, such as `[u8]`). Contexts accept documentation
+attributes but no visibility: they are not independent public items, encoded bytes, view state,
+or parser state. Every external input is explicit—there is no ambient finalizer state.
+
+`finalize: path(operand, ...);` is an infallible post-write field property. Its operands are
+`bytes(boundary..boundary)`, `context(name)`, and `value(field)`. `value(field)` passes the
+field's semantic value; it may name an ordinary field, an explicit pre-write-derived field, or an
+earlier finalizer. Only a finalized source creates post-write finalizer ordering. Finalizer byte
+boundaries are only `buf_start`, `buf_end`, `field.start`, and `field.end`; `current_pos`,
+arithmetic, and raw source identifiers are not valid there. A field uses either fallible pre-write
+`derive` (paired with `derive_error`) or infallible post-write `finalize`, never both.
+
+Before finalization, every target is zeroed. A finalizer may include its own target in a
+`bytes(...)` operand and observes those zero bytes, but `value(its_own_target)` is invalid. Finalizer
+dependencies form a compile-time DAG, and every fallible plan or capacity check completes before
+writing starts. Finalizers return their target's exact semantic integer type directly, so patching is
+infallible after commit. Generated-method type checking rejects a return type that does not
+exactly match the target's semantic integer type.
+
+The initial target set is unmapped built-in fixed integers except `BeU24`
+and `LeU24`: their `u32` semantic domain requires a fallible 24-bit representability check. Custom
+patch targets are not supported.
+
+`buf_end` means the end of the represented layout, not the capacity of the caller-provided output
+buffer. A builder may receive a larger destination, but finalizer ranges are bounded by the
+representation it constructs.
+
+
+# Pre-write derived fields
+
+A fixed-codec field may be builder-derived instead of supplied as a fluent input:
+
+```rust,ignore
+field total: BeU16 {
+    position: 1;
+    derive: crate::derive_total(len(options), len(payload));
+    derive_error: crate::LengthError;
+}
+```
+
+`derive` is a direct static function call returning `Result<FieldSemanticValue, DeclaredError>`.
+Its only operands are `value(field)`, which passes the referenced semantic fixed-field value by
+reference, and `len(range)`, which passes the borrowed or `_existing(length)` range input length
+as `usize`. The macro rejects unknown, self, cyclic, or wrong-kind dependencies. Explicit derived
+fixed fields are evaluated in a deterministic topological order (source declaration order breaks
+ties), then planned before any destination mutation; their typed failure appears as a dedicated
+`PacketWriteError::DeriveField…(LengthError)` variant. Its display text identifies the failed
+field without formatting the declared payload. The write error always implements `Debug` and
+`Error`: generated `Debug` reports the exact derivation variant while marking its payload opaque,
+so declared derivation errors need not implement `Debug`, `Display`, or `Error`. Because a public
+layout publishes its write error and typed variants, its declared derivation error must be public
+enough to appear in that API. They cannot frame byte ranges in this stage.
+
+This is pre-write input derivation, not checksum/CRC finalization: it cannot inspect output bytes,
+run after a write, or repair a partially written destination.
+
 # Total semantic mappings
 
 `as TypePath` maps one eligible physical field to a nominal consumer type. It appears

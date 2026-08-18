@@ -20,6 +20,17 @@ impl From<CodegenMapped> for u32 {
     }
 }
 
+fn codegen_derived_total(payload: usize) -> Result<u8, core::convert::Infallible> {
+    Ok(payload as u8)
+}
+
+#[inline(always)]
+fn codegen_finalized_sum(bytes: &[u8]) -> u16 {
+    bytes
+        .iter()
+        .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)))
+}
+
 wire_repr! {
     /// A nominal big-endian word used only by the release-codegen gate.
     pub scalar CodegenHardwareType: LeU16;
@@ -61,6 +72,27 @@ wire_repr! {
         field end: U8;
         /// Bytes ending at `end`.
         field payload: bytes(current_pos..end);
+    }
+
+    /// A derived dynamic builder used only by the release-codegen gate.
+    pub layout CodegenDerivedRange {
+        field tag: U8;
+        field length: U8;
+        field payload: bytes(current_pos..current_pos + length);
+        field total: U8 {
+            derive: crate::codegen_derived_total(len(payload));
+            derive_error: core::convert::Infallible;
+        }
+    }
+
+    /// A post-write-finalized layout used only by the release-codegen gate.
+    pub layout CodegenFinalizedPacket {
+        /// The ordinary caller-supplied byte.
+        field tag: U8;
+        /// The big-endian post-write finalizer target.
+        field checksum: BeU16 {
+            finalize: crate::codegen_finalized_sum(bytes(buf_start..buf_end));
+        }
     }
 
     /// A terminal byte range used only by the release-codegen gate.
@@ -394,6 +426,58 @@ pub fn handwritten_absolute_range_builder(output: &mut [u8], payload: &[u8]) -> 
     true
 }
 
+/// Generated pre-write-derived range builder probe.
+#[inline(never)]
+pub fn generated_derived_range_builder(output: &mut [u8], tag: u8, payload: &[u8]) -> bool {
+    CodegenDerivedRangeBuilder::new()
+        .tag(tag)
+        .payload(payload)
+        .build_into(output)
+        .is_ok()
+}
+
+/// Equivalent handwritten pre-write-derived range builder probe.
+#[inline(never)]
+pub fn handwritten_derived_range_builder(output: &mut [u8], tag: u8, payload: &[u8]) -> bool {
+    let Ok(length) = u8::try_from(payload.len()) else {
+        return false;
+    };
+    let Some(expected) = payload.len().checked_add(3) else {
+        return false;
+    };
+    if output.len() < expected {
+        return false;
+    }
+    output[0] = tag;
+    output[1] = length;
+    output[2..2 + payload.len()].copy_from_slice(payload);
+    output[2 + payload.len()] = length;
+    true
+}
+
+/// Generated post-write-finalizer builder probe.
+#[inline(never)]
+pub fn generated_finalizer_builder(output: &mut [u8], tag: u8) -> bool {
+    CodegenFinalizedPacketBuilder::new()
+        .tag(tag)
+        .build_into(output)
+        .is_ok()
+}
+
+/// Equivalent handwritten post-write-finalizer builder probe.
+#[inline(never)]
+pub fn handwritten_finalizer_builder(output: &mut [u8], tag: u8) -> bool {
+    if output.len() < 3 {
+        return false;
+    }
+    let bytes = &mut output[..3];
+    bytes[0] = tag;
+    bytes[1..3].fill(0);
+    let checksum = codegen_finalized_sum(bytes);
+    bytes[1..3].copy_from_slice(&checksum.to_be_bytes());
+    true
+}
+
 /// Generated terminal range getter probe.
 #[inline(never)]
 pub fn generated_terminal_range_getter(bytes: &[u8]) -> Option<u8> {
@@ -432,6 +516,37 @@ pub fn handwritten_terminal_range_builder(output: &mut [u8], header: u8, payload
     }
     output[0] = header;
     output[1..expected].copy_from_slice(payload);
+    true
+}
+
+/// Generated terminal existing-range builder probe, including short-output behavior.
+#[inline(never)]
+pub fn generated_terminal_existing_range_builder(
+    output: &mut [u8],
+    header: u8,
+    payload_length: usize,
+) -> bool {
+    CodegenTerminalRangeBuilder::new()
+        .header(header)
+        .payload_existing(payload_length)
+        .build_into(output)
+        .is_ok()
+}
+
+/// Equivalent handwritten terminal existing-range builder probe.
+#[inline(never)]
+pub fn handwritten_terminal_existing_range_builder(
+    output: &mut [u8],
+    header: u8,
+    payload_length: usize,
+) -> bool {
+    let Some(expected) = 1usize.checked_add(payload_length) else {
+        return false;
+    };
+    if output.len() < expected {
+        return false;
+    }
+    output[0] = header;
     true
 }
 
@@ -631,6 +746,33 @@ fn generated_probes_match_handwritten_safe_rust() {
     );
     assert_eq!(generated_mapped_short, handwritten_mapped_short);
 
+    let derived_payload = [0x10, 0x20];
+    let mut generated_derived = [0xa5; 6];
+    let mut handwritten_derived = [0xa5; 6];
+    assert_eq!(
+        generated_derived_range_builder(&mut generated_derived, 0xa1, &derived_payload),
+        handwritten_derived_range_builder(&mut handwritten_derived, 0xa1, &derived_payload)
+    );
+    assert_eq!(generated_derived, handwritten_derived);
+
+    let mut generated_finalized = [0xa5; 4];
+    let mut handwritten_finalized = [0xa5; 4];
+    assert_eq!(
+        generated_finalizer_builder(&mut generated_finalized, 0x44),
+        handwritten_finalizer_builder(&mut handwritten_finalized, 0x44)
+    );
+    assert_eq!(generated_finalized, handwritten_finalized);
+    assert_eq!(generated_finalized, [0x44, 0x00, 0x44, 0xa5]);
+
+    let mut generated_finalized_short = [0xa5; 2];
+    let mut handwritten_finalized_short = [0xa5; 2];
+    assert_eq!(
+        generated_finalizer_builder(&mut generated_finalized_short, 0x44),
+        handwritten_finalizer_builder(&mut handwritten_finalized_short, 0x44)
+    );
+    assert_eq!(generated_finalized_short, handwritten_finalized_short);
+    assert_eq!(generated_finalized_short, [0xa5; 2]);
+
     for input in [
         &[][..],
         &[0xa1][..],
@@ -670,6 +812,15 @@ fn generated_probes_match_handwritten_safe_rust() {
         handwritten_terminal_range_short
     );
     assert_eq!(generated_terminal_range_short, [0xa5; 3]);
+
+    let mut generated_existing_terminal = [0xa5; 5];
+    let mut handwritten_existing_terminal = [0xa5; 5];
+    assert_eq!(
+        generated_terminal_existing_range_builder(&mut generated_existing_terminal, 0xa1, 2),
+        handwritten_terminal_existing_range_builder(&mut handwritten_existing_terminal, 0xa1, 2)
+    );
+    assert_eq!(generated_existing_terminal, handwritten_existing_terminal);
+    assert_eq!(generated_existing_terminal, [0xa1, 0xa5, 0xa5, 0xa5, 0xa5]);
 }
 
 #[test]

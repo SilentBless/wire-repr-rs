@@ -26,6 +26,13 @@ wire_repr! {
         field tail: U8 { position: 5; }
     }
 
+    pub layout AbsoluteFramed {
+        field end: U8 { position: 1; }
+        field payload: bytes(current_pos..end) { position: 2; }
+        padding { position: 3; length: 1; }
+        field tail: U8 { position: 4; }
+    }
+
     pub layout WideLength {
         field payload: bytes(current_pos..current_pos + length) { position: 2; }
         field length: BeU128 { position: 1; }
@@ -90,6 +97,35 @@ fn adjacent_mutable_ranges_respect_each_validated_boundary() {
         assert_eq!(view.tail(), 9);
     }
     assert_eq!(empty_first, [0, 2, b'X', b'Y', 9]);
+}
+
+#[test]
+fn absolute_endpoints_frame_intermediate_ranges_and_preserve_later_entries() {
+    let input = [3, b'a', b'b', 0xee, 9, 0xaa];
+    let (view, suffix) = AbsoluteFramedView::parse_prefix(&input).unwrap();
+    assert_eq!(view.as_bytes(), &input[..5]);
+    assert_eq!(suffix, &[0xaa]);
+    assert_eq!(view.payload(), b"ab");
+    assert_eq!(view.tail(), 9);
+
+    let mut mutable = [3, b'a', b'b', 0xee, 9];
+    {
+        let mut view = AbsoluteFramedViewMut::parse_exact_mut(&mut mutable).unwrap();
+        view.payload_mut().copy_from_slice(b"AB");
+        assert_eq!(view.payload(), b"AB");
+        assert_eq!(view.tail(), 9);
+    }
+    assert_eq!(mutable, [3, b'A', b'B', 0xee, 9]);
+
+    assert!(matches!(
+        AbsoluteFramedView::parse_prefix(&[0]),
+        Err(AbsoluteFramedError::RangeEndBeforeStart {
+            position: 2,
+            source_position: 1,
+            end: 0,
+            start: 1,
+        })
+    ));
 }
 
 #[test]

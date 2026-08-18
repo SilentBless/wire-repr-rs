@@ -143,7 +143,11 @@ pub(super) fn render_layout(
 
 fn eligible_codec(field: &Field) -> Option<&Codec> {
     let codec = field.codec()?;
-    (!codec.is_prefix() && !field.is_derived_range_source).then_some(codec)
+    (!codec.is_prefix()
+        && !field.is_derived_range_source
+        && field.derivation.is_none()
+        && field.finalization.is_none())
+    .then_some(codec)
 }
 
 fn render_encode_variant(field: &Field, _codec: &Codec) -> Option<TokenStream> {
@@ -245,17 +249,17 @@ fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<TokenStream> 
                 Some(crate::ir::PhysicalItem::Field { index, .. })
                     if *index == field.declaration_index
             );
-            let immutable_bytes = if terminal {
-                quote!(&self.bytes[(#start)..])
+            let (immutable_bytes, mutable_bytes) = if terminal {
+                (
+                    quote!(&self.bytes[(#start)..]),
+                    quote!(&mut self.bytes[(#start)..]),
+                )
             } else {
                 let end = &field.boundary;
-                quote!(&self.bytes[(#start)..self.#end])
-            };
-            let mutable_bytes = if terminal {
-                quote!(&mut self.bytes[(#start)..])
-            } else {
-                let end = &field.boundary;
-                quote!(&mut self.bytes[(#start)..self.#end])
+                (
+                    quote!(&self.bytes[(#start)..self.#end]),
+                    quote!(&mut self.bytes[(#start)..self.#end]),
+                )
             };
             vec![
                 quote! { #[doc = "Returns the exact opaque bytes in this validated range."] #(#docs)* #[inline] #[must_use] #visibility fn #name(&self) -> &[u8] { #immutable_bytes } },

@@ -31,8 +31,11 @@ PAIRS = (
     ("absolute_range_getter", "generated_absolute_range_getter", "handwritten_absolute_range_getter", False, 8),
     ("absolute_range_mutation", "generated_absolute_range_mutation", "handwritten_absolute_range_mutation", False, 4),
     ("absolute_range_builder", "generated_absolute_range_builder", "handwritten_absolute_range_builder", False, 6),
+    ("derived_range_builder", "generated_derived_range_builder", "handwritten_derived_range_builder", False, 2),
+    ("finalizer_builder", "generated_finalizer_builder", "handwritten_finalizer_builder", True, 4),
     ("terminal_range_getter", "generated_terminal_range_getter", "handwritten_terminal_range_getter", False, 8),
     ("terminal_range_builder", "generated_terminal_range_builder", "handwritten_terminal_range_builder", False, 4),
+    ("terminal_existing_range_builder", "generated_terminal_existing_range_builder", "handwritten_terminal_existing_range_builder", False, 4),
 )
 ALLOWED_OVERHEAD = {
     "relative_range_mutation": {"instructions": 2},

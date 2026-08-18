@@ -32,9 +32,9 @@ pub(crate) struct Scalar {
 /// A renderer-ready layout with unambiguous placement semantics.
 pub(crate) enum Layout {
     /// A sequential layout.
-    Sequential(SequentialLayout),
+    Sequential(Box<SequentialLayout>),
     /// A fixed absolute-offset layout.
-    Absolute(AbsoluteLayout),
+    Absolute(Box<AbsoluteLayout>),
 }
 
 /// Fields and generated names shared by both layout modes.
@@ -47,12 +47,16 @@ pub(crate) struct LayoutData {
     pub(crate) view_mut_name: Ident,
     /// Builder name reserved for sequential rendering.
     pub(crate) builder_name: Ident,
+    /// Private builder byte-range input representation name.
+    pub(crate) range_input_name: Ident,
     /// Mutation-error name reserved for sequential rendering.
     pub(crate) mutation_error_name: Ident,
     /// Builder write-error name reserved for sequential rendering.
     pub(crate) write_error_name: Ident,
     /// Fields in source declaration order.
     pub(crate) fields: Vec<Field>,
+    /// Builder-only borrowed inputs used by finalizers.
+    pub(crate) contexts: Vec<Context>,
 }
 
 /// A sequential layout.
@@ -62,6 +66,10 @@ pub(crate) struct SequentialLayout {
     pub(crate) physical_order: Vec<PhysicalItem>,
     /// Whether at least one field has a runtime-discovered extent.
     pub(crate) has_dynamic: bool,
+    /// Explicit derived fields in deterministic dependency order.
+    pub(crate) derived_order: Vec<usize>,
+    /// Post-write finalizers in deterministic dependency order.
+    pub(crate) finalizer_order: Vec<usize>,
 }
 
 /// A validated sequential physical entry.
@@ -108,12 +116,18 @@ pub(crate) struct Field {
     pub(crate) setter_name: Ident,
     /// Dynamic-range mutable accessor name, normalized with the source identifier.
     pub(crate) range_mut_name: Option<Ident>,
+    /// Builder method selecting an already-existing byte range.
+    pub(crate) range_existing_name: Option<Ident>,
     /// Raw-wire getter name used when this is a prefix field.
     pub(crate) raw_getter: Ident,
     /// Stored end-boundary name used when this is a prefix field.
     pub(crate) boundary: Ident,
     /// Whether any byte range is derived from this field's raw value.
     pub(crate) is_derived_range_source: bool,
+    /// Builder-only semantic derivation, normalized after all field kinds are known.
+    pub(crate) derivation: Option<Derivation>,
+    /// Builder-only post-write finalization, normalized after field geometry is known.
+    pub(crate) finalization: Option<Finalization>,
     pub(crate) projections: Vec<Projection>,
 }
 
@@ -147,6 +161,79 @@ impl Field {
 pub(crate) enum FieldKind {
     Codec(Codec),
     ByteRange { end: ByteRangeEnd },
+}
+
+/// Validated builder-only derivation for a fixed field.
+pub(crate) struct Derivation {
+    pub(crate) function: Path,
+    pub(crate) error: Path,
+    pub(crate) operands: Vec<DeriveOperand>,
+}
+
+/// A normalized derivation input.
+pub(crate) enum DeriveOperand {
+    Value { source: usize, span: Span },
+    Len { source: usize, span: Span },
+}
+
+/// A builder-only borrowed input retained for future builder rendering.
+pub(crate) struct Context {
+    pub(crate) docs: Vec<Attribute>,
+    pub(crate) name: Ident,
+    pub(crate) referent: syn::Type,
+    /// Future builder setter name; contexts share the fluent builder namespace.
+    pub(crate) setter_name: Ident,
+}
+
+/// A normalized infallible post-write finalizer.
+pub(crate) struct Finalization {
+    pub(crate) function: Path,
+    pub(crate) operands: Vec<FinalizeOperand>,
+}
+
+/// A renderer-ready finalizer input.
+pub(crate) enum FinalizeOperand {
+    Bytes {
+        start: FinalizeBoundary,
+        end: FinalizeBoundary,
+    },
+    Context {
+        source: usize,
+        span: Span,
+    },
+    Value {
+        source: usize,
+        span: Span,
+    },
+}
+
+/// Symbolic byte boundary used by a finalizer. `BufEnd` is the final represented extent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FinalizeBoundary {
+    BufStart,
+    BufEnd,
+    FieldStart(usize),
+    FieldEnd(usize),
+}
+
+enum PendingFinalizeOperand {
+    Bytes {
+        start: syntax::FinalizeBoundary,
+        end: syntax::FinalizeBoundary,
+    },
+    Context {
+        source: Ident,
+        span: Span,
+    },
+    Value {
+        source: Ident,
+        span: Span,
+    },
+}
+
+struct PendingFinalization {
+    function: Path,
+    operands: Vec<PendingFinalizeOperand>,
 }
 
 /// Validated byte-range end algebra.
@@ -428,6 +515,12 @@ fn normalize_layout(
         "layout builder",
         errors,
     )?;
+    let range_input_name = generated_ident(
+        &(stem_text.clone() + "BuilderRangeInput"),
+        source.name.span(),
+        "builder byte-range input",
+        errors,
+    )?;
     let mutation_error_name = generated_ident(
         &(stem_text.clone() + "MutationError"),
         source.name.span(),
@@ -455,6 +548,7 @@ fn normalize_layout(
     for name in [
         &view_mut_name,
         &builder_name,
+        &range_input_name,
         &mutation_error_name,
         &write_error_name,
     ] {
@@ -517,6 +611,24 @@ fn normalize_layout(
         .enumerate()
         .map(|(index, field)| (normalized_name(&field.name), index))
         .collect();
+    let derive_sources: Vec<_> = source
+        .fields
+        .iter()
+        .map(|field| {
+            field.derivation.as_ref().map(|derivation| {
+                derivation
+                    .operands
+                    .iter()
+                    .map(|operand| match operand {
+                        syntax::DeriveOperand::Value { source, .. }
+                        | syntax::DeriveOperand::Len { source, .. } => normalized_name(source),
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let source_contexts = source.contexts;
+    let mut pending_finalizations = Vec::with_capacity(source.fields.len());
     let mut fields = Vec::new();
     let mut normalized_field_indices = Vec::new();
     let mut field_names = HashMap::new();
@@ -525,6 +637,26 @@ fn normalize_layout(
     let mut placements = HashMap::new();
     for (declaration_index, field) in source.fields.into_iter().enumerate() {
         normalized_field_indices.push(None);
+        pending_finalizations.push(field.finalization.map(|finalization| {
+            PendingFinalization {
+                function: finalization.function,
+                operands: finalization
+                    .operands
+                    .into_iter()
+                    .map(|operand| match operand {
+                        syntax::FinalizeOperand::Bytes { start, end } => {
+                            PendingFinalizeOperand::Bytes { start, end }
+                        }
+                        syntax::FinalizeOperand::Context { source, span } => {
+                            PendingFinalizeOperand::Context { source, span }
+                        }
+                        syntax::FinalizeOperand::Value { source, span } => {
+                            PendingFinalizeOperand::Value { source, span }
+                        }
+                    })
+                    .collect(),
+            }
+        }));
         let placement_span = field.placement.span();
         let generated_stem = normalized_name(&field.name);
         if field_names
@@ -779,6 +911,20 @@ fn normalize_layout(
                 "generated field error variant collision",
             );
         }
+        if field.derivation.is_some() {
+            let derive_variant = generated_ident(
+                &format!("Derive{}", error_variant),
+                field.name.span(),
+                "derived field error variant",
+                errors,
+            )?;
+            register_name(
+                &mut variants,
+                &derive_variant,
+                errors,
+                "generated derived field error variant collision",
+            );
+        }
         let raw_getter = generated_ident(
             &format!("{generated_stem}_raw"),
             field.name.span(),
@@ -804,6 +950,16 @@ fn normalize_layout(
                 &format!("{generated_stem}_mut"),
                 field.name.span(),
                 "range mutable accessor",
+                errors,
+            )?)
+        } else {
+            None
+        };
+        let range_existing_name = if is_byte_range {
+            Some(generated_ident(
+                &format!("{generated_stem}_existing"),
+                field.name.span(),
+                "builder existing byte-range method",
                 errors,
             )?)
         } else {
@@ -841,9 +997,44 @@ fn normalize_layout(
             error_variant,
             setter_name,
             range_mut_name,
+            range_existing_name,
             raw_getter,
             boundary,
             is_derived_range_source: false,
+            derivation: field.derivation.map(|derivation| Derivation {
+                function: derivation.function,
+                error: derivation.error,
+                operands: derivation
+                    .operands
+                    .into_iter()
+                    .enumerate()
+                    .map(|(operand_index, operand)| match operand {
+                        syntax::DeriveOperand::Value { span, .. } => DeriveOperand::Value {
+                            source: source_field_indices
+                                .get(
+                                    &derive_sources[declaration_index]
+                                        .as_ref()
+                                        .expect("derivation sources")[operand_index],
+                                )
+                                .copied()
+                                .unwrap_or(usize::MAX),
+                            span,
+                        },
+                        syntax::DeriveOperand::Len { span, .. } => DeriveOperand::Len {
+                            source: source_field_indices
+                                .get(
+                                    &derive_sources[declaration_index]
+                                        .as_ref()
+                                        .expect("derivation sources")[operand_index],
+                                )
+                                .copied()
+                                .unwrap_or(usize::MAX),
+                            span,
+                        },
+                    })
+                    .collect(),
+            }),
+            finalization: None,
             projections,
         });
         normalized_field_indices[declaration_index] = Some(normalized_index);
@@ -927,6 +1118,140 @@ fn normalize_layout(
         fields[source_index].is_derived_range_source = true;
         fields[source_index].raw_setter_name = None;
     }
+
+    // Derivations are semantic builder inputs. Resolve their declared dependencies only
+    // after range-source normalization, then order them deterministically by DAG depth.
+    for field in &mut fields {
+        let Some(derivation) = field.derivation.as_mut() else {
+            continue;
+        };
+        for operand in &mut derivation.operands {
+            let source = match operand {
+                DeriveOperand::Value { source, .. } | DeriveOperand::Len { source, .. } => source,
+            };
+            *source = normalized_field_indices
+                .get(*source)
+                .and_then(|index| *index)
+                .unwrap_or(usize::MAX);
+        }
+    }
+    for index in 0..fields.len() {
+        let Some(derivation) = fields[index].derivation.as_ref() else {
+            continue;
+        };
+        if kind == syntax::LayoutKind::Absolute
+            || fields[index].is_byte_range()
+            || fields[index].is_prefix()
+            || !fields[index].projections.is_empty()
+            || !matches!(
+                fields[index].codec(),
+                Some(Codec::Builtin(_) | Codec::Custom(_) | Codec::Bytes(_))
+            )
+        {
+            push(
+                errors,
+                Error::new(
+                    fields[index].name.span(),
+                    "`derive` is supported only on fixed codec fields in sequential layouts",
+                ),
+            );
+        }
+        for operand in &derivation.operands {
+            let (source, span, wants_len) = match operand {
+                DeriveOperand::Value { source, span } => (*source, *span, false),
+                DeriveOperand::Len { source, span } => (*source, *span, true),
+            };
+            if source == usize::MAX {
+                push(errors, Error::new(span, "unknown derived-field dependency"));
+                continue;
+            }
+            if source == index {
+                push(
+                    errors,
+                    Error::new(span, "derived field cannot depend on itself"),
+                );
+                continue;
+            }
+            if wants_len && !fields[source].is_byte_range() {
+                push(
+                    errors,
+                    Error::new(span, "`len(...)` requires a byte range field"),
+                );
+            }
+            if !wants_len && fields[source].is_byte_range() {
+                push(
+                    errors,
+                    Error::new(span, "`value(...)` cannot reference a byte range field"),
+                );
+            }
+        }
+    }
+    for field in &fields {
+        if !field.is_derived_range_source {
+            continue;
+        }
+        if field.derivation.is_some() {
+            push(
+                errors,
+                Error::new(
+                    field.name.span(),
+                    "explicit derived fields cannot be byte range sources",
+                ),
+            );
+        }
+    }
+    let mut derived_order = Vec::new();
+    let mut remaining: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| field.derivation.as_ref().map(|_| index))
+        .collect();
+    while !remaining.is_empty() {
+        let next = remaining
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                let derivation = fields[*candidate].derivation.as_ref().expect("derived");
+                derivation.operands.iter().all(|operand| {
+                    let source = match operand {
+                        DeriveOperand::Value { source, .. } | DeriveOperand::Len { source, .. } => {
+                            *source
+                        }
+                    };
+                    source == usize::MAX
+                        || fields
+                            .get(source)
+                            .is_none_or(|field| field.derivation.is_none())
+                        || derived_order.contains(&source)
+                })
+            })
+            .min_by_key(|index| fields[*index].declaration_index);
+        let Some(next) = next else {
+            for index in remaining {
+                push(
+                    errors,
+                    Error::new(
+                        fields[index].name.span(),
+                        "cycle in derived field dependencies",
+                    ),
+                );
+            }
+            break;
+        };
+        derived_order.push(next);
+        remaining.retain(|index| *index != next);
+    }
+
+    let contexts = normalize_contexts(source_contexts, &fields, &pending_finalizations, errors)?;
+    let finalizer_order = normalize_finalizers(
+        kind,
+        pending_finalizations,
+        &source_field_indices,
+        &normalized_field_indices,
+        &contexts,
+        &mut fields,
+        errors,
+    );
 
     let mut physical_order = Vec::new();
     if kind == syntax::LayoutKind::Sequential {
@@ -1062,7 +1387,7 @@ fn normalize_layout(
                 errors,
                 Error::new(
                     fields[index].placement_span,
-                    "byte range fields must be physically terminal",
+                    "`bytes(current_pos..buf_end)` must be physically terminal",
                 ),
             );
         }
@@ -1099,9 +1424,12 @@ fn normalize_layout(
         }
     }
 
-    let has_dynamic = fields
-        .iter()
-        .any(|field| field.is_prefix() || field.is_byte_range());
+    let has_dynamic = fields.iter().any(|field| {
+        field.is_prefix()
+            || field.is_byte_range()
+            || field.derivation.is_some()
+            || field.finalization.is_some()
+    }) || !contexts.is_empty();
     if kind == syntax::LayoutKind::Absolute
         || (kind == syntax::LayoutKind::Sequential && !has_dynamic)
     {
@@ -1116,22 +1444,392 @@ fn normalize_layout(
         error_name,
         view_mut_name,
         builder_name,
+        range_input_name,
         mutation_error_name,
         write_error_name,
         fields,
+        contexts,
     };
     Some(match kind {
-        syntax::LayoutKind::Sequential => Layout::Sequential(SequentialLayout {
+        syntax::LayoutKind::Sequential => Layout::Sequential(Box::new(SequentialLayout {
             data,
             physical_order,
             has_dynamic,
-        }),
+            derived_order,
+            finalizer_order,
+        })),
         syntax::LayoutKind::Absolute => {
             let mut offset_order: Vec<_> = (0..data.fields.len()).collect();
             offset_order.sort_by_key(|&index| data.fields[index].placement);
-            Layout::Absolute(AbsoluteLayout { data, offset_order })
+            Layout::Absolute(Box::new(AbsoluteLayout { data, offset_order }))
         }
     })
+}
+
+fn normalize_contexts(
+    source: Vec<syntax::Context>,
+    fields: &[Field],
+    pending_finalizations: &[Option<PendingFinalization>],
+    errors: &mut Option<Error>,
+) -> Option<Vec<Context>> {
+    let mut names = HashMap::new();
+    let mut result = Vec::new();
+    for context in source {
+        let setter_name = generated_ident(
+            &normalized_name(&context.name),
+            context.name.span(),
+            "context builder setter",
+            errors,
+        )?;
+        if names
+            .insert(normalized_name(&context.name), context.name.span())
+            .is_some()
+        {
+            push(
+                errors,
+                Error::new(context.name.span(), "duplicate context identifier"),
+            );
+        }
+        result.push(Context {
+            docs: context.docs,
+            name: context.name,
+            referent: context.referent,
+            setter_name,
+        });
+    }
+    let mut occupied = HashMap::new();
+    for field in fields {
+        // A finalizer target has no builder setter or fluent input, so it must not
+        // reserve those names before the renderer gets a chance to omit them.
+        if pending_finalizations
+            .get(field.declaration_index)
+            .is_some_and(|finalization| finalization.is_some())
+        {
+            continue;
+        }
+        occupied.insert(normalized_name(&field.name), field.name.span());
+        occupied.insert(normalized_name(&field.setter_name), field.name.span());
+        if let Some(raw) = &field.raw_name {
+            occupied.insert(normalized_name(raw), raw.span());
+        }
+        if let Some(raw) = &field.raw_setter_name {
+            occupied.insert(normalized_name(raw), raw.span());
+        }
+        if let Some(existing) = &field.range_existing_name {
+            occupied.insert(normalized_name(existing), existing.span());
+        }
+        if let Some(accessor) = &field.range_mut_name {
+            occupied.insert(normalized_name(accessor), accessor.span());
+        }
+        if field.is_prefix() {
+            occupied.insert(normalized_name(&field.raw_getter), field.raw_getter.span());
+        }
+        for projection in &field.projections {
+            occupied.insert(normalized_name(&projection.name), projection.name.span());
+        }
+    }
+    for context in &result {
+        let name = normalized_name(&context.setter_name);
+        if matches!(name.as_str(), "new" | "build_into") || occupied.contains_key(&name) {
+            push(
+                errors,
+                Error::new(
+                    context.name.span(),
+                    "context name conflicts with a generated builder member",
+                ),
+            );
+        }
+    }
+    Some(result)
+}
+
+fn normalize_finalizers(
+    kind: syntax::LayoutKind,
+    pending: Vec<Option<PendingFinalization>>,
+    source_field_indices: &HashMap<String, usize>,
+    normalized_field_indices: &[Option<usize>],
+    contexts: &[Context],
+    fields: &mut [Field],
+    errors: &mut Option<Error>,
+) -> Vec<usize> {
+    if kind == syntax::LayoutKind::Absolute {
+        for context in contexts {
+            push(
+                errors,
+                Error::new(
+                    context.name.span(),
+                    "`context` is supported only in sequential layouts",
+                ),
+            );
+        }
+        for (declaration, finalization) in pending.iter().enumerate() {
+            if finalization.is_some() {
+                let span = normalized_field_indices
+                    .get(declaration)
+                    .and_then(|index| *index)
+                    .and_then(|index| fields.get(index))
+                    .map_or(Span::call_site(), |field| field.name.span());
+                push(
+                    errors,
+                    Error::new(span, "`finalize` is supported only in sequential layouts"),
+                );
+            }
+        }
+        return Vec::new();
+    }
+    let context_indices: HashMap<_, _> = contexts
+        .iter()
+        .enumerate()
+        .map(|(index, context)| (normalized_name(&context.name), index))
+        .collect();
+    let mut targets = Vec::new();
+    for (declaration, finalization) in pending.into_iter().enumerate() {
+        let Some(finalization) = finalization else {
+            continue;
+        };
+        let Some(Some(index)) = normalized_field_indices.get(declaration) else {
+            continue;
+        };
+        let index = *index;
+        let field = &fields[index];
+        if matches!(
+            field.codec(),
+            Some(Codec::Builtin(Builtin::BeU24 | Builtin::LeU24))
+        ) {
+            push(
+                errors,
+                Error::new(
+                    field.name.span(),
+                    "`finalize` requires an infallibly encodable builtin target; U24 requires range validation",
+                ),
+            );
+            continue;
+        }
+        if field.mapping.is_some()
+            || !field.projections.is_empty()
+            || field.derivation.is_some()
+            || field.is_derived_range_source
+            || !matches!(field.codec(), Some(Codec::Builtin(_)))
+        {
+            push(
+                errors,
+                Error::new(
+                    field.name.span(),
+                    "`finalize` target must be an unmapped direct builtin fixed integer that is not derived, projected, or a byte range source",
+                ),
+            );
+            continue;
+        }
+        let mut operands = Vec::new();
+        for operand in &finalization.operands {
+            match operand {
+                PendingFinalizeOperand::Context { source, span } => {
+                    match context_indices.get(&normalized_name(source)) {
+                        Some(source) => operands.push(FinalizeOperand::Context {
+                            source: *source,
+                            span: *span,
+                        }),
+                        None => push(errors, Error::new(*span, "unknown finalizer context")),
+                    }
+                }
+                PendingFinalizeOperand::Value { source, span } => {
+                    let Some(&source_declaration) =
+                        source_field_indices.get(&normalized_name(source))
+                    else {
+                        push(errors, Error::new(*span, "unknown finalizer value field"));
+                        continue;
+                    };
+                    let Some(Some(source)) = normalized_field_indices.get(source_declaration)
+                    else {
+                        continue;
+                    };
+                    if *source == index {
+                        push(
+                            errors,
+                            Error::new(*span, "finalizer cannot consume its own value"),
+                        );
+                        continue;
+                    }
+                    if fields[*source].is_byte_range() {
+                        push(
+                            errors,
+                            Error::new(*span, "`value(...)` cannot reference a byte range field"),
+                        );
+                        continue;
+                    }
+                    if fields[*source].is_derived_range_source {
+                        push(
+                            errors,
+                            Error::new(
+                                *span,
+                                "`value(...)` cannot reference an automatic byte range source",
+                            ),
+                        );
+                        continue;
+                    }
+                    operands.push(FinalizeOperand::Value {
+                        source: *source,
+                        span: *span,
+                    });
+                }
+                PendingFinalizeOperand::Bytes { start, end } => {
+                    let end_span = span_of_boundary(end);
+                    let Some(start) = normalize_finalize_boundary(
+                        start,
+                        source_field_indices,
+                        normalized_field_indices,
+                        span_of_boundary(start),
+                        errors,
+                    ) else {
+                        continue;
+                    };
+                    let Some(end) = normalize_finalize_boundary(
+                        end,
+                        source_field_indices,
+                        normalized_field_indices,
+                        span_of_boundary(end),
+                        errors,
+                    ) else {
+                        continue;
+                    };
+                    if boundary_rank(start, fields) > boundary_rank(end, fields) {
+                        push(
+                            errors,
+                            Error::new(
+                                end_span,
+                                "finalizer bytes range start must not be after end",
+                            ),
+                        );
+                    }
+                    operands.push(FinalizeOperand::Bytes { start, end });
+                }
+            }
+        }
+        fields[index].finalization = Some(Finalization {
+            function: finalization.function,
+            operands,
+        });
+        targets.push(index);
+    }
+    for context in contexts {
+        let used = fields.iter().filter_map(|field| field.finalization.as_ref()).any(|finalization| {
+            finalization.operands.iter().any(|operand| matches!(operand, FinalizeOperand::Context { source, .. } if *source == context_indices[&normalized_name(&context.name)]))
+        });
+        if !used {
+            push(
+                errors,
+                Error::new(
+                    context.name.span(),
+                    "context must be referenced by at least one finalizer",
+                ),
+            );
+        }
+    }
+    let mut order = Vec::new();
+    let mut remaining = targets;
+    while !remaining.is_empty() {
+        let next = remaining
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                finalizer_dependencies(*candidate, fields)
+                    .iter()
+                    .all(|source| !remaining.contains(source))
+            })
+            .min_by_key(|index| fields[*index].declaration_index);
+        let Some(next) = next else {
+            for index in remaining {
+                push(
+                    errors,
+                    Error::new(fields[index].name.span(), "cycle in finalizer dependencies"),
+                );
+            }
+            break;
+        };
+        order.push(next);
+        remaining.retain(|index| *index != next);
+    }
+    order
+}
+
+fn span_of_boundary(boundary: &syntax::FinalizeBoundary) -> Span {
+    match boundary {
+        syntax::FinalizeBoundary::BufStart(span) | syntax::FinalizeBoundary::BufEnd(span) => *span,
+        syntax::FinalizeBoundary::FieldStart { span, .. }
+        | syntax::FinalizeBoundary::FieldEnd { span, .. } => *span,
+    }
+}
+
+fn normalize_finalize_boundary(
+    boundary: &syntax::FinalizeBoundary,
+    source_field_indices: &HashMap<String, usize>,
+    normalized_field_indices: &[Option<usize>],
+    span: Span,
+    errors: &mut Option<Error>,
+) -> Option<FinalizeBoundary> {
+    match boundary {
+        syntax::FinalizeBoundary::BufStart(_) => Some(FinalizeBoundary::BufStart),
+        syntax::FinalizeBoundary::BufEnd(_) => Some(FinalizeBoundary::BufEnd),
+        syntax::FinalizeBoundary::FieldStart { source, .. } => {
+            let Some(&declaration) = source_field_indices.get(&normalized_name(source)) else {
+                push(
+                    errors,
+                    Error::new(span, "unknown finalizer bytes boundary field"),
+                );
+                return None;
+            };
+            let Some(Some(index)) = normalized_field_indices.get(declaration) else {
+                return None;
+            };
+            Some(FinalizeBoundary::FieldStart(*index))
+        }
+        syntax::FinalizeBoundary::FieldEnd { source, .. } => {
+            let Some(&declaration) = source_field_indices.get(&normalized_name(source)) else {
+                push(
+                    errors,
+                    Error::new(span, "unknown finalizer bytes boundary field"),
+                );
+                return None;
+            };
+            let Some(Some(index)) = normalized_field_indices.get(declaration) else {
+                return None;
+            };
+            Some(FinalizeBoundary::FieldEnd(*index))
+        }
+    }
+}
+
+/// Orders finalizer boundaries by physical layout position, with a field's start before its end.
+fn boundary_rank(boundary: FinalizeBoundary, fields: &[Field]) -> (usize, u8) {
+    match boundary {
+        FinalizeBoundary::BufStart => (0, 0),
+        FinalizeBoundary::FieldStart(index) => (fields[index].placement, 0),
+        FinalizeBoundary::FieldEnd(index) => (fields[index].placement, 1),
+        FinalizeBoundary::BufEnd => (usize::MAX, 1),
+    }
+}
+
+fn finalizer_dependencies(target: usize, fields: &[Field]) -> Vec<usize> {
+    let Some(finalization) = fields[target].finalization.as_ref() else {
+        return Vec::new();
+    };
+    let mut dependencies: Vec<_> = finalization
+        .operands
+        .iter()
+        .filter_map(|operand| match operand {
+            FinalizeOperand::Value { source, .. }
+                if *source != target && fields[*source].finalization.is_some() =>
+            {
+                Some(*source)
+            }
+            FinalizeOperand::Bytes { .. }
+            | FinalizeOperand::Context { .. }
+            | FinalizeOperand::Value { .. } => None,
+        })
+        .collect();
+    dependencies.sort_unstable();
+    dependencies.dedup();
+    dependencies
 }
 
 fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error>) {
@@ -1186,7 +1884,10 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
     }
     let mut setters = HashMap::new();
     for field in fields.iter().filter(|field| {
-        matches!(field.codec(), Some(codec) if !codec.is_prefix()) && !field.is_derived_range_source
+        matches!(field.codec(), Some(codec) if !codec.is_prefix())
+            && !field.is_derived_range_source
+            && field.derivation.is_none()
+            && field.finalization.is_none()
     }) {
         let name = normalized_name(&field.setter_name);
         if getters.contains_key(&name) {
@@ -1207,6 +1908,7 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
     }
     for field in fields
         .iter()
+        .filter(|field| field.derivation.is_none() && field.finalization.is_none())
         .filter_map(|field| field.raw_setter_name.as_ref())
     {
         let name = normalized_name(field);
@@ -1261,7 +1963,9 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
         }
     }
     let mut fluent = HashMap::new();
-    for field in fields.iter().filter(|field| !field.is_derived_range_source) {
+    for field in fields.iter().filter(|field| {
+        !field.is_derived_range_source && field.derivation.is_none() && field.finalization.is_none()
+    }) {
         let name = normalized_name(&field.name);
         if matches!(name.as_str(), "new" | "build_into") {
             push(
@@ -1282,9 +1986,29 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
             );
         }
     }
+    for field in fields.iter().filter(|field| {
+        !field.is_derived_range_source && field.derivation.is_none() && field.finalization.is_none()
+    }) {
+        if let Some(existing) = &field.range_existing_name {
+            let name = normalized_name(existing);
+            if fluent.insert(name, field.name.span()).is_some() {
+                push(
+                    errors,
+                    Error::new(
+                        field.name.span(),
+                        "generated builder existing range method collision",
+                    ),
+                );
+            }
+        }
+    }
     for field in fields
         .iter()
-        .filter(|field| !field.is_derived_range_source)
+        .filter(|field| {
+            !field.is_derived_range_source
+                && field.derivation.is_none()
+                && field.finalization.is_none()
+        })
         .filter_map(|field| field.raw_name.as_ref())
     {
         let name = normalized_name(field);
@@ -2400,7 +3124,7 @@ mod tests {
             ),
             (
                 "layout H { field first: bytes(current_pos..buf_end) { position: 1; } field tail: U8 { position: 2; } }",
-                "physically terminal",
+                "`bytes(current_pos..buf_end)` must be physically terminal",
             ),
             (
                 "layout H { field length: U8 { position: 1; } field relative: bytes(current_pos..current_pos + length) { position: 2; } field absolute: bytes(current_pos..length) { position: 3; } }",
@@ -2412,12 +3136,246 @@ mod tests {
 
         model("layout H { field length: U8 { position: 1; } field first: bytes(current_pos..current_pos + length) { position: 2; } field second: bytes(current_pos..current_pos + length) { position: 3; } }").unwrap();
         error(
+            "layout H { field body_existing: U8 { position: 1; } field body: bytes(current_pos..buf_end) { position: 2; } }",
+            "generated builder existing range method collision",
+        );
+        error(
+            "scalar HBuilderRangeInput: U8; layout H { field body: bytes(current_pos..buf_end); }",
+            "generated layout name collision",
+        );
+        error(
             "layout H { field payload: remainder; }",
             "unknown bare codec",
         );
         error(
             "layout H { field payload: region(length); field length: U8; }",
             "expected curly braces",
+        );
+    }
+
+    #[test]
+    fn normalizes_explicit_derived_fields_and_rejects_bad_dependencies() {
+        let value = model("layout H { field later: U8 { position: 4; derive: crate::later(value(total)); derive_error: crate::E; } field count: U8 { position: 1; } field bytes: bytes(current_pos..current_pos + count) { position: 2; } field total: U8 { position: 3; derive: crate::total(len(bytes)); derive_error: crate::E; } }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential");
+        };
+        assert_eq!(layout.derived_order, vec![3, 0]);
+        for (source, needle) in [
+            (
+                "layout H { field total: U8 { position: 1; derive: crate::f(value(missing)); derive_error: crate::E; } }",
+                "unknown derived-field dependency",
+            ),
+            (
+                "layout H { field total: U8 { position: 1; derive: crate::f(value(total)); derive_error: crate::E; } }",
+                "cannot depend on itself",
+            ),
+            (
+                "layout H { field n: U8 { position: 1; } field body: bytes(current_pos..current_pos + n) { position: 2; } field total: U8 { position: 3; derive: crate::f(value(body)); derive_error: crate::E; } }",
+                "cannot reference a byte range",
+            ),
+            (
+                "layout H { field n: U8 { position: 1; } field total: U8 { position: 2; derive: crate::f(len(n)); derive_error: crate::E; } }",
+                "requires a byte range",
+            ),
+            (
+                "layout H { field a: U8 { position: 1; derive: crate::a(value(b)); derive_error: crate::E; } field b: U8 { position: 2; derive: crate::b(value(a)); derive_error: crate::E; } }",
+                "cycle in derived field dependencies",
+            ),
+            (
+                "layout H { field total: U8 { position: 1; derive: crate::f(); } }",
+                "requires `derive_error`",
+            ),
+            (
+                "layout H { field total: U8 { position: 1; derive_error: crate::E; } }",
+                "requires `derive`",
+            ),
+        ] {
+            error(source, needle);
+        }
+    }
+
+    #[test]
+    fn normalizes_semantic_finalizer_value_sources() {
+        let value = model("layout H { field target: U8 { position: 1; finalize: crate::finish(value(plain), value(mapped), value(derived), value(finalized)); } field plain: U8 { position: 2; } field mapped: U8 as crate::Mapped { position: 3; } field derived: U8 { position: 4; derive: crate::derive(value(plain)); derive_error: crate::E; } field finalized: U8 { position: 5; finalize: crate::finalize(bytes(finalized.start..finalized.end)); } }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential");
+        };
+        let operands = &layout.data.fields[0]
+            .finalization
+            .as_ref()
+            .unwrap()
+            .operands;
+        assert!(matches!(
+            operands[0],
+            FinalizeOperand::Value { source: 1, .. }
+        ));
+        assert!(matches!(
+            operands[1],
+            FinalizeOperand::Value { source: 2, .. }
+        ));
+        assert!(matches!(
+            operands[2],
+            FinalizeOperand::Value { source: 3, .. }
+        ));
+        assert!(matches!(
+            operands[3],
+            FinalizeOperand::Value { source: 4, .. }
+        ));
+        assert_eq!(layout.finalizer_order, vec![4, 0]);
+    }
+
+    #[test]
+    fn normalizes_contexts_finalizers_and_operands() {
+        let value = model("layout H { /// borrowed input\n context seed: crate::Seed; field sum: BeU16 { position: 2; finalize: crate::finish(context(seed), value(check), bytes(buf_start..check.end)); } field check: U8 { position: 1; finalize: crate::check(bytes(check.start..check.end)); } }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential");
+        };
+        assert!(layout.has_dynamic);
+        assert_eq!(layout.data.contexts.len(), 1);
+        assert_eq!(layout.data.contexts[0].name, "seed");
+        assert_eq!(layout.data.contexts[0].setter_name, "seed");
+        assert_eq!(layout.finalizer_order, vec![1, 0]);
+        let finalization = layout.data.fields[0].finalization.as_ref().unwrap();
+        assert_eq!(finalization.function.segments.len(), 2);
+        assert!(matches!(
+            finalization.operands[0],
+            FinalizeOperand::Context { source: 0, .. }
+        ));
+        assert!(matches!(
+            finalization.operands[1],
+            FinalizeOperand::Value { source: 1, .. }
+        ));
+        assert!(matches!(
+            finalization.operands[2],
+            FinalizeOperand::Bytes {
+                start: FinalizeBoundary::BufStart,
+                end: FinalizeBoundary::FieldEnd(1)
+            }
+        ));
+    }
+
+    #[test]
+    fn validates_context_finalizer_and_target_rules() {
+        for (source, needle) in [
+            (
+                "layout H { context unused: crate::U; field sum: U8 { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "context must be referenced",
+            ),
+            (
+                "layout H { context x: crate::X; context x: crate::Y; field sum: U8 { finalize: crate::f(context(x)); } }",
+                "duplicate context",
+            ),
+            (
+                "layout H { context sum: crate::S; field plain: U8; field total: U8 { finalize: crate::f(context(sum)); } }",
+                "",
+            ),
+            (
+                "layout H { context plain: crate::S; field plain: U8; field total: U8 { finalize: crate::f(context(plain)); } }",
+                "context name conflicts",
+            ),
+            (
+                "layout H { context body_existing: crate::S; field body: bytes(current_pos..buf_end); field total: U8 { finalize: crate::f(context(body_existing)); } }",
+                "context name conflicts",
+            ),
+            (
+                "layout H { field sum: U8 { finalize: crate::f(context(missing)); } }",
+                "unknown finalizer context",
+            ),
+            (
+                "layout H { context x: crate::X; field sum: U8 { finalize: crate::f(value(x)); } }",
+                "unknown finalizer value field",
+            ),
+            (
+                "layout H { field sum: U8 { finalize: crate::f(value(sum)); } }",
+                "cannot consume its own value",
+            ),
+            (
+                "absolute layout H { context x: crate::X; field sum: U8 { offset: 0; finalize: crate::f(context(x)); } }",
+                "only in sequential",
+            ),
+            (
+                "layout H { field sum: BeU24 { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "U24 requires range validation",
+            ),
+            (
+                "layout H { field sum: LeU24 { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "U24 requires range validation",
+            ),
+            (
+                "layout H { field sum: crate::C { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "unmapped direct builtin",
+            ),
+            (
+                "scalar N: U8; layout H { field sum: N { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "unmapped direct builtin",
+            ),
+            (
+                "layout H { field sum: bytes(1) { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "unmapped direct builtin",
+            ),
+            (
+                "layout H { field sum: prefix(crate::P) { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "unmapped direct builtin",
+            ),
+            (
+                "layout H { field sum: U8 as crate::S { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "unmapped direct builtin",
+            ),
+            (
+                "layout H { field sum: U8 { projections { bit x: 0; } finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "unmapped direct builtin",
+            ),
+        ] {
+            if needle.is_empty() {
+                assert!(model(source).is_ok(), "{source}");
+            } else {
+                error(source, needle);
+            }
+        }
+        error(
+            "layout H { field length: U8 { finalize: crate::f(bytes(buf_start..buf_end)); } field body: bytes(current_pos..current_pos + length); }",
+            "unmapped direct builtin",
+        );
+        error(
+            "layout H { field length: U8; field body: bytes(current_pos..current_pos + length); field sum: U8 { finalize: crate::f(value(body)); } }",
+            "cannot reference a byte range field",
+        );
+        error(
+            "layout H { field length: U8; field body: bytes(current_pos..current_pos + length); field sum: U8 { finalize: crate::f(value(length)); } }",
+            "cannot reference an automatic byte range source",
+        );
+    }
+
+    #[test]
+    fn orders_finalizers_only_by_explicit_value_dependencies() {
+        let value = model("layout H { field b: U8 { position: 1; finalize: crate::b(value(a)); } field a: U8 { position: 2; finalize: crate::a(bytes(a.start..a.end)); } field c: U8 { position: 3; finalize: crate::c(bytes(a.start..a.end)); } field d: U8 { position: 4; finalize: crate::d(bytes(d.start..d.end)); } }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential");
+        };
+        // Only value(a) orders a before b. Byte observation, including a target's
+        // own bytes, does not infer dependencies.
+        assert_eq!(layout.finalizer_order, vec![1, 0, 2, 3]);
+
+        let value = model("layout H { field a: U8 { finalize: crate::a(bytes(b.start..b.end)); } field b: U8 { finalize: crate::b(bytes(a.start..a.end)); } }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential");
+        };
+        assert_eq!(layout.finalizer_order, vec![0, 1]);
+
+        let value = model("layout H { field first: U8 { finalize: crate::first(value(plain), value(derived)); } field plain: U8; field derived: U8 { derive: crate::derive(value(plain)); derive_error: crate::E; } field second: U8 { finalize: crate::second(bytes(second.start..second.end)); } }").unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential");
+        };
+        assert_eq!(layout.finalizer_order, vec![0, 3]);
+
+        error(
+            "layout H { field a: U8 { finalize: crate::a(value(b)); } field b: U8 { finalize: crate::b(value(a)); } }",
+            "cycle in finalizer dependencies",
+        );
+
+        error(
+            "layout H { field a: U8 { finalize: crate::a(bytes(a.end..a.start)); } }",
+            "start must not be after end",
         );
     }
 }
