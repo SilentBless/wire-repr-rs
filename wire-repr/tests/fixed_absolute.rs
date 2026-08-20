@@ -108,49 +108,49 @@ wire_repr! {
     /// Builtin offsets are intentionally not declaration order.
     pub absolute layout Header {
         /// The trailing code.
-        field tail: BeU16 { offset: 4; }
+        tail @ 4: BeU16;
         /// The leading kind.
-        field kind: U8 { offset: 0; }
+        kind @ 0: U8;
     }
 
     /// A borrowed field and an arbitrary raw marker.
     pub absolute layout Custom {
         /// The borrowed middle bytes.
-        field borrowed: codec(Borrowing) { offset: 1; }
+        borrowed @ 1: crate::Borrowing;
         /// The leading raw marker.
-        field tracked: U8 { offset: 0; }
+        tracked @ 0: U8;
     }
 
     /// The zero-width configuration case.
     pub absolute layout ZeroLayout {
         /// Invalid field.
-        field invalid: codec(Zero) { offset: 2; }
+        invalid @ 2: crate::Zero;
     }
 
     /// The overflowing configuration case.
     pub absolute layout OverflowLayout {
         /// Invalid field.
-        field invalid: codec(Overflow) { offset: 1; }
+        invalid @ 1: crate::Overflow;
     }
 
     /// The overlap configuration case.
     pub absolute layout OverlapLayout {
         /// Earlier wide field.
-        field wide: codec(Wide) { offset: 0; }
+        wide @ 0: crate::Wide;
         /// Later overlapping field.
-        field later: U8 { offset: 2; }
+        later @ 2: U8;
     }
 
     /// Sequential and absolute declarations can share an invocation.
     pub layout SequentialHere {
         /// Value.
-        field value: U8 { position: 1; }
+        value @ 1: U8;
     }
 
     /// Absolute companion declaration in the same invocation.
     pub absolute layout AbsoluteHere {
         /// Value.
-        field value: U8 { offset: 0; }
+        value @ 0: U8;
     }
 }
 

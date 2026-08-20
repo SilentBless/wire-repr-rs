@@ -8,55 +8,55 @@ wire_repr! {
     /// Sequential projection layout.
     pub layout SequentialBits {
         /// Packed feature flags.
-        field flags: U8 { position: 1; projections {
+        flags @ 1: U8 {  projections {
             /// Enabled flag.
             bit enabled: 0;
             /// Mode value.
             bits mode: 1..=3;
             /// Raw Rust getter name.
             bit r#type: 4;
-        } }
+        } };
     }
     /// Absolute projection layout.
     pub absolute layout AbsoluteBits {
         /// Big-endian flags after a preserved gap.
-        field flags: BeU16 { offset: 2; projections {
+        flags @ 2: BeU16 {  projections {
             /// The top semantic bit.
             bit high: 15;
             /// Low semantic nibble.
             bits low: 0..=3;
-        } }
+        } };
     }
     /// Little-endian semantic numbering layout.
     pub layout LittleBits {
         /// Little-endian value.
-        field flags: LeU16 { position: 1; projections {
+        flags @ 1: LeU16 {  projections {
             /// Semantic least-significant bit.
             bit low: 0;
             /// Semantic top bit.
             bit high: 15;
-        } }
+        } };
     }
     /// Twenty-four-bit range layout.
     pub layout Narrow24 {
         /// A three-byte value used for its encoded top bit.
-        field top_flags: BeU24 { position: 1; projections {
+        top_flags @ 1: BeU24 {  projections {
             /// The highest encoded bit.
             bit top: 23;
-        } }
+        } };
         /// A separate three-byte value used for its complete range.
-        field all_flags: BeU24 { position: 2; projections {
+        all_flags @ 2: BeU24 {  projections {
             /// Every encoded bit.
             bits all: 0..=23;
-        } }
+        } };
     }
     /// Full-width wide storage layout.
     pub absolute layout Wide {
         /// A complete wide unsigned value.
-        field value: LeU128 { offset: 0; projections {
+        value @ 0: LeU128 {  projections {
             /// All bits normalized without a width shift.
             bits all: 0..=127;
-        } }
+        } };
     }
 }
 

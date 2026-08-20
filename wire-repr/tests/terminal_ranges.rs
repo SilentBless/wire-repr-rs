@@ -2,17 +2,17 @@ use wire_repr::wire_repr;
 
 wire_repr! {
     pub layout EthernetEnvelope {
-        field destination: bytes(6);
-        field source: bytes(6);
-        field ether_type: BeU16;
-        field payload: bytes(current_pos..buf_end);
+        destination: bytes(6);
+        source: bytes(6);
+        ether_type: BeU16;
+        payload: remaining_bytes;
     }
 
     pub layout PositionedTerminalRange {
-        field payload: bytes(current_pos..buf_end) { position: 4; }
-        align { position: 3; boundary: 4; }
-        padding { position: 2; length: 2; }
-        field head: U8 { position: 1; }
+        payload @ 4: remaining_bytes;
+        align(4) @ 3;
+        padding(2) @ 2;
+        head @ 1: U8;
     }
 }
 

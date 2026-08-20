@@ -44,24 +44,24 @@ impl PrefixCodec for TinyPrefix {
 
 wire_repr! {
     pub layout StaticPadded {
-        field tail: BeU16 { position: 4; }
-        align { position: 3; boundary: 4; }
-        padding { position: 2; length: 2; }
-        field head: U8 { position: 1; }
+        tail @ 4: BeU16;
+        align(4) @ 3;
+        padding(2) @ 2;
+        head @ 1: U8;
     }
 
     pub layout BoundaryOne {
-        field tail: U8 { position: 3; }
-        align { position: 2; boundary: 1; }
-        field head: U8 { position: 1; }
+        tail @ 3: U8;
+        align(1) @ 2;
+        head @ 1: U8;
     }
 
     pub layout DynamicPadded {
-        field tail: BeU16 { position: 5; }
-        align { position: 4; boundary: 4; }
-        padding { position: 3; length: 1; }
-        field value: prefix(TinyPrefix) { position: 2; }
-        field head: U8 { position: 1; }
+        tail @ 5: BeU16;
+        align(4) @ 4;
+        padding(1) @ 3;
+        value @ 2: variable(TinyPrefix);
+        head @ 1: U8;
     }
 }
 

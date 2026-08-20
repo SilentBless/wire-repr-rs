@@ -2,45 +2,45 @@ use wire_repr::wire_repr;
 
 wire_repr! {
     pub layout Framed {
-        field tail: U8 { position: 6; }
-        align { position: 5; boundary: 4; }
-        field second: bytes(current_pos..current_pos + length) { position: 4; }
-        padding { position: 3; length: 1; }
+        tail @ 6: U8;
+        align(4) @ 5;
+        second @ 4: bytes(length);
+        padding(1) @ 3;
         /// The first opaque range.
-        field first: bytes(current_pos..current_pos + length) { position: 2; }
-        field length: U8 { position: 1; }
+        first @ 2: bytes(length);
+        length @ 1: U8;
     }
 
     pub layout EmptyRanges {
-        field tail: U8 { position: 4; }
-        field second: bytes(current_pos..current_pos + length) { position: 3; }
-        field first: bytes(current_pos..current_pos + length) { position: 2; }
-        field length: U8 { position: 1; }
+        tail @ 4: U8;
+        second @ 3: bytes(length);
+        first @ 2: bytes(length);
+        length @ 1: U8;
     }
 
     pub layout AdjacentMutableRanges {
-        field first_length: U8 { position: 1; }
-        field second_length: U8 { position: 2; }
-        field first: bytes(current_pos..current_pos + first_length) { position: 3; }
-        field second: bytes(current_pos..current_pos + second_length) { position: 4; }
-        field tail: U8 { position: 5; }
+        first_length @ 1: U8;
+        second_length @ 2: U8;
+        first @ 3: bytes(first_length);
+        second @ 4: bytes(second_length);
+        tail @ 5: U8;
     }
 
     pub layout AbsoluteFramed {
-        field end: U8 { position: 1; }
-        field payload: bytes(current_pos..end) { position: 2; }
-        padding { position: 3; length: 1; }
-        field tail: U8 { position: 4; }
+        end @ 1: U8;
+        payload @ 2: bytes_to(end);
+        padding(1) @ 3;
+        tail @ 4: U8;
     }
 
     pub layout WideLength {
-        field payload: bytes(current_pos..current_pos + length) { position: 2; }
-        field length: BeU128 { position: 1; }
+        payload @ 2: bytes(length);
+        length @ 1: BeU128;
     }
 
     pub layout ShortFramed {
-        field payload: bytes(current_pos..current_pos + length) { position: 2; }
-        field length: U8 { position: 1; }
+        payload @ 2: bytes(length);
+        length @ 1: U8;
     }
 }
 

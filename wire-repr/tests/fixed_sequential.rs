@@ -62,35 +62,35 @@ wire_repr! {
     /// Header exercises builtins whose declarations differ from physical order.
     pub layout Header {
         /// The big-endian code at physical position two.
-        field code: BeU16 { position: 2; }
+        code @ 2: BeU16;
         /// The leading kind byte.
-        field kind: U8 { position: 1; }
+        kind @ 1: U8;
     }
 
     /// A view with a borrowed custom field and an arbitrary raw marker.
     pub layout Custom {
         /// The later raw marker.
-        field tracked: U8 { position: 2; }
+        tracked @ 2: U8;
         /// The leading borrowed bytes.
-        field borrowed: codec(Borrowing) { position: 1; }
+        borrowed @ 1: crate::Borrowing;
     }
 
     /// A view with an invalid zero-width codec.
     pub layout Zero {
         /// The invalid codec.
-        field invalid: codec(ZeroWidth) { position: 1; }
+        invalid @ 1: crate::ZeroWidth;
     }
 
     /// A crate-visible layout in the same macro invocation.
     pub(crate) layout CrateOnly {
         /// Its sole byte.
-        field value: U8 { position: 1; }
+        value @ 1: U8;
     }
 
     /// A private layout in the same macro invocation.
     layout PrivateOnly {
         /// Its sole byte.
-        field value: U8 { position: 1; }
+        value @ 1: U8;
     }
 }
 
@@ -99,7 +99,7 @@ mod accepted_rendered_forms {
         /// A restricted layout with a raw getter and qualified custom codec path.
         pub(in crate::accepted_rendered_forms) layout Restricted {
             /// The encoded type byte.
-            field r#type: U8 { position: 1; }
+            r#type @ 1: U8;
         }
     }
 

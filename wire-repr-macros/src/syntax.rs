@@ -11,7 +11,9 @@ mod keyword {
     syn::custom_keyword!(align);
     syn::custom_keyword!(bytes);
     syn::custom_keyword!(padding);
-    syn::custom_keyword!(prefix);
+    syn::custom_keyword!(bytes_to);
+    syn::custom_keyword!(remaining_bytes);
+    syn::custom_keyword!(variable);
     syn::custom_keyword!(projections);
     syn::custom_keyword!(bit);
     syn::custom_keyword!(bits);
@@ -182,7 +184,7 @@ pub(crate) enum Codec {
     Custom(Path),
     /// A structural borrowed byte span with a validated fixed width.
     Bytes(usize),
-    /// A custom prefix codec path.
+    /// A custom self-delimiting codec path.
     Prefix(Path),
     /// An opaque byte span with a restricted wire-relative range expression.
     Range(ByteRangeSyntax),
@@ -190,17 +192,7 @@ pub(crate) enum Codec {
 
 /// Exact syntax for a dynamic byte range before semantic normalization.
 pub(crate) struct ByteRangeSyntax {
-    pub(crate) start: ByteRangeStart,
     pub(crate) end: ByteRangeEnd,
-}
-
-/// A restricted byte-range start expression.
-pub(crate) enum ByteRangeStart {
-    CurrentPos,
-    BufStart(Span),
-    BufEnd(Span),
-    FieldStart(Span),
-    FieldEnd(Span),
 }
 
 /// A restricted byte-range end expression.
@@ -353,86 +345,53 @@ fn parse_context(input: ParseStream<'_>) -> Result<Context> {
 
 fn parse_padding(input: ParseStream<'_>) -> Result<PhysicalEntry> {
     input.parse::<keyword::padding>()?;
-    let content;
-    braced!(content in input);
-    let (placement, length) = parse_spacing_properties(&content, "length")?;
+    let length = parse_spacing_value(input, "padding")?;
+    let placement = parse_spacing_placement(input)?;
+    input.parse::<Token![;]>()?;
     Ok(PhysicalEntry::Padding { placement, length })
 }
 
 fn parse_alignment(input: ParseStream<'_>) -> Result<PhysicalEntry> {
     input.parse::<keyword::align>()?;
-    let content;
-    braced!(content in input);
-    let (placement, boundary) = parse_spacing_properties(&content, "boundary")?;
+    let boundary = parse_spacing_value(input, "align")?;
+    let placement = parse_spacing_placement(input)?;
+    input.parse::<Token![;]>()?;
     Ok(PhysicalEntry::Alignment {
         placement,
         boundary,
     })
 }
 
-fn parse_spacing_properties(
-    input: ParseStream<'_>,
-    value_name: &str,
-) -> Result<(Placement, LitInt)> {
-    let first: Ident = input.parse().map_err(|_| {
-        Error::new(
-            input.span(),
-            format!("expected `position` or `{value_name}`"),
-        )
-    })?;
-    let placement = if first == "position" {
-        input.parse::<Token![:]>()?;
-        let position = input.parse()?;
-        input.parse::<Token![;]>()?;
-        Placement::Explicit(position)
-    } else if first == value_name {
-        Placement::Implicit(first.span())
-    } else {
+fn parse_spacing_value(input: ParseStream<'_>, name: &str) -> Result<LitInt> {
+    let content;
+    syn::parenthesized!(content in input);
+    let value = content.parse::<LitInt>()?;
+    if !content.is_empty() {
         return Err(Error::new(
-            first.span(),
-            format!("expected `position` or `{value_name}`"),
-        ));
-    };
-    let value = if placement.is_explicit() {
-        parse_entry_property(input, value_name)?
-    } else {
-        input.parse::<Token![:]>()?;
-        let value = input.parse()?;
-        input.parse::<Token![;]>()?;
-        value
-    };
-    if !input.is_empty() {
-        return Err(Error::new(
-            input.span(),
-            format!("unexpected tokens after `{value_name}`"),
+            content.span(),
+            format!("expected one `{name}` value"),
         ));
     }
-    Ok((placement, value))
+    Ok(value)
 }
 
-fn parse_entry_property(input: ParseStream<'_>, expected: &str) -> Result<LitInt> {
-    let name: Ident = input
-        .parse()
-        .map_err(|_| Error::new(input.span(), format!("expected `{expected}`")))?;
-    if name != expected {
-        return Err(Error::new(name.span(), format!("expected `{expected}`")));
+fn parse_spacing_placement(input: ParseStream<'_>) -> Result<Placement> {
+    if input.peek(Token![@]) {
+        input.parse::<Token![@]>()?;
+        return input.parse().map(Placement::Explicit);
     }
-    input.parse::<Token![:]>()?;
-    let value = input.parse()?;
-    input.parse::<Token![;]>()?;
-    Ok(value)
+    Ok(Placement::Implicit(input.span()))
 }
 
 fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
     let docs = parse_docs(input)?;
-    let keyword: Ident = input
-        .parse()
-        .map_err(|_| Error::new(input.span(), "expected `field`"))?;
-    if keyword != "field" {
-        return Err(Error::new(keyword.span(), "expected `field`"));
-    }
-
-    let name = input.parse()?;
+    let name: Ident = input.parse()?;
+    let placement = if input.peek(Token![@]) {
+        input.parse::<Token![@]>()?;
+        Placement::Explicit(input.parse()?)
+    } else {
+        Placement::Implicit(name.span())
+    };
     input.parse::<Token![:]>()?;
     let codec = parse_codec(input)?;
     let mapping = if input.peek(Token![as]) {
@@ -441,68 +400,27 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
     } else {
         None
     };
+    if kind == LayoutKind::Absolute && !placement.is_explicit() {
+        return Err(Error::new(
+            name.span(),
+            "absolute fields require `name @ offset: Codec;`",
+        ));
+    }
     if input.peek(Token![;]) {
-        let semicolon: Token![;] = input.parse()?;
-        if kind == LayoutKind::Absolute {
-            return Err(Error::new(semicolon.span, "expected `offset`"));
-        }
+        input.parse::<Token![;]>()?;
         return Ok(Field {
             docs,
             name,
             codec,
             mapping,
-            placement: Placement::Implicit(semicolon.span),
+            placement,
             projections: Vec::new(),
             derivation: None,
             finalization: None,
         });
     }
-
     let content;
     braced!(content in input);
-    let expected = match kind {
-        LayoutKind::Sequential => "position",
-        LayoutKind::Absolute => "offset",
-    };
-    let placement = if content.peek(keyword::projections)
-        || content.peek(keyword::derive)
-        || content.peek(keyword::derive_error)
-        || content.peek(keyword::finalize)
-    {
-        if kind == LayoutKind::Absolute {
-            return Err(Error::new(content.span(), "expected `offset`"));
-        }
-        Placement::Implicit(content.span())
-    } else {
-        let placement_name: Ident = content
-            .parse()
-            .map_err(|_| Error::new(content.span(), format!("expected `{expected}`")))?;
-        if placement_name != expected {
-            let message = match (kind, placement_name.to_string().as_str()) {
-                (LayoutKind::Sequential, "offset") => {
-                    "`offset` is unsupported in fixed sequential layouts; use `position`"
-                }
-                (LayoutKind::Absolute, "position") => {
-                    "`position` is unsupported in fixed absolute layouts; use `offset`"
-                }
-                (LayoutKind::Sequential, "bits" | "region" | "align" | "padding") => {
-                    "this is unsupported in fixed sequential layouts; use `position`"
-                }
-                (LayoutKind::Absolute, "bits" | "region" | "align" | "padding") => {
-                    "this is unsupported in fixed absolute layouts; use `offset`"
-                }
-                _ => match kind {
-                    LayoutKind::Sequential => "expected `position`",
-                    LayoutKind::Absolute => "expected `offset`",
-                },
-            };
-            return Err(Error::new(placement_name.span(), message));
-        }
-        content.parse::<Token![:]>()?;
-        let placement = content.parse::<LitInt>()?;
-        content.parse::<Token![;]>()?;
-        Placement::Explicit(placement)
-    };
     let mut projections = Vec::new();
     let mut derivation = None;
     let mut derive_error = None;
@@ -600,9 +518,7 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
         } else {
             return Err(Error::new(
                 content.span(),
-                format!(
-                    "unexpected tokens after `{expected}`, `projections`, or derivation clauses"
-                ),
+                "expected `projections`, `derive`, `derive_error`, or `finalize`",
             ));
         }
     }
@@ -616,6 +532,7 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
         (None, Some(_)) => return Err(Error::new(name.span(), "`derive_error` requires `derive`")),
         (None, None) => None,
     };
+    input.parse::<Token![;]>()?;
     Ok(Field {
         docs,
         name,
@@ -791,91 +708,6 @@ fn parse_projection(input: ParseStream<'_>) -> Result<Projection> {
     })
 }
 
-fn parse_byte_range(input: ParseStream<'_>) -> Result<ByteRangeSyntax> {
-    let start = parse_byte_range_start(input)?;
-    input
-        .parse::<Token![..]>()
-        .map_err(|_| Error::new(input.span(), "expected `..` in byte range"))?;
-    let end = parse_byte_range_end(input)?;
-    if !input.is_empty() {
-        return Err(Error::new(
-            input.span(),
-            "expected a restricted byte range expression",
-        ));
-    }
-    Ok(ByteRangeSyntax { start, end })
-}
-
-fn parse_byte_range_start(input: ParseStream<'_>) -> Result<ByteRangeStart> {
-    let first: Ident = input
-        .parse()
-        .map_err(|_| Error::new(input.span(), "expected a byte range start"))?;
-    let span = first.span();
-    if first == "current_pos" {
-        return Ok(ByteRangeStart::CurrentPos);
-    }
-    if first == "buf_start" {
-        return Ok(ByteRangeStart::BufStart(span));
-    }
-    if first == "buf_end" {
-        return Ok(ByteRangeStart::BufEnd(span));
-    }
-    if !input.peek(Token![..]) && input.peek(Token![.]) {
-        input.parse::<Token![.]>()?;
-        let boundary: Ident = input
-            .parse()
-            .map_err(|_| Error::new(input.span(), "expected `start` or `end` after field name"))?;
-        return match boundary.to_string().as_str() {
-            "start" => Ok(ByteRangeStart::FieldStart(span)),
-            "end" => Ok(ByteRangeStart::FieldEnd(span)),
-            _ => Err(Error::new(
-                boundary.span(),
-                "expected `start` or `end` after field name",
-            )),
-        };
-    }
-    Err(Error::new(
-        span,
-        "expected `current_pos`, `buf_start`, `buf_end`, `field.start`, or `field.end`",
-    ))
-}
-
-fn parse_byte_range_end(input: ParseStream<'_>) -> Result<ByteRangeEnd> {
-    let first: Ident = input
-        .parse()
-        .map_err(|_| Error::new(input.span(), "expected a byte range end"))?;
-    let span = first.span();
-    if first == "buf_end" {
-        if input.peek(Token![+]) {
-            return Err(Error::new(
-                span,
-                "`buf_end` cannot have byte range arithmetic",
-            ));
-        }
-        return Ok(ByteRangeEnd::BufEnd);
-    }
-    if input.peek(Token![+]) {
-        input.parse::<Token![+]>()?;
-        let source: Ident = input
-            .parse()
-            .map_err(|_| Error::new(input.span(), "expected a range length field after `+`"))?;
-        if first != "current_pos" {
-            return Err(Error::new(
-                span,
-                "relative byte range end must start with `current_pos`",
-            ));
-        }
-        return Ok(ByteRangeEnd::Relative {
-            span: source.span(),
-            source,
-        });
-    }
-    Ok(ByteRangeEnd::Absolute {
-        source: first,
-        span,
-    })
-}
-
 fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
     if input.peek(Token![::])
         || input.peek(Token![crate])
@@ -915,44 +747,83 @@ fn parse_codec(input: ParseStream<'_>) -> Result<Codec> {
             }
             return Ok(Codec::Bytes(width));
         }
-        return parse_byte_range(&content).map(Codec::Range);
+        let source = content.parse::<Ident>().map_err(|_| {
+            Error::new(
+                content.span(),
+                "expected one relative range source in `bytes(source)`",
+            )
+        })?;
+        if !content.is_empty() {
+            return Err(Error::new(
+                content.span(),
+                "expected one relative range source in `bytes(source)`",
+            ));
+        }
+        return Ok(Codec::Range(ByteRangeSyntax {
+            end: ByteRangeEnd::Relative {
+                span: source.span(),
+                source,
+            },
+        }));
     }
-
-    if input.peek(keyword::prefix) {
-        input.parse::<keyword::prefix>()?;
+    if input.peek(keyword::bytes_to) {
+        input.parse::<keyword::bytes_to>()?;
+        let content;
+        syn::parenthesized!(content in input);
+        let source = content.parse::<Ident>().map_err(|_| {
+            Error::new(
+                content.span(),
+                "expected one absolute endpoint source in `bytes_to(source)`",
+            )
+        })?;
+        if !content.is_empty() {
+            return Err(Error::new(
+                content.span(),
+                "expected one absolute endpoint source in `bytes_to(source)`",
+            ));
+        }
+        return Ok(Codec::Range(ByteRangeSyntax {
+            end: ByteRangeEnd::Absolute {
+                span: source.span(),
+                source,
+            },
+        }));
+    }
+    if input.peek(keyword::remaining_bytes) {
+        input.parse::<keyword::remaining_bytes>()?;
+        return Ok(Codec::Range(ByteRangeSyntax {
+            end: ByteRangeEnd::BufEnd,
+        }));
+    }
+    if input.peek(keyword::variable) {
+        input.parse::<keyword::variable>()?;
         let content;
         syn::parenthesized!(content in input);
         let path = content.parse::<Path>()?;
         if !content.is_empty() {
-            return Err(Error::new(content.span(), "expected one prefix codec path"));
+            return Err(Error::new(
+                content.span(),
+                "expected one variable codec path",
+            ));
         }
         return Ok(Codec::Prefix(path));
     }
-    if input.peek(Token![::]) {
-        return Ok(Codec::Custom(input.parse()?));
-    }
     let first: Ident = input.parse().map_err(|_| {
-        Error::new(
-            input.span(),
-            "expected a builtin codec, `codec(path)`, `bytes(N)`, or `prefix(path)`,",
-        )
+        Error::new(input.span(), "expected a builtin codec, a direct codec path, `bytes(N)`, `bytes(source)`, `bytes_to(source)`, `remaining_bytes`, or `variable(path)`")
     })?;
-    if first == "codec" {
-        let content;
-        syn::parenthesized!(content in input);
-        let path = content.parse::<Path>()?;
-        if !content.is_empty() {
-            return Err(Error::new(content.span(), "expected one codec path"));
-        }
-        return Ok(Codec::Custom(path));
+    if first == "codec" && input.peek(syn::token::Paren) {
+        return Err(Error::new(
+            first.span(),
+            "`codec(path)` is removed; use the codec path directly",
+        ));
+    }
+    if first == "prefix" {
+        return Err(Error::new(
+            first.span(),
+            "`prefix(path)` is removed; use `variable(path)`",
+        ));
     }
     if input.peek(Token![::]) {
-        if first != "crate" && first != "self" && first != "super" && first != "Self" {
-            return Err(Error::new(
-                first.span(),
-                "direct codec paths must start with `::`, `crate`, `self`, `super`, or `Self`",
-            ));
-        }
         let mut path: Path = syn::parse_quote!(#first);
         while input.peek(Token![::]) {
             input.parse::<Token![::]>()?;
@@ -981,17 +852,6 @@ mod tests {
     use super::*;
     use syn::parse_str;
 
-    fn layouts(invocation: &Invocation) -> Vec<&Layout> {
-        invocation
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Layout(layout) => Some(layout),
-                Item::Scalar(_) => None,
-            })
-            .collect()
-    }
-
     fn parse_error(source: &str) -> Error {
         match parse_str::<Invocation>(source) {
             Ok(_) => panic!("expected syntax error"),
@@ -1000,503 +860,195 @@ mod tests {
     }
 
     #[test]
-    fn accepts_scalars_and_direct_fixed_codec_paths_in_mixed_order() {
-        let parsed: Invocation = parse_str("/// type\npub scalar Hardware: BeU16; layout Frame { field hardware: Hardware; } pub(crate) scalar Signed: LeI32;").unwrap();
-        assert_eq!(parsed.items.len(), 3);
-        assert!(
-            matches!(&parsed.items[0], Item::Scalar(Scalar { storage: Codec::Bare(name), .. }) if name == "BeU16")
-        );
-        assert!(
-            matches!(&parsed.items[1], Item::Layout(Layout { fields, .. }) if matches!(&fields[0].codec, Codec::Bare(name) if name == "Hardware"))
-        );
-        assert!(matches!(&parsed.items[2], Item::Scalar(_)));
-    }
-
-    #[test]
-    fn accepts_only_rooted_direct_fixed_codec_paths() {
-        for path in [
-            "::wire_repr::BeU16",
-            "crate::types::Kind",
-            "self::types::Kind",
-            "super::types::Kind",
-            "Self::Kind",
-        ] {
-            let source = format!("layout Header {{ field value: {path}; }}");
-            let parsed: Invocation = parse_str(&source).unwrap();
-            assert!(matches!(
-                &layouts(&parsed)[0].fields[0].codec,
-                Codec::Custom(_)
-            ));
-        }
-
-        assert!(
-            parse_error("layout Header { field value: typo::Codec; }")
-                .to_string()
-                .contains("direct codec paths must start")
-        );
-    }
-
-    #[test]
-    fn parses_fixed_mappings_before_placement_or_projections() {
+    fn parses_canonical_field_placement_codecs_and_properties() {
         let parsed: Invocation = parse_str(
-            "layout H { field kind: BeU16 as crate::Kind; field address: bytes(16) as crate::Address { position: 2; } field flags: U8 as crate::Flags { position: 3; projections { bit enabled: 0; } } field bits: U8 as crate::Bits { projections { bit set: 0; } } }",
-        )
-        .unwrap();
-        let fields = &layouts(&parsed)[0].fields;
-        assert!(matches!(&fields[0].mapping, Some(path) if path.segments.len() == 2));
-        assert!(matches!(&fields[1].codec, Codec::Bytes(16)));
-        assert!(matches!(&fields[1].mapping, Some(path) if path.segments.len() == 2));
-        assert_eq!(fields[2].projections.len(), 1);
-        assert_eq!(fields[3].projections.len(), 1);
-
-        for source in [
-            "layout H { field kind: U8 as; }",
-            "layout H { field kind: U8 as { position: 1; } }",
-        ] {
-            assert!(parse_str::<Invocation>(source).is_err(), "{source}");
-        }
-    }
-
-    #[test]
-    fn parses_implicit_sequential_derivations_but_keeps_absolute_offsets_explicit() {
-        let parsed: Invocation = parse_str(
-            "layout H { field source: U8; field derived: U8 { derive: crate::derive(value(source)); derive_error: crate::Error; } }",
-        )
-        .unwrap();
-        let derived = &layouts(&parsed)[0].fields[1];
-        assert!(matches!(derived.placement, Placement::Implicit(_)));
-        assert!(derived.derivation.is_some());
-
-        assert!(
-            parse_error(
-                "absolute layout H { field derived: U8 { derive: crate::derive(); derive_error: crate::Error; } }",
-            )
-            .to_string()
-            .contains("expected `offset`")
-        );
-    }
-
-    #[test]
-    fn accepts_absolute_after_visibility_and_with_sequential_layouts() {
-        for source in [
-            "/// packet\nabsolute layout Private { #[doc = \"kind\"] field kind: U8 { offset: 0; } field code: codec(crate::Code) { offset: 2; } }",
-            "pub absolute layout Public { field value: U8 { offset: 0; } }",
-            "pub(crate) absolute layout Restricted { field value: U8 { offset: 0; } }",
-            "pub layout Tail { field end: LeU16 { position: 1; } }",
-        ] {
-            if let Err(error) = parse_str::<Invocation>(source) {
-                panic!("failed to parse `{source}`: {error}");
-            }
-        }
-
-        let parsed: Invocation = parse_str("/// packet\nabsolute layout Private { #[doc = \"kind\"] field kind: U8 { offset: 0; } field code: codec(crate::Code) { offset: 2; } } pub absolute layout Public { field value: U8 { offset: 0; } } pub(crate) absolute layout Restricted { field value: U8 { offset: 0; } } layout Tail { field end: LeU16 { position: 1; } }").unwrap();
-        assert_eq!(layouts(&parsed).len(), 4);
-        assert_eq!(layouts(&parsed)[0].kind, LayoutKind::Absolute);
-        assert!(matches!(
-            &layouts(&parsed)[0].visibility,
-            Visibility::Inherited
-        ));
-        assert!(matches!(
-            &layouts(&parsed)[1].visibility,
-            Visibility::Public(_)
-        ));
-        assert!(matches!(
-            &layouts(&parsed)[2].visibility,
-            Visibility::Restricted(_)
-        ));
-        assert!(matches!(
-            &layouts(&parsed)[0].fields[0].placement,
-            Placement::Explicit(value) if value.base10_digits() == "0"
-        ));
-        assert_eq!(layouts(&parsed)[3].kind, LayoutKind::Sequential);
-    }
-
-    #[test]
-    fn placement_diagnostics_are_mode_specific() {
-        for (source, needle) in [
-            (
-                "layout H { field f: U8 { offset: 1; } }",
-                "unsupported in fixed sequential",
-            ),
-            (
-                "absolute layout H { field f: U8 { position: 1; } }",
-                "unsupported in fixed absolute",
-            ),
-        ] {
-            assert!(parse_error(source).to_string().contains(needle));
-        }
-    }
-
-    #[test]
-    fn accepts_docs_visibility_custom_paths_and_multiple_sequential_layouts() {
-        let parsed: Invocation = parse_str(
-            "/// header\npub(crate) layout Header { #[doc = \"kind\"] field kind: codec(crate::Code) { position: 2; } field first: U8 { position: 1; } } layout Tail { field end: LeU16 { position: 1; } }",
-        )
-        .unwrap();
-
-        assert_eq!(layouts(&parsed).len(), 2);
-        assert_eq!(layouts(&parsed)[0].docs.len(), 1);
-        assert!(matches!(
-            &layouts(&parsed)[0].visibility,
-            Visibility::Restricted(_)
-        ));
-        assert_eq!(layouts(&parsed)[0].fields[0].docs.len(), 1);
-        assert!(matches!(
-            &layouts(&parsed)[0].fields[0].codec,
-            Codec::Custom(path) if path.segments.len() == 2
-        ));
-    }
-
-    #[test]
-    fn local_syntax_diagnostics_remain_targeted() {
-        for (source, needle) in [
-            ("struct Header {}", "`struct`"),
-            ("layout H { field f U8 { position: 1; } }", "expected `:`"),
-            (
-                "layout H { field f: { position: 1; } }",
-                "expected a builtin codec",
-            ),
-            ("layout H { field f: U8 { position: 1 } }", "expected `;`"),
-            (
-                "#[derive(Clone)] layout H { field f: U8 { position: 1; } }",
-                "only outer documentation",
-            ),
-            (
-                "layout H { #[cfg(test)] field f: U8 { position: 1; } }",
-                "only outer documentation",
-            ),
-            (
-                "layout H { field f: U8 position: 1; }",
-                "expected curly braces",
-            ),
-            ("layout H { field f: U8 { : 1; } }", "expected `position`"),
-        ] {
-            let error = parse_error(source);
-            assert!(error.to_string().contains(needle), "{source}: {error}");
-        }
-    }
-
-    #[test]
-    fn accepts_nested_projection_grammar_and_rejects_empty_or_unknown_forms() {
-        let parsed: Invocation = parse_str("layout H { field flags: U8 { position: 1; projections { #[doc = \"enabled\"] bit r#type: 0; bits mode: 1..=3; } } } absolute layout A { field flags: LeU16 { offset: 0; projections { bit low: 0; } } }").unwrap();
-        assert_eq!(layouts(&parsed)[0].fields[0].projections.len(), 2);
-        assert_eq!(
-            layouts(&parsed)[0].fields[0].projections[0]
-                .name
-                .to_string(),
-            "r#type"
-        );
-        for (source, needle) in [
-            (
-                "layout H { field f: U8 { position: 1; projections { } } }",
-                "must contain",
-            ),
-            (
-                "layout H { field f: U8 { position: 1; projections { byte x: 0; } } }",
-                "expected `bit` or `bits`",
-            ),
-            (
-                "layout H { field f: U8 { position: 1; projections { bits x: 0..1; } } }",
-                "inclusive",
-            ),
-            (
-                "layout H { field f: U8 { position: 1; projections { bit x 0; } } }",
-                "expected `:`",
-            ),
-            (
-                "layout H { field f: U8 { position: 1; projections { bit x: 0 } } }",
-                "expected `;`",
-            ),
-            (
-                "layout H { field f: U8 { position: 1; projections { #[cfg(test)] bit x: 0; } } }",
-                "only outer documentation",
-            ),
-            (
-                "layout H { field f: U8 { position: 1; projections { bit x: 0; } projections { bit y: 1; } } }",
-                "duplicate `projections` clause",
-            ),
-            (
-                "layout H { field f: U8 { position: 1; projections { bit x: 0; } bit y: 1; } }",
-                "expected `projections` clause",
-            ),
-        ] {
-            assert!(parse_error(source).to_string().contains(needle));
-        }
-    }
-
-    #[test]
-    fn reserved_field_forms_are_rejected_in_each_fixed_mode() {
-        for (source, needle) in [
-            (
-                "layout H { field f: U8 { bits: 1; } }",
-                "unsupported in fixed sequential",
-            ),
-            (
-                "layout H { field f: U8 { region: 1; } }",
-                "unsupported in fixed sequential",
-            ),
-            (
-                "absolute layout H { field f: U8 { align: 1; } }",
-                "unsupported in fixed absolute",
-            ),
-            (
-                "absolute layout H { field f: U8 { padding: 1; } }",
-                "unsupported in fixed absolute",
-            ),
-        ] {
-            let error = parse_error(source);
-            assert!(error.to_string().contains(needle), "{source}: {error}");
-        }
-    }
-
-    #[test]
-    fn parses_custom_prefix_codecs_and_rejects_malformed_forms() {
-        let parsed: Invocation =
-            parse_str("layout H { field value: prefix(crate::Terminated) { position: 1; } }")
-                .unwrap();
-        assert!(matches!(
-            &layouts(&parsed)[0].fields[0].codec,
-            Codec::Prefix(path) if path.segments.len() == 2
-        ));
-
-        for source in [
-            "layout H { field value: prefix() { position: 1; } }",
-            "layout H { field value: prefix(crate::A crate::B) { position: 1; } }",
-        ] {
-            assert!(parse_str::<Invocation>(source).is_err(), "{source}");
-        }
-    }
-    #[test]
-    fn parses_byte_widths_and_rejects_invalid_forms() {
-        let parsed: Invocation = parse_str(
-            "layout Sequential { field value: bytes(16) { position: 1; } } absolute layout Absolute { field value: bytes(16) { offset: 0; } }",
+            "/// scalar\npub scalar Hardware: BeU16; layout Packet { #[doc = \"length\"] length @ 1: U8; payload @ 2: bytes(length); end @ 3: BeU16; absolute @ 4: bytes_to(end); tail @ 5: remaining_bytes; variable @ 6: variable(crate::Delimited); flags @ 7: U8 as crate::Flags { projections { bit r#type: 0; } }; padding(3) @ 8; align(4) @ 9; } absolute layout Absolute { tag @ 0: U8; payload @ 1: bytes(2); }",
         ).unwrap();
+        let Item::Layout(layout) = &parsed.items[1] else {
+            panic!("expected layout")
+        };
+        assert_eq!(layout.fields.len(), 7);
         assert!(matches!(
-            layouts(&parsed)[0].fields[0].codec,
-            Codec::Bytes(16)
-        ));
-        assert!(matches!(
-            layouts(&parsed)[1].fields[0].codec,
-            Codec::Bytes(16)
-        ));
-
-        for source in [
-            "layout H { field value: bytes() { position: 1; } }",
-            "layout H { field value: bytes(0) { position: 1; } }",
-            "layout H { field value: bytes(16u8) { position: 1; } }",
-            "layout H { field value: bytes(0x10) { position: 1; } }",
-            "layout H { field value: bytes(16 17) { position: 1; } }",
-        ] {
-            assert!(parse_str::<Invocation>(source).is_err(), "{source}");
-        }
-    }
-
-    #[test]
-    fn parses_byte_ranges_and_rejects_legacy_or_expression_forms() {
-        let parsed: Invocation = parse_str(
-            "layout H { field relative: bytes(current_pos..current_pos + length) { position: 2; } field absolute: bytes(current_pos..end) { position: 3; } field terminal: bytes(current_pos..buf_end) { position: 4; } field length: U8 { position: 1; } field end: U8 { position: 5; } }",
-        ).unwrap();
-        let fields = &layouts(&parsed)[0].fields;
-        assert!(
-            matches!(&fields[0].codec, Codec::Range(ByteRangeSyntax { start: ByteRangeStart::CurrentPos, end: ByteRangeEnd::Relative { source, .. } }) if source == "length")
-        );
-        assert!(
-            matches!(&fields[1].codec, Codec::Range(ByteRangeSyntax { start: ByteRangeStart::CurrentPos, end: ByteRangeEnd::Absolute { source, .. } }) if source == "end")
-        );
-        assert!(matches!(
-            &fields[2].codec,
+            layout.fields[1].codec,
             Codec::Range(ByteRangeSyntax {
-                start: ByteRangeStart::CurrentPos,
-                end: ByteRangeEnd::BufEnd
+                end: ByteRangeEnd::Relative { .. },
+                ..
             })
         ));
-        parse_str::<Invocation>(
-            "layout H { field length: U8; field payload: bytes(current_pos..current_pos + length); }",
-        )
-        .expect("implicit sequential byte ranges are valid");
-        for source in [
-            "layout H { field payload: bytes(current_pos..length + 1); }",
-            "layout H { field payload: bytes(current_pos..current_pos + length + 1); }",
-            "layout H { field payload: bytes(current_pos..crate::length); }",
-        ] {
-            assert!(parse_str::<Invocation>(source).is_err(), "{source}");
-        }
+        assert!(matches!(
+            layout.fields[3].codec,
+            Codec::Range(ByteRangeSyntax {
+                end: ByteRangeEnd::Absolute { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            layout.fields[4].codec,
+            Codec::Range(ByteRangeSyntax {
+                end: ByteRangeEnd::BufEnd,
+                ..
+            })
+        ));
+        assert!(matches!(layout.fields[5].codec, Codec::Prefix(_)));
+        assert_eq!(layout.fields[6].projections.len(), 1);
+        assert!(matches!(
+            layout.physical[7],
+            PhysicalEntry::Padding {
+                placement: Placement::Explicit(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            layout.physical[8],
+            PhysicalEntry::Alignment {
+                placement: Placement::Explicit(_),
+                ..
+            }
+        ));
+        let Item::Layout(absolute) = &parsed.items[2] else {
+            panic!("expected absolute layout")
+        };
+        assert_eq!(absolute.kind, LayoutKind::Absolute);
     }
-    #[test]
-    fn parses_padding_and_alignment_entries_with_targeted_grammar_errors() {
-        let parsed: Invocation = parse_str(
-            "layout H { align { position: 3; boundary: 8; } field tail: U8 { position: 4; } padding { position: 2; length: 3; } field head: U8 { position: 1; } }",
-        )
-        .unwrap();
-        let physical = &layouts(&parsed)[0].physical;
-        assert_eq!(physical.len(), 4);
-        assert!(matches!(
-            &physical[0],
-            PhysicalEntry::Alignment { placement: Placement::Explicit(position), boundary }
-                if position.base10_digits() == "3" && boundary.base10_digits() == "8"
-        ));
-        assert!(matches!(&physical[1], PhysicalEntry::Field(0)));
-        assert!(matches!(
-            &physical[2],
-            PhysicalEntry::Padding { placement: Placement::Explicit(position), length }
-                if position.base10_digits() == "2" && length.base10_digits() == "3"
-        ));
-        assert!(matches!(&physical[3], PhysicalEntry::Field(1)));
 
-        for (source, needle) in [
-            (
-                "layout H { field a: U8 { position: 1; } padding { length: 3; position: 2; } }",
-                "unexpected tokens",
-            ),
-            (
-                "layout H { field a: U8 { position: 1; } padding { position: 2; bytes: 3; } }",
-                "expected `length`",
-            ),
-            (
-                "layout H { field a: U8 { position: 1; } padding { position: 2; length: 3; extra: 1; } }",
-                "unexpected tokens",
-            ),
-            (
-                "layout H { field a: U8 { position: 1; } align { position: 2; size: 4; } }",
-                "expected `boundary`",
-            ),
-            (
-                "layout H { field a: U8 { position: 1; } align { position: 2; boundary: 4 } }",
-                "expected `;`",
-            ),
-        ] {
-            let error = parse_error(source);
-            assert!(error.to_string().contains(needle), "{source}: {error}");
-        }
-    }
     #[test]
-    fn parses_implicit_sequential_fields_and_spacing() {
+    fn parses_implicit_sequential_entries_and_builder_clauses() {
         let parsed: Invocation = parse_str(
-            "layout H { field length: U8; field prefix: prefix(crate::Prefix); field payload: bytes(current_pos..current_pos + length); field bytes: bytes(4); field custom: codec(crate::Codec); field flags: U8 { projections { bit enabled: 0; } } padding { length: 3; } align { boundary: 8; } }",
-        )
-        .unwrap();
-        let layout = &layouts(&parsed)[0];
+            "layout H { source: U8; derived: U8 { derive: crate::derive(value(source)); derive_error: crate::Error; }; flags: U8 { projections { bit enabled: 0; } }; padding(3); align(8); }",
+        ).unwrap();
+        let Item::Layout(layout) = &parsed.items[0] else {
+            panic!("expected layout")
+        };
         assert!(
             layout
                 .fields
                 .iter()
-                .all(|field| matches!(&field.placement, Placement::Implicit(_)))
+                .all(|field| matches!(field.placement, Placement::Implicit(_)))
         );
-        assert_eq!(layout.fields[5].projections.len(), 1);
+        assert_eq!(layout.fields[2].projections.len(), 1);
         assert!(matches!(
-            &layout.physical[6],
+            layout.physical[3],
             PhysicalEntry::Padding {
                 placement: Placement::Implicit(_),
                 ..
             }
         ));
-        assert!(matches!(
-            &layout.physical[7],
-            PhysicalEntry::Alignment {
-                placement: Placement::Implicit(_),
-                ..
-            }
-        ));
     }
 
     #[test]
-    fn rejects_implicit_absolute_fields_with_offset_diagnostics() {
-        for source in [
-            "absolute layout H { field value: U8; }",
-            "absolute layout H { field flags: U8 { projections { bit enabled: 0; } } }",
-        ] {
-            assert!(
-                parse_error(source)
-                    .to_string()
-                    .contains("expected `offset`")
-            );
+    fn accepts_direct_fixed_codec_paths_and_keeps_bare_names_bare() {
+        let parsed: Invocation = parse_str(
+            "scalar Declared: U8; layout H { declared: Declared; crate_path: crate::Codec; self_path: self::Codec; super_path: super::Codec; absolute_path: ::external::Codec; module_path: module::Codec; }",
+        )
+        .unwrap();
+        let Item::Layout(layout) = &parsed.items[1] else {
+            panic!("expected layout")
+        };
+        assert!(matches!(layout.fields[0].codec, Codec::Bare(ref name) if name == "Declared"));
+        for field in &layout.fields[1..] {
+            assert!(matches!(field.codec, Codec::Custom(_)));
         }
     }
 
     #[test]
-    fn parses_builder_contexts_and_post_write_finalizers() {
-        let parsed: Invocation = parse_str(
-            "layout UdpPacket { #[doc = \"pseudo header\"] context pseudo: crate::PseudoHeader; context payload_bytes: [u8]; field checksum: BeU16 { finalize: crate::udp_checksum(bytes(buf_start..buf_end), bytes(payload.start..checksum.end), context(pseudo), value(checksum),); } field payload: bytes(current_pos..buf_end); }",
-        )
-        .unwrap();
-        let layout = &layouts(&parsed)[0];
-        assert_eq!(layout.contexts.len(), 2);
-        assert_eq!(layout.contexts[0].docs.len(), 1);
-        assert!(matches!(&layout.contexts[1].referent, Type::Slice(_)));
-        let finalization = layout.fields[0].finalization.as_ref().unwrap();
-        assert_eq!(finalization.operands.len(), 4);
-        assert!(matches!(
-            &finalization.operands[0],
-            FinalizeOperand::Bytes {
-                start: FinalizeBoundary::BufStart(_),
-                end: FinalizeBoundary::BufEnd(_),
-            }
-        ));
-        assert!(matches!(
-            &finalization.operands[1],
-            FinalizeOperand::Bytes {
-                start: FinalizeBoundary::FieldStart { source, .. },
-                end: FinalizeBoundary::FieldEnd { source: end, .. },
-            } if source == "payload" && end == "checksum"
-        ));
+    fn rejects_legacy_codec_wrapper_with_migration_diagnostic() {
+        let error = parse_error("layout H { value: codec(crate::Codec); }");
         assert!(
-            matches!(&finalization.operands[2], FinalizeOperand::Context { source, .. } if source == "pseudo")
-        );
-        assert!(
-            matches!(&finalization.operands[3], FinalizeOperand::Value { source, .. } if source == "checksum")
+            error
+                .to_string()
+                .contains("`codec(path)` is removed; use the codec path directly")
         );
     }
 
     #[test]
-    fn rejects_malformed_contexts_and_finalizers_locally() {
+    fn retains_parser_local_coverage_for_contexts_finalizers_and_diagnostics() {
+        let parsed: Invocation = parse_str(
+            "layout H { #[doc = \"context\"] context state: crate::State; checksum: BeU16 { finalize: crate::finish(bytes(buf_start..buf_end), context(state), value(checksum)); }; payload: remaining_bytes; }",
+        )
+        .unwrap();
+        let Item::Layout(layout) = &parsed.items[0] else {
+            panic!("expected layout")
+        };
+        assert_eq!(layout.contexts.len(), 1);
+        assert_eq!(layout.contexts[0].docs.len(), 1);
+        assert!(matches!(
+            layout.fields[0]
+                .finalization
+                .as_ref()
+                .unwrap()
+                .operands
+                .as_slice(),
+            [
+                FinalizeOperand::Bytes { .. },
+                FinalizeOperand::Context { .. },
+                FinalizeOperand::Value { .. }
+            ]
+        ));
+
         for (source, needle) in [
+            ("layout H { field value: U8; }", "expected `:`"),
             (
-                "layout H { field f: U8; context c: crate::C; }",
+                "layout H { value: U8 { projections { bit x: 0; } } }",
+                "expected `;`",
+            ),
+            (
+                "layout H { value: U8 { projections { } }; }",
+                "must contain",
+            ),
+            (
+                "layout H { value: U8; context state: crate::State; }",
                 "must appear before physical",
             ),
             (
-                "layout H { padding { length: 1; } context c: crate::C; }",
-                "must appear before physical",
-            ),
-            (
-                "layout H { pub context c: crate::C; field f: U8; }",
-                "do not support visibility",
-            ),
-            (
-                "layout H { field f: U8 { finalize: crate::f(); } }",
+                "layout H { value: U8 { finalize: crate::finish(); }; }",
                 "at least one operand",
             ),
-            (
-                "layout H { field f: U8 { finalize: crate::f(bytes(current_pos..buf_end)); } }",
-                "expected `buf_start`",
-            ),
-            (
-                "layout H { field f: U8 { finalize: crate::f(bytes(buf_start + 1..buf_end)); } }",
-                "expected `..` in finalizer bytes range",
-            ),
-            (
-                "layout H { field f: U8 { finalize: crate::f(bytes(raw..buf_end)); } }",
-                "expected `buf_start`",
-            ),
-            (
-                "layout H { field f: U8 { finalize: crate::f(context()); } }",
-                "expected one context identifier",
-            ),
-            (
-                "layout H { field f: U8 { finalize: crate::f(value(a b)); } }",
-                "expected one field identifier",
-            ),
-            (
-                "layout H { field f: U8 { derive: crate::d(value(a)); derive_error: crate::E; finalize: crate::f(value(a)); } }",
-                "both `derive` and `finalize`",
-            ),
-            (
-                "layout H { field f: U8 { finalize: crate::f(value(a)); derive_error: crate::E; } }",
-                "only valid with `derive`",
-            ),
+            ("layout H { value: bytes(0); }", "must be nonzero"),
+            ("layout H { value: bytes(4u8); }", "must be unsuffixed"),
         ] {
             let error = parse_error(source);
             assert!(error.to_string().contains(needle), "{source}: {error}");
         }
+    }
+
+    #[test]
+    fn rejects_removed_grammar_and_requires_canonical_terms() {
+        for source in [
+            "layout H { field value: U8; }",
+            "layout H { value: U8 { position: 1; }; }",
+            "absolute layout H { value: U8; }",
+            "layout H { padding { length: 1; } }",
+            "layout H { align { boundary: 4; } }",
+            "layout H { value: prefix(crate::P); }",
+            "layout H { value: bytes(current_pos..current_pos + length); }",
+            "layout H { value: bytes(current_pos..buf_end); }",
+            "layout H { value: bytes(buf_start..end); }",
+        ] {
+            assert!(parse_str::<Invocation>(source).is_err(), "{source}");
+        }
+        assert!(
+            parse_error("layout H { value: prefix(crate::P); }")
+                .to_string()
+                .contains("variable(path)")
+        );
+        assert!(
+            parse_error("absolute layout H { value: U8; }")
+                .to_string()
+                .contains("name @ offset")
+        );
+    }
+
+    #[test]
+    fn retains_docs_raw_identifiers_and_direct_paths() {
+        let parsed: Invocation =
+            parse_str("/// layout\npub layout H { #[doc = \"value\"] r#type @ 1: crate::Codec; }")
+                .unwrap();
+        let Item::Layout(layout) = &parsed.items[0] else {
+            panic!("expected layout")
+        };
+        assert_eq!(layout.docs.len(), 1);
+        assert_eq!(layout.fields[0].docs.len(), 1);
+        assert_eq!(layout.fields[0].name, "r#type");
+        assert!(matches!(layout.fields[0].codec, Codec::Custom(_)));
     }
 }

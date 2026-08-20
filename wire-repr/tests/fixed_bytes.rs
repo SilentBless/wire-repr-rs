@@ -13,17 +13,17 @@ wire_repr! {
     /// A sequential layout with a borrowed exact-width byte field.
     pub layout SequentialBytes {
         /// The leading arbitrary bytes.
-        field payload: bytes(3) { position: 1; }
+        payload @ 1: bytes(3);
         /// A trailing tag.
-        field tag: U8 { position: 2; }
+        tag @ 2: U8;
     }
 
     /// An absolute layout with a borrowed exact-width byte field.
     pub absolute layout AbsoluteBytes {
         /// The arbitrary bytes after the leading tag.
-        field payload: bytes(2) { offset: 1; }
+        payload @ 1: bytes(2);
         /// The leading tag.
-        field tag: U8 { offset: 0; }
+        tag @ 0: U8;
     }
 }
 

@@ -9,6 +9,8 @@ these rules.
 The repository root is a virtual workspace. It owns shared metadata, licensing,
 toolchain policy, and documentation; it owns no Rust source or tests.
 
+The current release line is 0.5.
+
 The workspace has exactly two crates:
 
 - `wire-repr/` is the public runtime facade. It owns public codec contracts,
@@ -27,13 +29,13 @@ including magic values, reserved-byte policy, checksums as a protocol rule,
 cross-field relationships, state machines, I/O, and allocation policy.
 
 A fixed codec owns a compile-time-width representation and decodes every
-exact-width bit pattern. `bytes(N)` is an uninterpreted physical span. A prefix
-codec owns bounded structural discovery of its encoded width. Layout composition
-owns physical order and represented extent.
+exact-width bit pattern. `bytes(N)` is an uninterpreted physical span. A
+self-delimiting codec owns bounded structural discovery of its encoded width. Layout
+composition owns physical order and represented extent.
 
 The framework must not turn domain rejection into structural parsing, nor use a
-semantic value to reconstruct accepted raw bytes. Exact accepted prefix encodings,
-including legal noncanonical ones, remain available from immutable views.
+semantic value to reconstruct accepted raw bytes. Exact accepted self-delimiting
+encodings, including legal noncanonical ones, remain available from immutable views.
 
 ## 3. Compile pipeline
 
@@ -74,10 +76,10 @@ phase; successful public operations must not expose a runtime schema.
 
 Sequential layouts have two exclusive placement modes.
 
-In implicit mode, no physical entry specifies `position`; fields, padding, and
-alignment receive contiguous one-based physical positions in source order. In
-explicit mode, every physical entry specifies `position`; positions must be
-contiguous, but physical order may differ from declaration order.
+In implicit mode, no physical entry uses `@ N`; fields, padding, and alignment
+receive contiguous one-based physical positions in source order. In explicit mode,
+every physical entry uses `@ N`; positions must be contiguous, but physical order may
+differ from declaration order.
 
 Declaration order governs public getter, setter, builder-input, error-selection,
 and rustdoc order. Physical order governs parsing, represented bytes, dynamic
@@ -92,14 +94,14 @@ consumer-interpreted.
 
 ## 6. Fixed absolute geometry
 
-Every absolute-layout field has a mandatory zero-based `offset`. Absolute layouts
-are fixed width: their width is the maximum field extent. Parsing checks fields in
-ascending offset order and rejects invalid width, overflowing extent, and overlap
-before slicing input.
+Every absolute-layout field has a mandatory zero-based `@ N` placement. Absolute
+layouts are fixed width: their width is the maximum field extent. Parsing checks
+fields in ascending offset order and rejects invalid width, overflowing extent, and
+overlap before slicing input.
 
 Gaps are part of the represented byte span. Views preserve them; builders preserve
 existing caller-output gap bytes. Absolute layouts never infer offsets and do not
-support padding, alignment, prefix fields, or dynamic byte ranges.
+support padding, alignment, self-delimiting codecs, or dynamic byte ranges.
 
 ## 7. Immutable parsing and framing
 
@@ -108,9 +110,9 @@ checks bounds and arithmetic, determines dynamic extents, and only then forms
 field slices. It must not blindly slice after an unchecked codec claim.
 
 For fixed sequential and absolute layouts, represented extent follows fixed
-geometry. For dynamic sequential layouts, the immutable view retains the exact
-validated `usize` endpoint for every prefix, range, and `buf_end` boundary. It
-uses those endpoints directly: getters do not re-scan bytes, recompute endpoints,
+geometry. For dynamic sequential layouts, the immutable view retains the exact validated
+`usize` endpoint for every self-delimiting field, range, and terminal-buffer boundary.
+It uses those endpoints directly: getters do not re-scan bytes, recompute endpoints,
 cache semantic values, or defer framing checks.
 
 `with_remainder` returns the suffix after the complete represented layout. It does
@@ -125,27 +127,29 @@ The raw getter returns those exact bytes; it does not reencode the decoded value
 
 Only sequential layouts may contain byte ranges:
 
-- `bytes(current_pos..current_pos + source)` uses `source` as a relative length.
-- `bytes(current_pos..source)` uses `source` as an exclusive endpoint relative to
+- `bytes(source)` uses `source` as a relative length.
+- `bytes_to(source)` uses `source` as an exclusive endpoint relative to
   representation byte zero.
-- `bytes(current_pos..buf_end)` consumes the supplied view buffer tail.
+- `remaining_bytes` consumes the supplied view-buffer tail.
 
 The first two forms require an eligible physically preceding source: a built-in
 fixed integer or a total mapping over one. Parsing uses the physical raw integer
-and checked conversion to `usize`; a mapped value never changes geometry. Prefix,
-custom/direct, declared-scalar, nominal, and byte-range fields are not sources.
+and checked conversion to `usize`; a mapped value never changes geometry.
+Self-delimiting, custom/direct, declared-scalar, nominal, and byte-range fields are
+not sources.
 `bytes(0)` is invalid, but a dynamic range may be empty.
 
-An absolute endpoint before `current_pos` is a range error. An endpoint beyond
-available input is an input-shortage error. These are distinct conditions.
+An absolute endpoint before the current physical endpoint is a range error. An
+endpoint beyond available input is an input-shortage error. These are distinct
+conditions.
 
-`buf_end` has no source, appears at most once, and is physically last. It owns all
-bytes after earlier physical entries in the supplied input, including an empty
-span. Its `with_remainder` suffix is therefore empty. It does not establish an
+`remaining_bytes` has no source, appears at most once, and is physically last. It
+owns all bytes after earlier physical entries in the supplied input, including an
+empty span. Its `with_remainder` suffix is therefore empty. It does not establish an
 external packet, FCS, transport, or application boundary.
 
-Variable-width prefix values are not range sources. Consumer code owns framing
-such as a ULEB128 section length.
+Self-delimiting values are not range sources. Consumer code owns framing such as a
+ULEB128 section length.
 
 ## 9. Mutable contract
 
@@ -155,7 +159,8 @@ those boundaries without reparsing.
 
 Mutable views expose immutable getters and only typed, same-width setters whose
 writes cannot invalidate framing. They expose no unrestricted mutable-byte API.
-Prefix fields, dynamic ranges, `buf_end`, and every range source have no setter.
+Self-delimiting codecs, dynamic ranges, `remaining_bytes`, and every range source
+have no setter.
 Each range instead exposes a mutable slice of its exact validated span; that slice
 cannot resize or reframe the representation.
 
@@ -185,15 +190,15 @@ length, failed derivation, conversion failure, arithmetic overflow, and
 shared-source conflict.
 
 Relative range sources derive payload lengths. Absolute range sources derive
-exclusive physical payload ends, including preceding fixed/prefix extents, padding,
-alignment, and earlier ranges. `buf_end` has no source; its supplied builder span
-participates in the represented extent.
+exclusive physical payload ends, including preceding fixed/self-delimiting extents,
+padding, alignment, and earlier ranges. `remaining_bytes` has no source; its supplied
+builder span participates in the represented extent.
 
 ## 11. Codec laws
 
 `FixedCodec::WIDTH` is nonzero and its successful plan has exactly that width.
-`PrefixCodec::validate_prefix` reports a nonzero extent within its supplied bytes;
-a successful prefix plan is nonempty. `EncodePlan::encoded_len` and `write_into`
+`PrefixCodec::validate_prefix` reports a nonzero extent within its supplied bytes; a
+successful self-delimiting plan is nonempty. `EncodePlan::encoded_len` and `write_into`
 refer to the same representation.
 
 A successful plan must encode the planned semantic value. Any violation is
@@ -213,7 +218,7 @@ ordinary setter or builder input because the source is derived.
 
 `scalar Name: Codec;` declares a reusable codec-owning nominal wrapper; it is not
 an `as` mapping. Mappings do not apply to declared scalars, custom/direct codecs,
-prefix codecs, or ranges.
+self-delimiting codecs, or ranges.
 
 Unsigned built-in storage may declare immutable LSB0 bit projections. Bit numbering
 is over the decoded raw integer regardless of endianness. Mapped integer
@@ -233,9 +238,9 @@ DAG edges; byte-span reads do not.
 
 Finalizers return the target's exact semantic type and patch only that target
 infallibly. They may read contexts, semantic values, represented spans, and
-existing destination spans, but may not rewrite arbitrary spans. Their `buf_end`
-is the represented extent, not caller-output length. Thus no operation that can
-fail remains after the first output write.
+existing destination spans, but may not rewrite arbitrary spans. Their represented
+end is the representation extent, not caller-output length. Thus no operation that
+can fail remains after the first output write.
 
 ## 13. Error phases
 
@@ -252,9 +257,9 @@ first, and no error path may mutate caller output before preflight completes.
 ## 14. Zero-cost and codegen contract
 
 The macro emits concrete operations, not runtime descriptors, reflection, schema
-walkers, erased codecs, dynamic dispatch, allocation, generated source files, or
-build scripts. Fixed access is ordinary safe Rust loads, conversions, shifts, masks,
-and bounded copies; dynamic access uses retained validated endpoints.
+walkers, erased codecs, dynamic dispatch, allocation, generated source files, or build
+scripts. Fixed access is ordinary safe Rust loads, conversions, shifts, masks, and
+bounded copies; dynamic access uses retained validated endpoints.
 
 Assembly text is not a stable API: instruction selection and register allocation
 are compiler- and target-specific. The release probes in `wire-repr/tests/codegen.rs`

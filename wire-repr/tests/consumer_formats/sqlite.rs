@@ -6,51 +6,51 @@ wire_repr! {
     /// The fixed 100-byte SQLite database header.
     pub absolute layout Header {
         /// The SQLite format marker.
-        field magic: bytes(16) { offset: 0; }
+        magic @ 0: bytes(16);
         /// The raw database page size.
-        field page_size: BeU16 { offset: 16; }
+        page_size @ 16: BeU16;
         /// The file format write version.
-        field write_version: U8 { offset: 18; }
+        write_version @ 18: U8;
         /// The file format read version.
-        field read_version: U8 { offset: 19; }
+        read_version @ 19: U8;
         /// Reserved bytes at the end of each page.
-        field reserved_space: U8 { offset: 20; }
+        reserved_space @ 20: U8;
         /// The maximum embedded payload fraction.
-        field max_payload_fraction: U8 { offset: 21; }
+        max_payload_fraction @ 21: U8;
         /// The minimum embedded payload fraction.
-        field min_payload_fraction: U8 { offset: 22; }
+        min_payload_fraction @ 22: U8;
         /// The leaf payload fraction.
-        field leaf_payload_fraction: U8 { offset: 23; }
+        leaf_payload_fraction @ 23: U8;
         /// The file change counter.
-        field file_change_counter: BeU32 { offset: 24; }
+        file_change_counter @ 24: BeU32;
         /// The database size in pages.
-        field database_size_pages: BeU32 { offset: 28; }
+        database_size_pages @ 28: BeU32;
         /// The first freelist trunk page.
-        field first_freelist_trunk_page: BeU32 { offset: 32; }
+        first_freelist_trunk_page @ 32: BeU32;
         /// The total freelist page count.
-        field freelist_page_count: BeU32 { offset: 36; }
+        freelist_page_count @ 36: BeU32;
         /// The schema cookie.
-        field schema_cookie: BeU32 { offset: 40; }
+        schema_cookie @ 40: BeU32;
         /// The schema format number.
-        field schema_format_number: BeU32 { offset: 44; }
+        schema_format_number @ 44: BeU32;
         /// The raw suggested cache size.
-        field suggested_cache_size: BeU32 { offset: 48; }
+        suggested_cache_size @ 48: BeU32;
         /// The largest root b-tree page number.
-        field largest_root_btree_page: BeU32 { offset: 52; }
+        largest_root_btree_page @ 52: BeU32;
         /// The database text encoding.
-        field text_encoding: BeU32 { offset: 56; }
+        text_encoding @ 56: BeU32;
         /// The user version.
-        field user_version: BeU32 { offset: 60; }
+        user_version @ 60: BeU32;
         /// The incremental-vacuum mode.
-        field incremental_vacuum_mode: BeU32 { offset: 64; }
+        incremental_vacuum_mode @ 64: BeU32;
         /// The application identifier.
-        field application_id: BeU32 { offset: 68; }
+        application_id @ 68: BeU32;
         /// The space reserved for future SQLite expansion.
-        field reserved_expansion: bytes(20) { offset: 72; }
+        reserved_expansion @ 72: bytes(20);
         /// The change counter valid for the SQLite version.
-        field version_valid_for: BeU32 { offset: 92; }
+        version_valid_for @ 92: BeU32;
         /// The SQLite library version number.
-        field sqlite_version_number: BeU32 { offset: 96; }
+        sqlite_version_number @ 96: BeU32;
     }
 }
 

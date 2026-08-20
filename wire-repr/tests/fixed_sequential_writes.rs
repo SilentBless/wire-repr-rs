@@ -155,48 +155,48 @@ wire_repr! {
     /// A mixed physical-order layout with opaque spacing.
     pub layout Mixed {
         /// The trailing big-endian word.
-        field tail: BeU16 { position: 4; }
-        align { position: 3; boundary: 4; }
-        padding { position: 2; length: 2; }
+        tail @ 4: BeU16;
+        align(4) @ 3;
+        padding(2) @ 2;
         /// The leading byte.
-        field head: U8 { position: 1; }
+        head @ 1: U8;
     }
 
     /// A layout combining scalar and borrowed builder values.
     pub layout BorrowedPacket {
         /// Borrowed bytes physically after the scalar.
-        field borrowed: codec(Borrowing) { position: 2; }
+        borrowed @ 2: crate::Borrowing;
         /// A scalar first byte.
-        field scalar: U8 { position: 1; }
+        scalar @ 1: U8;
     }
 
     /// A layout whose codecs exercise atomic preparation failures.
     pub layout Problem {
         /// The first declared field.
-        field failing: codec(Failing) { position: 1; }
+        failing @ 1: crate::Failing;
         /// The second declared field.
-        field wrong: codec(WrongPlan) { position: 2; }
+        wrong @ 2: crate::WrongPlan;
     }
 
     /// A layout that rejects a zero-width custom fixed codec while building.
     pub layout ZeroWidthPacket {
         /// The invalid custom field.
-        field zero: codec(ZeroWidth) { position: 1; }
+        zero @ 1: crate::ZeroWidth;
     }
 
     /// A layout whose padding advances beyond the largest representable extent.
     pub layout OverflowPacket {
         /// The maximal-width custom field.
-        field huge: codec(Huge) { position: 1; }
-        padding { position: 2; length: 1; }
+        huge @ 1: crate::Huge;
+        padding(1) @ 2;
     }
 
     /// A layout proving builder preparation uses declaration rather than physical order.
     pub layout DeclarationOrder {
         /// The first declared field, physically second.
-        field first: codec(Failing) { position: 2; }
+        first @ 2: crate::Failing;
         /// The second declared field, physically first.
-        field second: codec(Failing) { position: 1; }
+        second @ 1: crate::Failing;
     }
 }
 

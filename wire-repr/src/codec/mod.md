@@ -1,25 +1,26 @@
 # Codec contracts and built-ins
 
 A codec owns one field's exact wire representation. Layout generation owns physical
-order, represented extent, framing, bounded ranges, and caller storage; consumers
-own domain policy such as magic values, reserved ranges, checksums, and cross-field
-rules.
+order, represented extent, framing, bounded ranges, and caller storage; consumers own
+domain policy such as magic values, reserved ranges, checksums, and cross-field rules.
 
 ## Choose a contract
 
 - Implement [`FixedCodec`] when every value has one compile-time, nonzero width.
   Decode every exact-width bit pattern; do not make application semantics a required
-  structural-validation step.
+  structural-validation step. Declare such a codec directly with `name: path::Codec;`.
 - Implement [`PrefixCodec`] when bounded structural validation must discover the
   nonzero encoded width from available input. `validate_prefix` receives the remaining
-  bytes and decoding then receives exactly the accepted span.
+  bytes and decoding then receives exactly the accepted span. Declare it with
+  `name: variable(path);`.
 - Implement [`EncodePlan`] as the result of fallible `plan`. Its `encoded_len` and
   `write_into` must describe the same representation, and writing into its exact-sized
   destination must be infallible.
 
-A prefix view retains the accepted extent. Its raw getter returns those original bytes,
-including a legal noncanonical encoding; it does not reconstruct them from the decoded
-value. A prefix plan may choose a canonical encoding for a value.
+A self-delimiting view retains its accepted extent. Its raw getter returns those
+original bytes, including a legal noncanonical encoding; it does not reconstruct them
+from the decoded value. A self-delimiting plan may choose a canonical encoding for a
+value.
 
 ## Builder boundary
 
@@ -33,12 +34,12 @@ a custom codec that violates its trait laws is still broken. In particular:
 
 - `FixedCodec::WIDTH` is nonzero, and every successful fixed plan is exactly that width.
 - `PrefixCodec::validate_prefix` returns a nonzero extent within its supplied input.
-- Every successful prefix plan is nonempty.
+- Every successful self-delimiting plan is nonempty.
 - A successful plan encodes the semantic value it planned.
 
 Keep framing between fields, range-source algebra, derived endpoints, and protocol
-validation outside a codec. A prefix codec discovers its own field width; it is not a
-source for a later dynamic byte range.
+validation outside a codec. A self-delimiting codec discovers its own field width; it
+is not a source for a later dynamic byte range.
 
 ## Built-ins
 

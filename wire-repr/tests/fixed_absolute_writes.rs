@@ -158,35 +158,35 @@ wire_repr! {
     /// A sparse layout declared opposite to physical order.
     pub absolute layout Packet {
         /// The trailing word.
-        field tail: BeU16 { offset: 4; }
+        tail @ 4: BeU16;
         /// Borrowed bytes in the middle.
-        field borrowed: codec(Borrowing) { offset: 1; }
+        borrowed @ 1: crate::Borrowing;
         /// The leading byte.
-        field head: U8 { offset: 0; }
+        head @ 0: U8;
     }
     /// Planning failures in declaration order.
     pub absolute layout Problem {
         /// First declaration, physically later.
-        field first: codec(Failing) { offset: 2; }
+        first @ 2: crate::Failing;
         /// Second declaration, physically first.
-        field wrong: codec(WrongPlan) { offset: 0; }
+        wrong @ 0: crate::WrongPlan;
     }
     /// A zero-width structural failure.
     pub absolute layout ZeroLayout {
         /// Invalid codec.
-        field zero: codec(Zero) { offset: 3; }
+        zero @ 3: crate::Zero;
     }
     /// An overflowing structural failure.
     pub absolute layout OverflowLayout {
         /// Invalid codec extent.
-        field huge: codec(Huge) { offset: 1; }
+        huge @ 1: crate::Huge;
     }
     /// An overlapping structural failure.
     pub absolute layout OverlapLayout {
         /// Earlier wide field.
-        field wide: codec(Wide) { offset: 0; }
+        wide @ 0: crate::Wide;
         /// Later overlap.
-        field later: U8 { offset: 2; }
+        later @ 2: U8;
     }
 }
 

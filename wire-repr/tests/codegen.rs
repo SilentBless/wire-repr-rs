@@ -38,69 +38,69 @@ wire_repr! {
     /// A compact fixed layout used only by the release-codegen gate.
     pub layout CodegenPacket {
         /// The big-endian word under test.
-        field word: BeU16 {
-            position: 1;
+        word @ 1: BeU16 {
+
             projections {
                 bit word_low: 0;
             }
-        }
+        };
     }
 
     /// A compact nominal-scalar layout used only by the release-codegen gate.
     pub layout CodegenScalarPacket {
         /// The nominal big-endian word under test.
-        field hardware_type: CodegenHardwareType;
+        hardware_type: CodegenHardwareType;
     }
 
     /// A compact total-mapped layout used only by the release-codegen gate.
     pub layout CodegenMappedPacket {
         /// The mapped big-endian word under test.
-        field mapped: BeU32 as crate::CodegenMapped;
+        mapped: BeU32 as crate::CodegenMapped;
     }
 
     /// A relative byte range used only by the release-codegen gate.
     pub layout CodegenRelativeRange {
         /// The raw range length under test.
-        field length: U8;
+        length: U8;
         /// Bytes ending at the current position plus `length`.
-        field payload: bytes(current_pos..current_pos + length);
+        payload: bytes(length);
     }
 
     /// An absolute byte range used only by the release-codegen gate.
     pub layout CodegenAbsoluteRange {
         /// The exclusive endpoint from representation byte zero.
-        field end: U8;
+        end: U8;
         /// Bytes ending at `end`.
-        field payload: bytes(current_pos..end);
+        payload: bytes_to(end);
     }
 
     /// A derived dynamic builder used only by the release-codegen gate.
     pub layout CodegenDerivedRange {
-        field tag: U8;
-        field length: U8;
-        field payload: bytes(current_pos..current_pos + length);
-        field total: U8 {
+        tag: U8;
+        length: U8;
+        payload: bytes(length);
+        total: U8 {
             derive: crate::codegen_derived_total(len(payload));
             derive_error: core::convert::Infallible;
-        }
+        };
     }
 
     /// A post-write-finalized layout used only by the release-codegen gate.
     pub layout CodegenFinalizedPacket {
         /// The ordinary caller-supplied byte.
-        field tag: U8;
+        tag: U8;
         /// The big-endian post-write finalizer target.
-        field checksum: BeU16 {
+        checksum: BeU16 {
             finalize: crate::codegen_finalized_sum(bytes(buf_start..buf_end));
-        }
+        };
     }
 
     /// A terminal byte range used only by the release-codegen gate.
     pub layout CodegenTerminalRange {
         /// The fixed header byte under test.
-        field header: U8;
+        header: U8;
         /// Every caller-bounded byte after the header.
-        field payload: bytes(current_pos..buf_end);
+        payload: remaining_bytes;
     }
 }
 

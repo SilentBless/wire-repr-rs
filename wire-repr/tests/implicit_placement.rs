@@ -2,19 +2,19 @@ use wire_repr::wire_repr;
 
 wire_repr! {
     pub layout ImplicitFixed {
-        field tag: U8;
-        padding { length: 2; }
-        align { boundary: 4; }
-        field flags: U8 { projections {
+        tag: U8;
+        padding(2);
+        align(4);
+        flags: U8 { projections {
             bit enabled: 0;
             bits mode: 1..=3;
-        } }
+        } };
     }
 
     pub layout ImplicitDynamic {
-        field length: U8;
-        field payload: bytes(current_pos..current_pos + length);
-        field tail: BeU16;
+        length: U8;
+        payload: bytes(length);
+        tail: BeU16;
     }
 }
 

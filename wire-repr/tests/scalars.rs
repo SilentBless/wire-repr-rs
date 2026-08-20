@@ -4,8 +4,8 @@ type ExternalCodec = BeU16;
 
 wire_repr! {
     pub layout Header {
-        field hardware_type: HardwareType;
-        field payload_size: PayloadSize;
+        hardware_type: HardwareType;
+        payload_size: PayloadSize;
     }
 
     /// A hardware address family.
@@ -13,7 +13,7 @@ wire_repr! {
     pub scalar PayloadSize: BeU24;
 
     pub layout ExternalHeader {
-        field code: crate::ExternalCodec;
+        code: crate::ExternalCodec;
     }
 }
 

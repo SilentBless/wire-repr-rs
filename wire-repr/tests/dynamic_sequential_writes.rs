@@ -106,26 +106,26 @@ impl FixedCodec for Wrong {
 
 wire_repr! {
     pub layout DynamicWrite {
-        field length: U8 { position: 1; }
-        field body: bytes(current_pos..current_pos + length) { position: 2; }
-        padding { position: 3; length: 1; }
-        align { position: 4; boundary: 4; }
-        field tail: BeU16 {
-            position: 5;
+        length @ 1: U8;
+        body @ 2: bytes(length);
+        padding(1) @ 3;
+        align(4) @ 4;
+        tail @ 5: BeU16 {
+
             projections {
                 bit tail_low: 0;
             }
-        }
-        field borrowed: codec(Borrowing) { position: 6; }
+        };
+        borrowed @ 6: crate::Borrowing;
     }
     pub layout AtomicProblems {
-        field prefix: prefix(Length) { position: 1; }
-        field failing: codec(Failing) { position: 2; }
-        field wrong: codec(Wrong) { position: 3; }
+        prefix @ 1: variable(Length);
+        failing @ 2: crate::Failing;
+        wrong @ 3: crate::Wrong;
     }
     pub layout NoEligibleSetters {
-        field length: U8 { position: 1; }
-        field body: bytes(current_pos..current_pos + length) { position: 2; }
+        length @ 1: U8;
+        body @ 2: bytes(length);
     }
 }
 

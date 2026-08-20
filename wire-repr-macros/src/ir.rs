@@ -441,7 +441,7 @@ fn normalize_scalar(
                 errors,
                 Error::new(
                     source.name.span(),
-                    "scalar storage must be a builtin fixed integer codec; `prefix(path)` is unsupported",
+                    "scalar storage must be a builtin fixed integer codec; `variable(path)` is unsupported",
                 ),
             );
             return None;
@@ -829,19 +829,6 @@ fn normalize_layout(
                             field.name.span(),
                             "byte ranges are unsupported in absolute layouts",
                         ),
-                    );
-                }
-                let start_span = match range.start {
-                    syntax::ByteRangeStart::CurrentPos => None,
-                    syntax::ByteRangeStart::BufStart(span)
-                    | syntax::ByteRangeStart::BufEnd(span)
-                    | syntax::ByteRangeStart::FieldStart(span)
-                    | syntax::ByteRangeStart::FieldEnd(span) => Some(span),
-                };
-                if let Some(span) = start_span {
-                    push(
-                        errors,
-                        Error::new(span, "byte range start must be `current_pos`"),
                     );
                 }
                 let end = match range.end {
@@ -1390,7 +1377,7 @@ fn normalize_layout(
                 errors,
                 Error::new(
                     fields[index].placement_span,
-                    "`bytes(current_pos..buf_end)` must be physically terminal",
+                    "`remaining_bytes` must be physically terminal",
                 ),
             );
         }
@@ -2424,10 +2411,10 @@ mod tests {
         let fields: String = names
             .iter()
             .enumerate()
-            .map(|(index, codec)| format!("field f{index}: {codec} as crate::Semantic;"))
+            .map(|(index, codec)| format!("f{index}: {codec} as crate::Semantic;"))
             .collect();
         let value = model(&format!(
-            "layout H {{ {fields} field bytes: bytes(16) as crate::Address; }}"
+            "layout H {{ {fields} bytes: bytes(16) as crate::Address; }}"
         ))
         .unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
@@ -2472,29 +2459,28 @@ mod tests {
     fn mapping_rejects_nonphysical_fixed_codecs_and_preserves_projections() {
         for (source, needle) in [
             (
-                "layout H { field value: crate::Codec as crate::Semantic; }",
+                "layout H { value: crate::Codec as crate::Semantic; }",
                 "custom codecs",
             ),
             (
-                "scalar Nominal: U8; layout H { field value: Nominal as crate::Semantic; }",
+                "scalar Nominal: U8; layout H { value: Nominal as crate::Semantic; }",
                 "declared scalar codecs",
             ),
             (
-                "layout H { field value: prefix(crate::Codec) as crate::Semantic; }",
+                "layout H { value: variable(crate::Codec) as crate::Semantic; }",
                 "prefix codecs",
             ),
             (
-                "layout H { field length: U8; field value: bytes(current_pos..current_pos + length) as crate::Semantic; }",
+                "layout H { length: U8; value: bytes(length) as crate::Semantic; }",
                 "byte range fields",
             ),
         ] {
             error(source, needle);
         }
 
-        let value = model(
-            "layout H { field flags: U8 as crate::Flags { projections { bit enabled: 0; } } }",
-        )
-        .unwrap();
+        let value =
+            model("layout H { flags: U8 as crate::Flags { projections { bit enabled: 0; } }; }")
+                .unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
@@ -2508,32 +2494,31 @@ mod tests {
     #[test]
     fn mapped_raw_names_share_getter_setter_and_builder_namespaces() {
         error(
-            "layout H { field kind: U8 as crate::Kind; field kind_raw: U8; }",
+            "layout H { kind: U8 as crate::Kind; kind_raw: U8; }",
             "mapped raw getter conflicts",
         );
         error(
-            "layout H { field flags: U8 { projections { bit kind_raw: 0; } } field kind: U8 as crate::Kind; }",
+            "layout H { flags: U8 { projections { bit kind_raw: 0; } }; kind: U8 as crate::Kind; }",
             "mapped raw getter conflicts",
         );
         error(
-            "layout H { field kind: U8 as crate::Kind; field set_kind_raw: U8; }",
+            "layout H { kind: U8 as crate::Kind; set_kind_raw: U8; }",
             "mapped raw setter conflicts",
         );
         error(
-            "layout H { field r#kind: U8 as crate::Kind; field kind_raw: U8; }",
+            "layout H { r#kind: U8 as crate::Kind; kind_raw: U8; }",
             "mapped raw getter conflicts",
         );
-        let builder_error =
-            match model("layout H { field kind: U8 as crate::Kind; field kind_raw: U8; }") {
-                Ok(_) => panic!("expected builder namespace error"),
-                Err(error) => error.into_compile_error().to_string(),
-            };
+        let builder_error = match model("layout H { kind: U8 as crate::Kind; kind_raw: U8; }") {
+            Ok(_) => panic!("expected builder namespace error"),
+            Err(error) => error.into_compile_error().to_string(),
+        };
         assert!(builder_error.contains("generated builder fluent method collision"));
     }
 
     #[test]
     fn unmapped_fields_keep_no_mapping_or_raw_generated_names() {
-        let value = model("layout H { field value: U8; }").unwrap();
+        let value = model("layout H { value: U8; }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
@@ -2545,7 +2530,7 @@ mod tests {
 
     #[test]
     fn normalizes_builtin_scalars_direct_paths_and_top_level_collisions() {
-        let value = model("layout Frame { field hardware: Hardware; field external: crate::External; } pub scalar Hardware: BeU16; pub scalar Size: LeU24;").unwrap();
+        let value = model("layout Frame { hardware: Hardware; external: crate::External; } pub scalar Hardware: BeU16; pub scalar Size: LeU24;").unwrap();
         assert!(
             matches!(&value.items[0], Item::Layout(Layout::Sequential(layout)) if
                 matches!(layout.data.fields[0].codec(), Some(Codec::Custom(_)))
@@ -2567,12 +2552,12 @@ mod tests {
         ));
         for (source, needle) in [
             ("scalar S: bytes(2);", "bytes(N)"),
-            ("scalar S: prefix(crate::P);", "prefix(path)"),
-            ("scalar S: bytes(current_pos..buf_end);", "byte ranges"),
+            ("scalar S: variable(crate::P);", "variable(path)"),
+            ("scalar S: remaining_bytes;", "byte ranges"),
             ("scalar S: crate::Other;", "custom path"),
             ("scalar S: Unknown;", "supported builtin"),
             (
-                "layout Header { field value: U8; } scalar Header: U8;",
+                "layout Header { value: U8; } scalar Header: U8;",
                 "top-level name collision",
             ),
             (
@@ -2586,7 +2571,7 @@ mod tests {
 
     #[test]
     fn absolute_keeps_declaration_order_and_sorts_offsets() {
-        let value = model("pub absolute layout Header { field tail: BeU16 { offset: 4; } field kind: U8 { offset: 0; } } layout Tail { field end: U8 { position: 1; } }").unwrap();
+        let value = model("pub absolute layout Header { tail @ 4: BeU16; kind @ 0: U8; } layout Tail { end @ 1: U8; }").unwrap();
         let Item::Layout(Layout::Absolute(header)) = &value.items[0] else {
             panic!("expected absolute")
         };
@@ -2600,28 +2585,19 @@ mod tests {
     }
     #[test]
     fn absolute_offsets_allow_gaps_and_reject_duplicates() {
-        assert!(
-            model("absolute layout H { field a: U8 { offset: 0; } field b: U8 { offset: 4; } }")
-                .is_ok()
-        );
+        assert!(model("absolute layout H { a @ 0: U8; b @ 4: U8; }").is_ok());
         error(
-            "absolute layout H { field a: U8 { offset: 0; } field b: U8 { offset: 0; } }",
+            "absolute layout H { a @ 0: U8; b @ 0: U8; }",
             "duplicate field offset",
         );
-        error(
-            "absolute layout H { field a: U8 { offset: 1u8; } }",
-            "unsuffixed",
-        );
-        error(
-            "absolute layout H { field a: U8 { offset: 0x1; } }",
-            "base-10",
-        );
+        error("absolute layout H { a @ 1u8: U8; }", "unsuffixed");
+        error("absolute layout H { a @ 0x1: U8; }", "base-10");
     }
 
     #[test]
     fn retains_sequential_declaration_order_docs_and_custom_paths() {
         let value = model(
-            "/// header\npub layout Header { #[doc = \"second\"] field second: codec(crate::Code) { position: 2; } field first: U8 { position: 1; } } layout Tail { field end: LeU16 { position: 1; } }",
+            "/// header\npub layout Header { #[doc = \"second\"] second @ 2: crate::Code; first @ 1: U8; } layout Tail { end @ 1: LeU16; }",
         )
         .unwrap();
 
@@ -2674,7 +2650,7 @@ mod tests {
     #[test]
     fn normalizes_byte_widths_for_sequential_and_absolute_rendering() {
         let value = model(
-            "layout Sequential { field bytes: bytes(16) { position: 1; } } absolute layout Absolute { field bytes: bytes(8) { offset: 0; } }",
+            "layout Sequential { bytes @ 1: bytes(16); } absolute layout Absolute { bytes @ 0: bytes(8); }",
         ).unwrap();
         let Item::Layout(Layout::Sequential(sequential)) = &value.items[0] else {
             panic!("expected sequential")
@@ -2694,7 +2670,7 @@ mod tests {
 
     #[test]
     fn raw_field_identifiers_keep_getter_spelling_and_normalize_generated_names() {
-        let value = model("layout Header { field r#type: U8 { position: 1; } }").unwrap();
+        let value = model("layout Header { r#type @ 1: U8; }").unwrap();
         let Item::Layout(Layout::Sequential(header)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
@@ -2702,46 +2678,31 @@ mod tests {
         assert_eq!(field.name.to_string(), "r#type");
         assert_eq!(field.error_variant.to_string(), "FieldType");
 
-        assert!(model("layout Header { field r#parse_prefix: U8 { position: 1; } }").is_ok());
-        assert!(model("layout Header { field parse_exact: U8 { position: 1; } }").is_ok());
-        error(
-            "layout Header { field view: U8 { position: 1; } }",
-            "reserved generated",
-        );
+        assert!(model("layout Header { r#parse_prefix @ 1: U8; }").is_ok());
+        assert!(model("layout Header { parse_exact @ 1: U8; }").is_ok());
+        error("layout Header { view @ 1: U8; }", "reserved generated");
     }
 
     #[test]
     fn fixed_sequential_names_normalize_and_reject_builder_and_setter_collisions() {
+        error("layout H { as_view @ 1: U8; }", "reserved generated");
+        error("layout H { new @ 1: U8; }", "generated builder");
+        error("layout H { build_into @ 1: U8; }", "generated builder");
         error(
-            "layout H { field as_view: U8 { position: 1; } }",
-            "reserved generated",
-        );
-        error(
-            "layout H { field new: U8 { position: 1; } }",
-            "generated builder",
-        );
-        error(
-            "layout H { field build_into: U8 { position: 1; } }",
-            "generated builder",
-        );
-        error(
-            "layout H { field set_value: U8 { position: 1; } field value: U8 { position: 2; } }",
+            "layout H { set_value @ 1: U8; value @ 2: U8; }",
             "generated field setter conflicts",
         );
         error(
-            "layout H { field value: U8 { position: 1; projections { bit set_value: 0; } } }",
+            "layout H { value @ 1: U8 {  projections { bit set_value: 0; } }; }",
             "generated field setter conflicts",
         );
+        error("layout H { r#as_view @ 1: U8; }", "reserved generated");
         error(
-            "layout H { field r#as_view: U8 { position: 1; } }",
-            "reserved generated",
-        );
-        error(
-            "layout Header { field value: U8 { position: 1; } } layout HeaderMutation { field value: U8 { position: 1; } }",
+            "layout Header { value @ 1: U8; } layout HeaderMutation { value @ 1: U8; }",
             "generated layout name collision",
         );
         error(
-            "layout Header { field value: U8 { position: 1; } } layout HeaderViewRequest { field value: U8 { position: 1; } }",
+            "layout Header { value @ 1: U8; } layout HeaderViewRequest { value @ 1: U8; }",
             "generated layout name collision",
         );
     }
@@ -2756,7 +2717,7 @@ mod tests {
         let fields: String = names
             .iter()
             .enumerate()
-            .map(|(index, name)| format!("field f{index}: {name} {{ position: {}; }}", index + 1))
+            .map(|(index, name)| format!("f{index} @ {}: {name};", index + 1))
             .collect();
         let value = model(&format!("layout L {{ {fields} }}")).unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
@@ -2774,47 +2735,32 @@ mod tests {
         for (source, needle) in [
             ("", "at least one declaration"),
             ("layout L {}", "at least one field"),
-            ("layout L { field a: U8 { position: 0; } }", "one-based"),
+            ("layout L { a @ 0: U8; }", "one-based"),
             (
-                "layout L { field a: U8 { position: 1; } field b: U8 { position: 1; } }",
+                "layout L { a @ 1: U8; b @ 1: U8; }",
                 "duplicate field position",
             ),
+            ("layout L { a @ 2: U8; }", "missing position 1"),
+            ("layout L { a @ 1u8: U8; }", "unsuffixed"),
+            ("layout L { a @ 0x1: U8; }", "base-10"),
             (
-                "layout L { field a: U8 { position: 2; } }",
-                "missing position 1",
-            ),
-            ("layout L { field a: U8 { position: 1u8; } }", "unsuffixed"),
-            ("layout L { field a: U8 { position: 0x1; } }", "base-10"),
-            (
-                "layout L { field a: U8 { position: 999999999999999999999999999999999999999; } }",
+                "layout L { a @ 999999999999999999999999999999999999999: U8; }",
                 "does not fit",
             ),
             (
-                "layout L { field a: U8 { position: 1; } field a: U8 { position: 2; } }",
+                "layout L { a @ 1: U8; a @ 2: U8; }",
                 "duplicate field identifier",
             ),
             (
-                "layout L { field foo_bar: U8 { position: 1; } field foo__bar: U8 { position: 2; } }",
+                "layout L { foo_bar @ 1: U8; foo__bar @ 2: U8; }",
                 "generated field error variant collision",
             ),
+            ("layout L { as_bytes @ 1: U8; }", "reserved generated"),
+            ("layout L { WIDTH @ 1: U8; }", "reserved generated"),
+            ("layout L { a @ 1: Nope; }", "unknown bare codec"),
+            ("layout r#type { a @ 1: U8; }", "raw layout"),
             (
-                "layout L { field as_bytes: U8 { position: 1; } }",
-                "reserved generated",
-            ),
-            (
-                "layout L { field WIDTH: U8 { position: 1; } }",
-                "reserved generated",
-            ),
-            (
-                "layout L { field a: Nope { position: 1; } }",
-                "unknown bare codec",
-            ),
-            (
-                "layout r#type { field a: U8 { position: 1; } }",
-                "raw layout",
-            ),
-            (
-                "layout L { field a: U8 { position: 1; } } layout L { field b: U8 { position: 1; } }",
+                "layout L { a @ 1: U8; } layout L { b @ 1: U8; }",
                 "duplicate layout stem",
             ),
         ] {
@@ -2824,7 +2770,7 @@ mod tests {
 
     #[test]
     fn validates_unsigned_projection_storage_ranges_and_namespace() {
-        let value = model("layout H { field top_flags: BeU24 { position: 1; projections { bit top: 23; } } field all_flags: BeU24 { position: 2; projections { bits all: 0..=23; } } }").unwrap();
+        let value = model("layout H { top_flags @ 1: BeU24 {  projections { bit top: 23; } }; all_flags @ 2: BeU24 {  projections { bits all: 0..=23; } }; }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential")
         };
@@ -2838,46 +2784,45 @@ mod tests {
         );
         assert_eq!(layout.data.fields[1].projections[0].end, 23);
         error(
-            "layout H { field flags: I8 { position: 1; projections { bit x: 0; } } }",
+            "layout H { flags @ 1: I8 {  projections { bit x: 0; } }; }",
             "unsigned builtin",
         );
         error(
-            "layout H { field flags: codec(crate::C) { position: 1; projections { bit x: 0; } } }",
+            "layout H { flags @ 1: crate::C {  projections { bit x: 0; } }; }",
             "unsigned builtin",
         );
         error(
-            "layout H { field bytes: bytes(16) { position: 1; projections { bit x: 0; } } }",
+            "layout H { bytes @ 1: bytes(16) {  projections { bit x: 0; } }; }",
             "unsigned builtin",
         );
         error(
-            "layout H { field flags: U8 { position: 1; projections { bit x: 8; } } }",
+            "layout H { flags @ 1: U8 {  projections { bit x: 8; } }; }",
             "outside",
         );
         error(
-            "layout H { field flags: U8 { position: 1; projections { bits x: 4..=3; } } }",
+            "layout H { flags @ 1: U8 {  projections { bits x: 4..=3; } }; }",
             "start must not exceed",
         );
         error(
-            "layout H { field flags: U8 { position: 1; projections { bits x: 1..=3; bit y: 3; } } }",
+            "layout H { flags @ 1: U8 {  projections { bits x: 1..=3; bit y: 3; } }; }",
             "must not overlap",
         );
         assert!(
-            model(
-                "layout H { field flags: U8 { position: 1; projections { bit parse_exact: 0; } } }"
-            )
-            .is_ok()
+            model("layout H { flags @ 1: U8 {  projections { bit parse_exact: 0; } }; }").is_ok()
         );
-        assert!(model("layout H { field flags: U8 { position: 1; projections { bit r#parse_exact: 0; } } }").is_ok());
+        assert!(
+            model("layout H { flags @ 1: U8 {  projections { bit r#parse_exact: 0; } }; }").is_ok()
+        );
         error(
-            "layout H { field flags: U8 { position: 1; projections { bit x: 0; bit x: 1; } } }",
+            "layout H { flags @ 1: U8 {  projections { bit x: 0; bit x: 1; } }; }",
             "conflicts",
         );
         error(
-            "layout H { field first: U8 { position: 1; projections { bit x: 0; } } field second: U8 { position: 2; projections { bit x: 1; } } }",
+            "layout H { first @ 1: U8 {  projections { bit x: 0; } }; second @ 2: U8 {  projections { bit x: 1; } }; }",
             "conflicts",
         );
         error(
-            "layout H { field flags: U8 { position: 1; projections { bit r#type: 0; } } field r#type: U8 { position: 2; } }",
+            "layout H { flags @ 1: U8 {  projections { bit r#type: 0; } }; r#type @ 2: U8; }",
             "conflicts",
         );
     }
@@ -2886,15 +2831,15 @@ mod tests {
     fn validates_fixed_absolute_write_namespace() {
         for (source, needle) in [
             (
-                "absolute layout H { field parse_prefix_mut: U8 { offset: 0; } }",
+                "absolute layout H { parse_prefix_mut @ 0: U8; }",
                 "reserved generated member",
             ),
             (
-                "absolute layout H { field r#new: U8 { offset: 0; } }",
+                "absolute layout H { r#new @ 0: U8; }",
                 "generated builder member",
             ),
             (
-                "absolute layout H { field x: U8 { offset: 0; } field set_x: U8 { offset: 1; } }",
+                "absolute layout H { x @ 0: U8; set_x @ 1: U8; }",
                 "generated field setter conflicts",
             ),
         ] {
@@ -2938,7 +2883,7 @@ mod tests {
     #[test]
     fn normalizes_prefix_layout_boundaries_and_rejects_illegal_owners() {
         let value = model(
-            "layout H { field tail: U8 { position: 2; } field r#type: prefix(crate::P) { position: 1; } } layout F { field value: U8 { position: 1; } }",
+            "layout H { tail @ 2: U8; r#type @ 1: variable(crate::P); } layout F { value @ 1: U8; }",
         )
         .unwrap();
         let Item::Layout(Layout::Sequential(dynamic)) = &value.items[0] else {
@@ -2956,31 +2901,26 @@ mod tests {
 
         for (source, needle) in [
             (
-                "absolute layout H { field value: prefix(crate::P) { offset: 0; } }",
+                "absolute layout H { value @ 0: variable(crate::P); }",
                 "unsupported in absolute",
             ),
             (
-                "layout H { field value: prefix(crate::P) { position: 1; projections { bit x: 0; } } }",
+                "layout H { value @ 1: variable(crate::P) {  projections { bit x: 0; } }; }",
                 "cannot own bit projections",
             ),
             (
-                "layout H { field r#type: prefix(crate::P) { position: 1; } field type_raw: U8 { position: 2; } }",
+                "layout H { r#type @ 1: variable(crate::P); type_raw @ 2: U8; }",
                 "generated getter",
             ),
-            (
-                "layout H { field value: prefix(U8) { position: 1; } }",
-                "fixed builtins",
-            ),
+            ("layout H { value @ 1: variable(U8); }", "fixed builtins"),
         ] {
             error(source, needle);
         }
     }
     #[test]
     fn normalizes_padding_alignment_and_shared_physical_positions() {
-        let value = model(
-            "layout H { align { position: 3; boundary: 1; } field tail: U8 { position: 4; } padding { position: 2; length: 3; } field head: U8 { position: 1; } }",
-        )
-        .unwrap();
+        let value = model("layout H { align(1) @ 3; tail @ 4: U8; padding(3) @ 2; head @ 1: U8; }")
+            .unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
@@ -3011,35 +2951,35 @@ mod tests {
 
         for (source, needle) in [
             (
-                "layout H { field a: U8 { position: 1; } padding { position: 2; length: 0; } }",
+                "layout H { a @ 1: U8; padding(0) @ 2; }",
                 "padding length must be nonzero",
             ),
             (
-                "layout H { field a: U8 { position: 1; } align { position: 2; boundary: 0; } }",
+                "layout H { a @ 1: U8; align(0) @ 2; }",
                 "alignment boundary must be nonzero",
             ),
             (
-                "layout H { field a: U8 { position: 1; } padding { position: 1; length: 2; } }",
+                "layout H { a @ 1: U8; padding(2) @ 1; }",
                 "duplicate physical position",
             ),
             (
-                "layout H { field a: U8 { position: 1; } align { position: 3; boundary: 4; } }",
+                "layout H { a @ 1: U8; align(4) @ 3; }",
                 "missing position 2",
             ),
             (
-                "layout H { field a: U8 { position: 1; } padding { position: 0; length: 2; } }",
+                "layout H { a @ 1: U8; padding(2) @ 0; }",
                 "position must be one-based",
             ),
             (
-                "absolute layout H { field a: U8 { offset: 0; } padding { position: 1; length: 2; } }",
+                "absolute layout H { a @ 0: U8; padding(2) @ 1; }",
                 "padding is unsupported in absolute layouts",
             ),
             (
-                "absolute layout H { field a: U8 { offset: 0; } align { position: 1; boundary: 4; } }",
+                "absolute layout H { a @ 0: U8; align(4) @ 1; }",
                 "alignment is unsupported in absolute layouts",
             ),
             (
-                "layout H { padding { position: 1; length: 2; } }",
+                "layout H { padding(2) @ 1; }",
                 "layout must contain at least one field",
             ),
         ] {
@@ -3048,10 +2988,7 @@ mod tests {
     }
     #[test]
     fn normalizes_implicit_sequential_entries_in_source_order() {
-        let value = model(
-            "layout H { field head: U8; padding { length: 3; } align { boundary: 8; } field tail: U8; }",
-        )
-        .unwrap();
+        let value = model("layout H { head: U8; padding(3); align(8); tail: U8; }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
@@ -3087,8 +3024,8 @@ mod tests {
     #[test]
     fn rejects_mixed_sequential_placement_including_spacing() {
         for source in [
-            "layout H { field head: U8 { position: 1; } padding { length: 3; } }",
-            "layout H { field head: U8; align { position: 2; boundary: 8; } }",
+            "layout H { head @ 1: U8; padding(3); }",
+            "layout H { head: U8; align(8) @ 2; }",
         ] {
             error(
                 source,
@@ -3099,7 +3036,7 @@ mod tests {
 
     #[test]
     fn normalizes_byte_ranges_and_validates_sources() {
-        let value = model("layout H { field payload: bytes(current_pos..current_pos + length) { position: 2; } field length: U8 as crate::Length { position: 1; } field end: BeI16 { position: 3; } field absolute: bytes(current_pos..end) { position: 4; } }").unwrap();
+        let value = model("layout H { payload @ 2: bytes(length); length @ 1: U8 as crate::Length; end @ 3: BeI16; absolute @ 4: bytes_to(end); }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
@@ -3120,86 +3057,80 @@ mod tests {
 
         for (source, needle) in [
             (
-                "layout H { field length: prefix(crate::P) { position: 1; } field payload: bytes(current_pos..current_pos + length) { position: 2; } }",
+                "layout H { length @ 1: variable(crate::P); payload @ 2: bytes(length); }",
                 "direct builtin",
             ),
             (
-                "layout H { field length: bytes(2) { position: 1; } field payload: bytes(current_pos..current_pos + length) { position: 2; } }",
+                "layout H { length @ 1: bytes(2); payload @ 2: bytes(length); }",
                 "direct builtin",
             ),
             (
-                "layout H { field payload: bytes(current_pos..current_pos + length) { position: 1; } field length: U8 { position: 2; } }",
+                "layout H { payload @ 1: bytes(length); length @ 2: U8; }",
                 "must physically precede",
             ),
             (
-                "layout H { field payload: bytes(buf_start..buf_end); }",
-                "start must be `current_pos`",
+                "layout H { first @ 1: remaining_bytes; tail @ 2: U8; }",
+                "`remaining_bytes` must be physically terminal",
             ),
             (
-                "layout H { field first: bytes(current_pos..buf_end) { position: 1; } field tail: U8 { position: 2; } }",
-                "`bytes(current_pos..buf_end)` must be physically terminal",
-            ),
-            (
-                "layout H { field length: U8 { position: 1; } field relative: bytes(current_pos..current_pos + length) { position: 2; } field absolute: bytes(current_pos..length) { position: 3; } }",
+                "layout H { length @ 1: U8; relative @ 2: bytes(length); absolute @ 3: bytes_to(length); }",
                 "cannot mix relative and absolute",
             ),
         ] {
             error(source, needle);
         }
 
-        model("layout H { field length: U8 { position: 1; } field first: bytes(current_pos..current_pos + length) { position: 2; } field second: bytes(current_pos..current_pos + length) { position: 3; } }").unwrap();
+        model("layout H { length @ 1: U8; first @ 2: bytes(length); second @ 3: bytes(length); }")
+            .unwrap();
         error(
-            "layout H { field body_existing: U8 { position: 1; } field body: bytes(current_pos..buf_end) { position: 2; } }",
+            "layout H { body_existing @ 1: U8; body @ 2: remaining_bytes; }",
             "generated builder existing range method collision",
         );
         error(
-            "scalar HBuilderRangeInput: U8; layout H { field body: bytes(current_pos..buf_end); }",
+            "scalar HBuilderRangeInput: U8; layout H { body: remaining_bytes; }",
             "generated layout name collision",
         );
+        error("layout H { payload: remainder; }", "unknown bare codec");
         error(
-            "layout H { field payload: remainder; }",
-            "unknown bare codec",
-        );
-        error(
-            "layout H { field payload: region(length); field length: U8; }",
+            "layout H { payload: region(length); length: U8; }",
             "expected curly braces",
         );
     }
 
     #[test]
     fn normalizes_explicit_derived_fields_and_rejects_bad_dependencies() {
-        let value = model("layout H { field later: U8 { position: 4; derive: crate::later(value(total)); derive_error: crate::E; } field count: U8 { position: 1; } field bytes: bytes(current_pos..current_pos + count) { position: 2; } field total: U8 { position: 3; derive: crate::total(len(bytes)); derive_error: crate::E; } }").unwrap();
+        let value = model("layout H { later @ 4: U8 {  derive: crate::later(value(total)); derive_error: crate::E; }; count @ 1: U8; bytes @ 2: bytes(count); total @ 3: U8 {  derive: crate::total(len(bytes)); derive_error: crate::E; }; }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential");
         };
         assert_eq!(layout.derived_order, vec![3, 0]);
         for (source, needle) in [
             (
-                "layout H { field total: U8 { position: 1; derive: crate::f(value(missing)); derive_error: crate::E; } }",
+                "layout H { total @ 1: U8 {  derive: crate::f(value(missing)); derive_error: crate::E; }; }",
                 "unknown derived-field dependency",
             ),
             (
-                "layout H { field total: U8 { position: 1; derive: crate::f(value(total)); derive_error: crate::E; } }",
+                "layout H { total @ 1: U8 {  derive: crate::f(value(total)); derive_error: crate::E; }; }",
                 "cannot depend on itself",
             ),
             (
-                "layout H { field n: U8 { position: 1; } field body: bytes(current_pos..current_pos + n) { position: 2; } field total: U8 { position: 3; derive: crate::f(value(body)); derive_error: crate::E; } }",
+                "layout H { n @ 1: U8; body @ 2: bytes(n); total @ 3: U8 {  derive: crate::f(value(body)); derive_error: crate::E; }; }",
                 "cannot reference a byte range",
             ),
             (
-                "layout H { field n: U8 { position: 1; } field total: U8 { position: 2; derive: crate::f(len(n)); derive_error: crate::E; } }",
+                "layout H { n @ 1: U8; total @ 2: U8 {  derive: crate::f(len(n)); derive_error: crate::E; }; }",
                 "requires a byte range",
             ),
             (
-                "layout H { field a: U8 { position: 1; derive: crate::a(value(b)); derive_error: crate::E; } field b: U8 { position: 2; derive: crate::b(value(a)); derive_error: crate::E; } }",
+                "layout H { a @ 1: U8 {  derive: crate::a(value(b)); derive_error: crate::E; }; b @ 2: U8 {  derive: crate::b(value(a)); derive_error: crate::E; }; }",
                 "cycle in derived field dependencies",
             ),
             (
-                "layout H { field total: U8 { position: 1; derive: crate::f(); } }",
+                "layout H { total @ 1: U8 {  derive: crate::f(); }; }",
                 "requires `derive_error`",
             ),
             (
-                "layout H { field total: U8 { position: 1; derive_error: crate::E; } }",
+                "layout H { total @ 1: U8 {  derive_error: crate::E; }; }",
                 "requires `derive`",
             ),
         ] {
@@ -3209,7 +3140,7 @@ mod tests {
 
     #[test]
     fn normalizes_semantic_finalizer_value_sources() {
-        let value = model("layout H { field target: U8 { position: 1; finalize: crate::finish(value(plain), value(mapped), value(derived), value(finalized)); } field plain: U8 { position: 2; } field mapped: U8 as crate::Mapped { position: 3; } field derived: U8 { position: 4; derive: crate::derive(value(plain)); derive_error: crate::E; } field finalized: U8 { position: 5; finalize: crate::finalize(bytes(finalized.start..finalized.end)); } }").unwrap();
+        let value = model("layout H { target @ 1: U8 {  finalize: crate::finish(value(plain), value(mapped), value(derived), value(finalized)); }; plain @ 2: U8; mapped @ 3: U8 as crate::Mapped; derived @ 4: U8 {  derive: crate::derive(value(plain)); derive_error: crate::E; }; finalized @ 5: U8 {  finalize: crate::finalize(bytes(finalized.start..finalized.end)); }; }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential");
         };
@@ -3239,7 +3170,7 @@ mod tests {
 
     #[test]
     fn normalizes_contexts_finalizers_and_operands() {
-        let value = model("layout H { /// borrowed input\n context seed: crate::Seed; field sum: BeU16 { position: 2; finalize: crate::finish(context(seed), value(check), bytes(buf_start..check.end)); } field check: U8 { position: 1; finalize: crate::check(bytes(check.start..check.end)); } }").unwrap();
+        let value = model("layout H { /// borrowed input\n context seed: crate::Seed; sum @ 2: BeU16 {  finalize: crate::finish(context(seed), value(check), bytes(buf_start..check.end)); }; check @ 1: U8 {  finalize: crate::check(bytes(check.start..check.end)); }; }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential");
         };
@@ -3271,71 +3202,71 @@ mod tests {
     fn validates_context_finalizer_and_target_rules() {
         for (source, needle) in [
             (
-                "layout H { context unused: crate::U; field sum: U8 { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "layout H { context unused: crate::U; sum: U8 { finalize: crate::f(bytes(buf_start..buf_end)); }; }",
                 "context must be referenced",
             ),
             (
-                "layout H { context x: crate::X; context x: crate::Y; field sum: U8 { finalize: crate::f(context(x)); } }",
+                "layout H { context x: crate::X; context x: crate::Y; sum: U8 { finalize: crate::f(context(x)); }; }",
                 "duplicate context",
             ),
             (
-                "layout H { context sum: crate::S; field plain: U8; field total: U8 { finalize: crate::f(context(sum)); } }",
+                "layout H { context sum: crate::S; plain: U8; total: U8 { finalize: crate::f(context(sum)); }; }",
                 "",
             ),
             (
-                "layout H { context plain: crate::S; field plain: U8; field total: U8 { finalize: crate::f(context(plain)); } }",
+                "layout H { context plain: crate::S; plain: U8; total: U8 { finalize: crate::f(context(plain)); }; }",
                 "context name conflicts",
             ),
             (
-                "layout H { context body_existing: crate::S; field body: bytes(current_pos..buf_end); field total: U8 { finalize: crate::f(context(body_existing)); } }",
+                "layout H { context body_existing: crate::S; body: remaining_bytes; total: U8 { finalize: crate::f(context(body_existing)); }; }",
                 "context name conflicts",
             ),
             (
-                "layout H { field sum: U8 { finalize: crate::f(context(missing)); } }",
+                "layout H { sum: U8 { finalize: crate::f(context(missing)); }; }",
                 "unknown finalizer context",
             ),
             (
-                "layout H { context x: crate::X; field sum: U8 { finalize: crate::f(value(x)); } }",
+                "layout H { context x: crate::X; sum: U8 { finalize: crate::f(value(x)); }; }",
                 "unknown finalizer value field",
             ),
             (
-                "layout H { field sum: U8 { finalize: crate::f(value(sum)); } }",
+                "layout H { sum: U8 { finalize: crate::f(value(sum)); }; }",
                 "cannot consume its own value",
             ),
             (
-                "absolute layout H { context x: crate::X; field sum: U8 { offset: 0; finalize: crate::f(context(x)); } }",
+                "absolute layout H { context x: crate::X; sum @ 0: U8 {  finalize: crate::f(context(x)); }; }",
                 "only in sequential",
             ),
             (
-                "layout H { field sum: BeU24 { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "layout H { sum: BeU24 { finalize: crate::f(bytes(buf_start..buf_end)); }; }",
                 "U24 requires range validation",
             ),
             (
-                "layout H { field sum: LeU24 { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "layout H { sum: LeU24 { finalize: crate::f(bytes(buf_start..buf_end)); }; }",
                 "U24 requires range validation",
             ),
             (
-                "layout H { field sum: crate::C { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "layout H { sum: crate::C { finalize: crate::f(bytes(buf_start..buf_end)); }; }",
                 "unmapped direct builtin",
             ),
             (
-                "scalar N: U8; layout H { field sum: N { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "scalar N: U8; layout H { sum: N { finalize: crate::f(bytes(buf_start..buf_end)); }; }",
                 "unmapped direct builtin",
             ),
             (
-                "layout H { field sum: bytes(1) { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "layout H { sum: bytes(1) { finalize: crate::f(bytes(buf_start..buf_end)); }; }",
                 "unmapped direct builtin",
             ),
             (
-                "layout H { field sum: prefix(crate::P) { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "layout H { sum: variable(crate::P) { finalize: crate::f(bytes(buf_start..buf_end)); }; }",
                 "unmapped direct builtin",
             ),
             (
-                "layout H { field sum: U8 as crate::S { finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "layout H { sum: U8 as crate::S { finalize: crate::f(bytes(buf_start..buf_end)); }; }",
                 "unmapped direct builtin",
             ),
             (
-                "layout H { field sum: U8 { projections { bit x: 0; } finalize: crate::f(bytes(buf_start..buf_end)); } }",
+                "layout H { sum: U8 { projections { bit x: 0; } finalize: crate::f(bytes(buf_start..buf_end)); }; }",
                 "unmapped direct builtin",
             ),
         ] {
@@ -3346,22 +3277,22 @@ mod tests {
             }
         }
         error(
-            "layout H { field length: U8 { finalize: crate::f(bytes(buf_start..buf_end)); } field body: bytes(current_pos..current_pos + length); }",
+            "layout H { length: U8 { finalize: crate::f(bytes(buf_start..buf_end)); }; body: bytes(length); }",
             "unmapped direct builtin",
         );
         error(
-            "layout H { field length: U8; field body: bytes(current_pos..current_pos + length); field sum: U8 { finalize: crate::f(value(body)); } }",
+            "layout H { length: U8; body: bytes(length); sum: U8 { finalize: crate::f(value(body)); }; }",
             "cannot reference a byte range field",
         );
         error(
-            "layout H { field length: U8; field body: bytes(current_pos..current_pos + length); field sum: U8 { finalize: crate::f(value(length)); } }",
+            "layout H { length: U8; body: bytes(length); sum: U8 { finalize: crate::f(value(length)); }; }",
             "cannot reference an automatic byte range source",
         );
     }
 
     #[test]
     fn orders_finalizers_only_by_explicit_value_dependencies() {
-        let value = model("layout H { field b: U8 { position: 1; finalize: crate::b(value(a)); } field a: U8 { position: 2; finalize: crate::a(bytes(a.start..a.end)); } field c: U8 { position: 3; finalize: crate::c(bytes(a.start..a.end)); } field d: U8 { position: 4; finalize: crate::d(bytes(d.start..d.end)); } }").unwrap();
+        let value = model("layout H { b @ 1: U8 {  finalize: crate::b(value(a)); }; a @ 2: U8 {  finalize: crate::a(bytes(a.start..a.end)); }; c @ 3: U8 {  finalize: crate::c(bytes(a.start..a.end)); }; d @ 4: U8 {  finalize: crate::d(bytes(d.start..d.end)); }; }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential");
         };
@@ -3369,25 +3300,25 @@ mod tests {
         // own bytes, does not infer dependencies.
         assert_eq!(layout.finalizer_order, vec![1, 0, 2, 3]);
 
-        let value = model("layout H { field a: U8 { finalize: crate::a(bytes(b.start..b.end)); } field b: U8 { finalize: crate::b(bytes(a.start..a.end)); } }").unwrap();
+        let value = model("layout H { a: U8 { finalize: crate::a(bytes(b.start..b.end)); }; b: U8 { finalize: crate::b(bytes(a.start..a.end)); }; }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential");
         };
         assert_eq!(layout.finalizer_order, vec![0, 1]);
 
-        let value = model("layout H { field first: U8 { finalize: crate::first(value(plain), value(derived)); } field plain: U8; field derived: U8 { derive: crate::derive(value(plain)); derive_error: crate::E; } field second: U8 { finalize: crate::second(bytes(second.start..second.end)); } }").unwrap();
+        let value = model("layout H { first: U8 { finalize: crate::first(value(plain), value(derived)); }; plain: U8; derived: U8 { derive: crate::derive(value(plain)); derive_error: crate::E; }; second: U8 { finalize: crate::second(bytes(second.start..second.end)); }; }").unwrap();
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential");
         };
         assert_eq!(layout.finalizer_order, vec![0, 3]);
 
         error(
-            "layout H { field a: U8 { finalize: crate::a(value(b)); } field b: U8 { finalize: crate::b(value(a)); } }",
+            "layout H { a: U8 { finalize: crate::a(value(b)); }; b: U8 { finalize: crate::b(value(a)); }; }",
             "cycle in finalizer dependencies",
         );
 
         error(
-            "layout H { field a: U8 { finalize: crate::a(bytes(a.end..a.start)); } }",
+            "layout H { a: U8 { finalize: crate::a(bytes(a.end..a.start)); }; }",
             "start must not be after end",
         );
     }

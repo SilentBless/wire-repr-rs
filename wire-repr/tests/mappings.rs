@@ -107,47 +107,47 @@ impl From<Code> for u8 {
 
 wire_repr! {
     pub layout Sequential {
-        field kind: BeU16 as crate::Kind;
-        field address: bytes(4) as crate::Address;
-        field flags: U8 as crate::Flags {
+        kind: BeU16 as crate::Kind;
+        address: bytes(4) as crate::Address;
+        flags: U8 as crate::Flags {
             projections {
                 bit enabled: 0;
                 bits mode: 1..=3;
             }
-        }
-        field value: BeU24 as crate::Value;
+        };
+        value: BeU24 as crate::Value;
     }
 
     pub absolute layout Absolute {
-        field kind: BeU16 as crate::Kind { offset: 5; }
-        field address: bytes(4) as crate::Address { offset: 0; }
-        field code: U8 as crate::Code { offset: 4; }
+        kind @ 5: BeU16 as crate::Kind;
+        address @ 0: bytes(4) as crate::Address;
+        code @ 4: U8 as crate::Code;
     }
 
     pub layout Dynamic {
-        field length: U8 as crate::Length;
-        field payload: bytes(current_pos..current_pos + length);
-        field code: U8 as crate::Code;
+        length: U8 as crate::Length;
+        payload: bytes(length);
+        code: U8 as crate::Code;
     }
 
     pub layout AbsoluteEndpoint {
-        field tag: U8 { position: 1; }
-        field end: BeU16 as crate::Endpoint { position: 2; }
-        padding { position: 3; length: 1; }
-        align { position: 4; boundary: 4; }
-        field payload: bytes(current_pos..end) { position: 5; }
-        field tail: U8 { position: 6; }
+        tag @ 1: U8;
+        end @ 2: BeU16 as crate::Endpoint;
+        padding(1) @ 3;
+        align(4) @ 4;
+        payload @ 5: bytes_to(end);
+        tail @ 6: U8;
     }
 
     pub layout EndpointCases {
-        field tag: U8 { position: 1; }
-        field end: U8 { position: 2; }
-        field payload: bytes(current_pos..end) { position: 3; }
+        tag @ 1: U8;
+        end @ 2: U8;
+        payload @ 3: bytes_to(end);
     }
 
     pub layout SignedEndpoint {
-        field end: BeI16 { position: 1; }
-        field payload: bytes(current_pos..end) { position: 2; }
+        end @ 1: BeI16;
+        payload @ 2: bytes_to(end);
     }
 }
 

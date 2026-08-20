@@ -444,323 +444,323 @@ wire_repr! {
     /// A mixed dynamic layout for builder coverage.
     pub layout Stem {
         /// A trailing fixed word.
-        field tail: BeU16 { position: 7; }
+        tail @ 7: BeU16;
         /// The auto-derived range length.
-        field length: U8 { position: 1; }
+        length @ 1: U8;
         /// An ordinary fixed prefix field.
-        field tag: U8 { position: 2; }
+        tag @ 2: U8;
         /// A planned variable-width prefix.
-        field prefix: prefix(TwoBytePrefix) { position: 3; }
+        prefix @ 3: variable(TwoBytePrefix);
         /// Opaque range bytes.
-        field body: bytes(current_pos..current_pos + length) { position: 4; }
-        padding { position: 5; length: 1; }
-        align { position: 6; boundary: 4; }
+        body @ 4: bytes(length);
+        padding(1) @ 5;
+        align(4) @ 6;
     }
 
     /// A layout with a fixed length source.
     pub layout EmptyRange {
         /// The auto-derived fixed length.
-        field length: U8 { position: 1; }
+        length @ 1: U8;
         /// The possibly empty range.
-        field body: bytes(current_pos..current_pos + length) { position: 2; }
+        body @ 2: bytes(length);
     }
 
     /// Two ranges sharing one source.
     pub layout SharedRanges {
         /// The auto-derived shared length.
-        field length: U8 { position: 1; }
+        length @ 1: U8;
         /// The first range.
-        field first: bytes(current_pos..current_pos + length) { position: 2; }
+        first @ 2: bytes(length);
         /// The second range.
-        field second: bytes(current_pos..current_pos + length) { position: 3; }
+        second @ 3: bytes(length);
     }
 
     /// Shared-source conflicts follow range declaration order.
     pub layout SharedConflictOrder {
         /// The source whose conflict is declared later.
-        field source_a: U8 { position: 1; }
+        source_a @ 1: U8;
         /// The source whose conflict is declared first.
-        field source_b: U8 { position: 2; }
+        source_b @ 2: U8;
         /// The first range for the second source.
-        field b_first: bytes(current_pos..current_pos + source_b) { position: 3; }
+        b_first @ 3: bytes(source_b);
         /// The first range for the first source.
-        field a_first: bytes(current_pos..current_pos + source_a) { position: 4; }
+        a_first @ 4: bytes(source_a);
         /// The first conflicting range in declaration order.
-        field b_second: bytes(current_pos..current_pos + source_b) { position: 5; }
+        b_second @ 5: bytes(source_b);
         /// A later conflicting range.
-        field a_second: bytes(current_pos..current_pos + source_a) { position: 6; }
+        a_second @ 6: bytes(source_a);
     }
 
     /// Inputs declared separately from their physical order.
     pub layout MissingOrder {
         /// Declared first but physical third.
-        field later: codec(MissingCount) { position: 3; }
+        later @ 3: crate::MissingCount;
         /// The auto-derived length.
-        field length: U8 { position: 1; }
+        length @ 1: U8;
         /// Declared before the final ordinary codec.
-        field body: bytes(current_pos..current_pos + length) { position: 2; }
+        body @ 2: bytes(length);
         /// Declared last and physical fourth.
-        field final_field: codec(MissingCount) { position: 4; }
+        final_field @ 4: crate::MissingCount;
     }
 
     /// An invalid-width field physically before all user inputs.
     pub layout ZeroWidthBeforeInputs {
         /// The invalid codec.
-        field zero: codec(ZeroWidth) { position: 1; }
+        zero @ 1: crate::ZeroWidth;
         /// A later required field.
-        field required: U8 { position: 2; }
+        required @ 2: U8;
         /// Keeps this scenario on the dynamic builder path.
-        field dynamic: prefix(TwoBytePrefix) { position: 3; }
+        dynamic @ 3: variable(TwoBytePrefix);
     }
 
     /// A range whose source cannot represent all lengths.
     pub layout ReverseFailure {
         /// The auto-derived narrow length.
-        field length: U8 { position: 1; }
+        length @ 1: U8;
         /// The large range.
-        field body: bytes(current_pos..current_pos + length) { position: 2; }
+        body @ 2: bytes(length);
     }
 
     /// A planning-error layout.
     pub layout OrdinaryPlanningFailure {
         /// A rejecting field.
-        field value: codec(Failing) { position: 1; }
+        value @ 1: crate::Failing;
         /// Keeps this scenario on the dynamic builder path.
-        field dynamic: prefix(TwoBytePrefix) { position: 2; }
+        dynamic @ 2: variable(TwoBytePrefix);
     }
 
 
     /// A fixed plan-length error layout.
     pub layout WrongFixedPlanning {
         /// A contract-invalid fixed plan.
-        field value: codec(WrongFixedPlan) { position: 1; }
+        value @ 1: crate::WrongFixedPlan;
         /// Keeps this scenario on the dynamic builder path.
-        field dynamic: prefix(TwoBytePrefix) { position: 2; }
+        dynamic @ 2: variable(TwoBytePrefix);
     }
 
     /// A prefix plan-length error layout.
     pub layout EmptyPrefixPlanning {
         /// A contract-invalid empty prefix plan.
-        field value: prefix(EmptyPrefixPlan) { position: 1; }
+        value @ 1: variable(EmptyPrefixPlan);
     }
 
     /// A layout containing an explicitly law-violating error fixture.
     pub layout OverflowAfterPrefix {
         /// The error-fixture prefix.
-        field prefix: prefix(OverflowingPrefixPlan) { position: 1; }
+        prefix @ 1: variable(OverflowingPrefixPlan);
         /// The physical advance after it.
-        field tail: U8 { position: 2; }
+        tail @ 2: U8;
     }
 
     /// A capacity preflight layout.
     pub layout CapacityCheck {
         /// First planned field.
-        field first: codec(CapacityFirst) { position: 1; }
+        first @ 1: crate::CapacityFirst;
         /// Second planned field.
-        field second: codec(CapacitySecond) { position: 2; }
+        second @ 2: crate::CapacitySecond;
         /// Keeps this scenario on the dynamic builder path.
-        field dynamic: prefix(TwoBytePrefix) { position: 3; }
+        dynamic @ 3: variable(TwoBytePrefix);
     }
 
     /// A layout whose declaration and commit orders differ.
     pub layout CommitOrder {
         /// Planned first, physically second.
-        field first: codec(First) { position: 2; }
+        first @ 2: crate::First;
         /// Planned second, physically first.
-        field second: codec(Second) { position: 1; }
+        second @ 1: crate::Second;
         /// Keeps this scenario on the dynamic builder path.
-        field dynamic: prefix(TwoBytePrefix) { position: 3; }
+        dynamic @ 3: variable(TwoBytePrefix);
     }
 
     /// A builder with only a range input.
     pub layout RangeOnly {
         /// The auto-derived length.
-        field length: U8 { position: 1; }
+        length @ 1: U8;
         /// The sole user input.
-        field body: bytes(current_pos..current_pos + length) { position: 2; }
+        body @ 2: bytes(length);
     }
 
 
     /// Relative range assembly with caller-retained bytes.
     pub layout ExistingRelative {
-        field length: U8 { position: 1; }
-        field body: bytes(current_pos..current_pos + length) { position: 2; }
-        field tail: U8 { position: 3; }
+        length @ 1: U8;
+        body @ 2: bytes(length);
+        tail @ 3: U8;
     }
 
     /// Absolute range assembly with caller-retained bytes.
     pub layout ExistingAbsolute {
-        field end: U8 { position: 1; }
-        field body: bytes(current_pos..end) { position: 2; }
+        end @ 1: U8;
+        body @ 2: bytes_to(end);
     }
 
     /// Absolute intermediate range assembly with caller-retained bytes.
     pub layout ExistingAbsoluteIntermediate {
-        field end: U8 { position: 1; }
-        field body: bytes(current_pos..end) { position: 2; }
-        padding { position: 3; length: 1; }
-        field tail: U8 { position: 4; }
+        end @ 1: U8;
+        body @ 2: bytes_to(end);
+        padding(1) @ 3;
+        tail @ 4: U8;
     }
 
     /// Explicit pre-write derivations consume borrowed and existing range lengths.
     pub layout DerivedAssembly {
-        field tag: U8 { position: 1; }
-        field options_length: U8 { position: 2; }
-        field options: bytes(current_pos..current_pos + options_length) { position: 3; }
-        field payload_length: U8 { position: 4; }
-        field payload: bytes(current_pos..current_pos + payload_length) { position: 5; }
-        field total: U8 {
-            position: 6;
+        tag @ 1: U8;
+        options_length @ 2: U8;
+        options @ 3: bytes(options_length);
+        payload_length @ 4: U8;
+        payload @ 5: bytes(payload_length);
+        total @ 6: U8 {
+
             derive: crate::derive_total(value(options_length), len(payload));
             derive_error: crate::DeriveFailure;
-        }
-        field chain: U8 {
-            position: 7;
+        };
+        chain @ 7: U8 {
+
             derive: crate::derive_chain(value(total), value(tag));
             derive_error: crate::DeriveFailure;
-        }
+        };
     }
 
     /// Terminal range assembly with caller-retained bytes.
     pub layout ExistingTerminal {
-        field header: U8 { position: 1; }
-        field body: bytes(current_pos..buf_end) { position: 2; }
+        header @ 1: U8;
+        body @ 2: remaining_bytes;
     }
 
 
     /// Explicit mapped derivations preserve semantic values through chains.
     pub layout MappedDerivedAssembly {
-        field tag: U8 { position: 1; }
-        field mapped_derived: U8 as crate::MappedDerived {
-            position: 2;
+        tag @ 1: U8;
+        mapped_derived @ 2: U8 as crate::MappedDerived {
+
             derive: crate::derive_mapped(value(tag));
             derive_error: crate::MappedDeriveFailure;
-        }
-        field chained: U8 {
-            position: 3;
+        };
+        chained @ 3: U8 {
+
             derive: crate::derive_from_mapped(value(mapped_derived));
             derive_error: crate::MappedDeriveFailure;
-        }
+        };
     }
 
     /// A derived error need not implement Debug for the generated Display path.
     pub layout NonDebugDerived {
-        field tag: U8 { position: 1; }
-        field derived: U8 {
-            position: 2;
+        tag @ 1: U8;
+        derived @ 2: U8 {
+
             derive: crate::reject_non_debug_derive(value(tag));
             derive_error: crate::NonDebugDeriveFailure;
-        }
+        };
     }
 
     /// A successful derivation can still fail fixed-codec planning atomically.
     pub layout DerivedWrongFixedPlan {
-        field tag: U8 { position: 1; }
-        field derived: codec(WrongFixedPlan) {
-            position: 2;
+        tag @ 1: U8;
+        derived @ 2: crate::WrongFixedPlan {
+
             derive: crate::derive_wrong_fixed_plan(value(tag));
             derive_error: core::convert::Infallible;
-        }
+        };
     }
 
     /// A fixed-only dynamic builder whose derived field needs no input.
     pub layout FixedOnlyDerived {
-        field tag: U8 { position: 1; }
-        field derived: U8 {
-            position: 2;
+        tag @ 1: U8;
+        derived @ 2: U8 {
+
             derive: crate::derive_fixed_only(value(tag));
             derive_error: core::convert::Infallible;
-        }
+        };
     }
 
     /// A borrowed unsized context drives a final checksum after ordinary writes.
     pub layout ContextFinalization {
         context seed: [u8];
-        field tag: U8 { position: 1; }
-        field checksum: BeU16 {
-            position: 2;
+        tag @ 1: U8;
+        checksum @ 2: BeU16 {
+
             finalize: crate::finalize_context_checksum(bytes(checksum.start..checksum.end), context(seed));
-        }
+        };
     }
 
     /// Independent finalizers preserve declaration order even when spans overlap.
     pub layout StableFinalizerOrder {
-        field first: U8 {
-            position: 1;
+        first @ 1: U8 {
+
             finalize: crate::finalize_first_patch(bytes(buf_start..buf_end));
-        }
-        field second: U8 {
-            position: 2;
+        };
+        second @ 2: U8 {
+
             finalize: crate::finalize_second_patch(bytes(buf_start..buf_end));
-        }
+        };
     }
 
     /// Finalizers consume ordinary, mapped, and pre-write-derived semantic values.
     pub layout SemanticValueFinalization {
-        field ordinary: U8 { position: 1; }
-        field mapped: U8 as crate::MappedDerived { position: 2; }
-        field derived: U8 {
-            position: 3;
+        ordinary @ 1: U8;
+        mapped @ 2: U8 as crate::MappedDerived;
+        derived @ 3: U8 {
+
             derive: crate::derive_fixed_only(value(ordinary));
             derive_error: core::convert::Infallible;
-        }
-        field checksum: BeU16 {
-            position: 4;
+        };
+        checksum @ 4: BeU16 {
+
             finalize: crate::finalize_value_sources(value(ordinary), value(mapped), value(derived));
-        }
+        };
     }
 
     /// An explicit finalizer value dependency may point forward in declarations.
     pub layout ForwardFinalizerValue {
-        field earlier: I8 {
-            position: 1;
+        earlier @ 1: I8 {
+
             finalize: crate::finalize_earlier_value(value(later));
-        }
-        field later: I8 {
-            position: 2;
+        };
+        later @ 2: I8 {
+
             finalize: crate::finalize_later_value(bytes(buf_start..buf_start));
-        }
+        };
     }
 
     /// `buf_end` stops at the represented layout, not the caller's whole output.
     pub layout RepresentedFinalizerExtent {
-        field header: U8 { position: 1; }
-        field length: U8 {
-            position: 2;
+        header @ 1: U8;
+        length @ 2: U8 {
+
             finalize: crate::finalize_represented_length(bytes(buf_start..buf_end));
-        }
+        };
     }
 
     /// Existing destination bytes remain available to post-write finalizers.
     pub layout ExistingFinalizerSpan {
-        field length: U8 { position: 1; }
-        field body: bytes(current_pos..current_pos + length) { position: 2; }
-        field checksum: U8 {
-            position: 3;
+        length @ 1: U8;
+        body @ 2: bytes(length);
+        checksum @ 3: U8 {
+
             finalize: crate::finalize_existing_sum(bytes(body.start..checksum.end));
-        }
+        };
     }
 
     /// One finalizer target covers each direct builtin patch encoding.
     pub layout FinalizerBuiltinEncodings {
-        field u8: U8 { position: 1; finalize: crate::finalize_u8(bytes(buf_start..buf_start)); }
-        field i8: I8 { position: 2; finalize: crate::finalize_i8(bytes(buf_start..buf_start)); }
-        field be_u16: BeU16 { position: 3; finalize: crate::finalize_be_u16(bytes(buf_start..buf_start)); }
-        field le_u16: LeU16 { position: 4; finalize: crate::finalize_le_u16(bytes(buf_start..buf_start)); }
-        field be_i16: BeI16 { position: 5; finalize: crate::finalize_be_i16(bytes(buf_start..buf_start)); }
-        field le_i16: LeI16 { position: 6; finalize: crate::finalize_le_i16(bytes(buf_start..buf_start)); }
-        field be_u32: BeU32 { position: 7; finalize: crate::finalize_be_u32(bytes(buf_start..buf_start)); }
-        field le_u32: LeU32 { position: 8; finalize: crate::finalize_le_u32(bytes(buf_start..buf_start)); }
-        field be_i32: BeI32 { position: 9; finalize: crate::finalize_be_i32(bytes(buf_start..buf_start)); }
-        field le_i32: LeI32 { position: 10; finalize: crate::finalize_le_i32(bytes(buf_start..buf_start)); }
-        field be_u64: BeU64 { position: 11; finalize: crate::finalize_be_u64(bytes(buf_start..buf_start)); }
-        field le_u64: LeU64 { position: 12; finalize: crate::finalize_le_u64(bytes(buf_start..buf_start)); }
-        field be_i64: BeI64 { position: 13; finalize: crate::finalize_be_i64(bytes(buf_start..buf_start)); }
-        field le_i64: LeI64 { position: 14; finalize: crate::finalize_le_i64(bytes(buf_start..buf_start)); }
-        field be_u128: BeU128 { position: 15; finalize: crate::finalize_be_u128(bytes(buf_start..buf_start)); }
-        field le_u128: LeU128 { position: 16; finalize: crate::finalize_le_u128(bytes(buf_start..buf_start)); }
-        field be_i128: BeI128 { position: 17; finalize: crate::finalize_be_i128(bytes(buf_start..buf_start)); }
-        field le_i128: LeI128 { position: 18; finalize: crate::finalize_le_i128(bytes(buf_start..buf_start)); }
+        u8 @ 1: U8 {  finalize: crate::finalize_u8(bytes(buf_start..buf_start)); };
+        i8 @ 2: I8 {  finalize: crate::finalize_i8(bytes(buf_start..buf_start)); };
+        be_u16 @ 3: BeU16 {  finalize: crate::finalize_be_u16(bytes(buf_start..buf_start)); };
+        le_u16 @ 4: LeU16 {  finalize: crate::finalize_le_u16(bytes(buf_start..buf_start)); };
+        be_i16 @ 5: BeI16 {  finalize: crate::finalize_be_i16(bytes(buf_start..buf_start)); };
+        le_i16 @ 6: LeI16 {  finalize: crate::finalize_le_i16(bytes(buf_start..buf_start)); };
+        be_u32 @ 7: BeU32 {  finalize: crate::finalize_be_u32(bytes(buf_start..buf_start)); };
+        le_u32 @ 8: LeU32 {  finalize: crate::finalize_le_u32(bytes(buf_start..buf_start)); };
+        be_i32 @ 9: BeI32 {  finalize: crate::finalize_be_i32(bytes(buf_start..buf_start)); };
+        le_i32 @ 10: LeI32 {  finalize: crate::finalize_le_i32(bytes(buf_start..buf_start)); };
+        be_u64 @ 11: BeU64 {  finalize: crate::finalize_be_u64(bytes(buf_start..buf_start)); };
+        le_u64 @ 12: LeU64 {  finalize: crate::finalize_le_u64(bytes(buf_start..buf_start)); };
+        be_i64 @ 13: BeI64 {  finalize: crate::finalize_be_i64(bytes(buf_start..buf_start)); };
+        le_i64 @ 14: LeI64 {  finalize: crate::finalize_le_i64(bytes(buf_start..buf_start)); };
+        be_u128 @ 15: BeU128 {  finalize: crate::finalize_be_u128(bytes(buf_start..buf_start)); };
+        le_u128 @ 16: LeU128 {  finalize: crate::finalize_le_u128(bytes(buf_start..buf_start)); };
+        be_i128 @ 17: BeI128 {  finalize: crate::finalize_be_i128(bytes(buf_start..buf_start)); };
+        le_i128 @ 18: LeI128 {  finalize: crate::finalize_le_i128(bytes(buf_start..buf_start)); };
     }
 
 }

@@ -322,53 +322,53 @@ impl FixedCodec for ZeroWidth {
 
 wire_repr! {
     pub layout Mixed {
-        field tail: BeU16 { position: 3; }
-        field value: prefix(MixedPrefix) { position: 2; }
-        field tag: U8 { position: 1; }
+        tail @ 3: BeU16;
+        value @ 2: variable(MixedPrefix);
+        tag @ 1: U8;
     }
 
     pub layout Borrowed {
-        field tail: U8 { position: 2; }
-        field body: prefix(Terminated) { position: 1; }
+        tail @ 2: U8;
+        body @ 1: variable(Terminated);
     }
 
     pub layout Multiple {
-        field second: prefix(TinyPrefix) { position: 3; }
-        field middle: U8 { position: 2; }
-        field first: prefix(TinyPrefix) { position: 1; }
+        second @ 3: variable(TinyPrefix);
+        middle @ 2: U8;
+        first @ 1: variable(TinyPrefix);
     }
 
     pub layout Adjacent {
-        field second: prefix(TinyPrefix) { position: 2; }
-        field first: prefix(TinyPrefix) { position: 1; }
+        second @ 2: variable(TinyPrefix);
+        first @ 1: variable(TinyPrefix);
     }
 
     pub layout Failed {
-        field value: prefix(RejectPrefix) { position: 1; }
+        value @ 1: variable(RejectPrefix);
     }
 
     pub layout Overclaimed {
-        field value: prefix(Overclaim) { position: 1; }
+        value @ 1: variable(Overclaim);
     }
 
     pub layout ShortAfterPrefix {
-        field value: prefix(TinyPrefix) { position: 1; }
-        field tail: BeU16 { position: 2; }
+        value @ 1: variable(TinyPrefix);
+        tail @ 2: BeU16;
     }
 
     pub layout PhysicalOrderDynamic {
-        field value: prefix(PhysicalOrderPrefix) { position: 2; }
-        field head: BeU16 { position: 1; }
+        value @ 2: variable(PhysicalOrderPrefix);
+        head @ 1: BeU16;
     }
 
     pub layout BorrowedFixedAfterPrefix {
-        field value: prefix(TinyPrefix) { position: 1; }
-        field bytes: codec(BorrowingFixed) { position: 2; }
+        value @ 1: variable(TinyPrefix);
+        bytes @ 2: crate::BorrowingFixed;
     }
 
     pub layout InvalidFixedWidth {
-        field invalid: codec(ZeroWidth) { position: 1; }
-        field value: prefix(MustNotValidatePrefix) { position: 2; }
+        invalid @ 1: crate::ZeroWidth;
+        value @ 2: variable(MustNotValidatePrefix);
     }
 }
 

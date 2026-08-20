@@ -46,13 +46,13 @@ wire_repr! {
     /// One dynamically sized PNG chunk.
     pub layout PngChunk {
         /// The encoded byte count of `data`.
-        field data_length: BeU32 { position: 1; }
+        data_length @ 1: BeU32;
         /// The opaque four-byte PNG chunk type.
-        field chunk_type: bytes(4) { position: 2; }
+        chunk_type @ 2: bytes(4);
         /// The opaque chunk payload.
-        field data: bytes(current_pos..current_pos + data_length) { position: 3; }
+        data @ 3: bytes(data_length);
         /// The stored CRC-32/ISO-HDLC value.
-        field crc: BeU32 { position: 4; }
+        crc @ 4: BeU32;
     }
 }
 
