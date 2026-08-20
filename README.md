@@ -13,14 +13,35 @@ packets, file headers, storage pages, firmware records, and IPC messages. A comp
 layout declaration becomes direct, specialized Rust for reading existing bytes,
 editing fixed-width fields, and writing new representations.
 
-The layout owns physical facts such as widths, offsets, framing, and byte ranges.
-Your application still owns protocol meaning such as magic values, reserved bits,
-checksums, and cross-field policy.
+The layout owns physical facts — widths, offsets, framing, and byte ranges. Consumer
+code owns protocol meaning: magic values, reserved bits, checksums, and cross-field
+policy.
 
 > [!IMPORTANT]
 > Generated views borrow ordinary byte slices. They do not reinterpret bytes as Rust
 > structs, depend on alignment or ABI layout, allocate, use `unsafe`, or carry a
 > runtime descriptor.
+
+## 🗺️ Capability map
+
+- **Three layout families:** fixed sequential, dynamic sequential, and fixed absolute
+  layouts; physical ordering can differ from declaration order.
+- **Framing and geometry:** exact or prefix parsing, `bytes(source)`,
+  `bytes_to(source)`, `remaining_bytes`, and retained validated endpoints.
+- **Typed bytes:** built-in codecs, direct `FixedCodec` paths, nominal scalar codecs,
+  total `as` mappings, and unsigned LSB0 projections.
+- **Variable encodings:** `variable(PrefixCodec)` preserves accepted raw prefix bytes
+  while exposing a decoded value.
+- **Safe change paths:** immutable views, framing-safe mutable views, and builders
+  with all-or-nothing output commits.
+- **Computed writers:** derived fields, borrowed builder context, and infallible
+  post-write finalizers over exact represented spans and values.
+- **Extension points:** `FixedCodec`, `PrefixCodec`, and `EncodePlan`, with malformed
+  layout declarations rejected at compile time.
+
+Complete executable format fixtures: [PNG chunks](wire-repr/tests/consumer_formats/png.rs),
+[SQLite headers](wire-repr/tests/consumer_formats/sqlite.rs), and
+[Wasm ULEB128](wire-repr/tests/consumer_formats/wasm.rs).
 
 ## 📦 Installation
 
@@ -99,28 +120,221 @@ assert_eq!(remainder, &[0xaa, 0xbb]);
 `without_trailing` validates the same representation but rejects any suffix.
 `as_bytes` always returns exactly the represented bytes, never the remainder.
 
-## ✍️ Edit existing bytes
+## 📐 Layouts, ordering, and physical holes
 
-Mutable views are separate because they borrow the input exclusively. They may change
-same-width fields but cannot resize or invalidate the representation.
+A fixed sequential layout reads entries in physical order. `padding(N)` and `align(N)`
+are represented opaque spans, not fields with invented values:
 
 ```rust
-let mut bytes = GENESIS_HEADER;
-let mut header = BitcoinBlockHeaderViewMut::parse_exact_mut(&mut bytes)
-    .expect("valid block header");
-
-header.set_nonce(0).expect("nonce has a fixed encoding");
-assert_eq!(header.nonce(), 0);
+wire_repr! {
+    pub layout Record {
+        tag: U8;
+        padding(3);
+        align(8);
+        value: BeU16;
+    }
+}
 ```
 
-Dynamic range sources, self-delimiting fields, and variable byte ranges do not receive
-setters that could change framing. A mutable range accessor exposes only its already
-validated span.
+One-based placements let declaration/API order differ from wire order; parsing and
+writing still follow physical order:
 
-## 🏗️ Write a new representation
+```rust
+wire_repr! {
+    pub layout Reordered {
+        checksum @ 2: BeU16;
+        tag      @ 1: U8;
+    }
+}
+```
 
-Builders use caller-owned output. They finish all fallible planning, derivation,
-geometry, arithmetic, and capacity checks before changing the first byte.
+An absolute layout instead uses zero-based byte offsets. It is fixed width; its gaps
+are represented and builders preserve them. The
+[SQLite 100-byte header fixture](wire-repr/tests/consumer_formats/sqlite.rs) is the
+complete real-format example, including offsets, a preserved 20-byte reserved span,
+mutable field writes, exact framing, and consumer-owned SQLite validation.
+
+```rust
+wire_repr! {
+    pub absolute layout DatabasePageHeader {
+        magic   @ 0: bytes(16);
+        version @ 16: BeU32;
+        page_id @ 24: BeU64;
+    }
+}
+```
+
+Absolute layouts do not accept padding, alignment, self-delimiting fields, or dynamic
+ranges. Sequential layouts come in fixed and dynamic forms.
+
+## 📏 Dynamic geometry and framing
+
+The PNG chunk is the ordinary relative case: its `data_length` physically precedes
+`data`, and structural parsing validates and retains the resulting endpoint.
+
+```rust
+wire_repr! {
+    pub layout PngChunk {
+        data_length @ 1: BeU32;
+        chunk_type  @ 2: bytes(4);
+        data        @ 3: bytes(data_length);
+        crc         @ 4: BeU32;
+    }
+}
+```
+
+[`png.rs`](wire-repr/tests/consumer_formats/png.rs) parses IHDR/IEND, retains exact
+ranges, and derives `data_length` from the builder's `data` input. Bounded range
+mutation is exercised directly in
+[`dynamic_sequential_writes.rs`](wire-repr/tests/dynamic_sequential_writes.rs). PNG CRC
+checking remains consumer validation, not structural parsing.
+
+The other range forms are equally literal:
+
+```rust
+wire_repr! {
+    pub layout IndexedRecord {
+        end: BeU16;
+        body: bytes_to(end); // exclusive endpoint from representation byte zero
+    }
+
+    pub layout TerminalRecord {
+        header: U8;
+        body: remaining_bytes; // physically last; consumes this supplied view buffer
+    }
+}
+```
+
+`bytes(source)` takes that many bytes from the current position; `bytes_to(source)`
+uses an exclusive endpoint from representation byte zero; `remaining_bytes` has no
+external framing magic and cannot discover a packet boundary for you. Eligible sources
+are physically preceding fixed integers (including a total-mapped integer). Dynamic
+ranges may be empty. The view retains validated endpoints so getters do not re-scan or
+reframe the bytes.
+
+## 🧩 Typed fields without losing raw bytes
+
+Use a direct `FixedCodec` path when a field already has one, and a top-level scalar
+when a protocol needs a nominal fixed-width type. Total `as` mappings expose semantic
+and raw getters. Unsigned projections use decoded-integer LSB0 numbering regardless of
+wire byte order:
+
+```rust
+wire_repr! {
+    pub scalar ProtocolVersion: LeI32;
+
+    pub layout BitcoinVersionServices {
+        version: ProtocolVersion;
+        services: LeU64 as crate::Services {
+            projections {
+                bit network: 0;
+                bit witness: 3;
+            }
+        };
+    }
+}
+```
+
+That declaration yields the declared semantic getters plus `services_raw()`; it does
+not invent domain validation. See executable
+[scalar/direct-codec coverage](wire-repr/tests/scalars.rs),
+[mapping coverage](wire-repr/tests/mappings.rs), and
+[projection coverage](wire-repr/tests/bit_projections.rs).
+
+## 🔖 Self-delimiting prefixes are fields, not range sources
+
+`variable(path)` uses a `PrefixCodec` to discover one structural field. A Wasm `u32`
+ULEB128 is a natural example:
+
+```rust
+wire_repr! {
+    pub layout WasmImmediate {
+        opcode: U8;
+        index: variable(crate::U32Leb128);
+    }
+}
+```
+
+The generated `index()` decodes the value and `index_raw()` returns the exact accepted
+wire bytes. Legal noncanonical input remains preserved by `_raw()` — for example, ULEB128
+`[0x85, 0x00]` still means `5` — while a builder plan may write the codec's canonical
+encoding. The complete codec is in [the Wasm fixture](wire-repr/tests/consumer_formats/wasm.rs);
+[prefix layout tests](wire-repr/tests/prefix_sequential.rs) exercise raw spans,
+multiple prefixes, errors, and borrowed decoded values.
+
+Bitcoin CompactSize is another honest prefix-codec use for one count/value. It is **not**
+a dynamic-range source, and a repeated transaction sequence remains consumer-owned:
+keep the cursor, bound each item, and parse it separately. Tagged unions, arbitrary
+conditional/version-selected fields, repeated sequences, and nested schemas are not
+layout features in 0.5.
+
+Versioned formats use the same ownership boundary: parse a stable prefix containing the
+version, then let consumer code select a separate nominal `V1Body` or `V2Body` layout for
+the bounded remainder. The macro does not hide that dispatch inside a generated union or
+silently merge version-specific policy into structural parsing.
+
+## ✍️ Mutable views and builders
+
+Mutable views borrow exclusively and can change only same-width fixed fields. They do
+not offer setters for range sources, dynamic ranges, `remaining_bytes`, or
+self-delimiting prefixes — changing those could reframe later bytes. A dynamic range has
+a bounded mutable-slice accessor over its validated span.
+
+```rust
+let mut chunk_bytes = [
+    0, 0, 0, 2, b't', b'E', b'S', b'T', b'a', b'b', 0, 0, 0, 0,
+];
+let mut chunk = PngChunkViewMut::parse_exact_mut(&mut chunk_bytes)
+    .expect("structurally valid PNG chunk");
+chunk.data_mut().copy_from_slice(b"XY");
+assert_eq!(chunk.data(), b"XY");
+```
+
+Builders use caller-owned output. They derive range sources implicitly, plan custom
+codecs, perform fallible derivations and all geometry/capacity checks, then commit.
+Every builder error leaves the **entire supplied output slice** unchanged; successful
+writes preserve suffixes, padding, alignment spans, absolute gaps, and existing ranges
+unless an explicit field covers them.
+
+The following compact fixture syntax shows explicit fallible derivation, borrowed
+builder-only context, and an infallible finalization policy:
+
+```rust
+wire_repr! {
+    pub layout DerivedAssembly {
+        tag: U8;
+        options_length: U8;
+        options: bytes(options_length);
+        payload_length: U8;
+        payload: bytes(payload_length);
+        total: U8 {
+            derive: crate::derive_total(value(options_length), len(payload));
+            derive_error: crate::DeriveFailure;
+        };
+    }
+
+    pub layout ContextFinalization {
+        context seed: [u8];
+        tag: U8;
+        checksum: BeU16 {
+            finalize: crate::finalize_context_checksum(
+                bytes(checksum.start..checksum.end),
+                context(seed),
+            );
+        };
+    }
+}
+```
+
+A finalizer runs after the ordinary commit inputs and is an infallible, consumer-supplied
+policy. This fixture reads the zeroed target span; a real Bitcoin checksum would pass the
+payload span and use consumer-supplied crypto. The structural parser does not validate
+it. Finalizers can consume byte spans, semantic values, and borrowed context, and their
+dependencies are resolved before calls. Complete derivation,
+existing-range, finalizer, ordering, and atomicity cases are in
+[`dynamic_sequential_builders.rs`](wire-repr/tests/dynamic_sequential_builders.rs).
+
+A fixed Bitcoin header builder stays pleasantly boring:
 
 ```rust
 let zero_hash = [0u8; 32];
@@ -141,154 +355,34 @@ assert_eq!(header.nonce(), 7);
 assert!(remainder.is_empty());
 ```
 
-If a builder returns an error, the complete supplied output slice remains unchanged.
-On success, the builder writes only bytes owned by the representation. Any suffix,
-absolute-layout gap, padding, or alignment span keeps its previous contents unless a
-field explicitly covers it.
+## 🔧 Custom codecs and diagnostics
 
-## 📏 Length-delimited payloads
+Implement `FixedCodec` for a compile-time-width field, or `PrefixCodec` for a
+self-delimiting field. Both produce an `EncodePlan`: planning may fail, while
+`write_into` is the infallible commit step. The compiler also rejects invalid physical
+placements, unsupported layout/form combinations, unsuitable dynamic sources, invalid
+projection declarations, and incompatible derive/finalize contracts at compile time.
 
-Bitcoin P2P messages combine a fixed envelope with a payload whose length is stored in
-the header. The readable DSL describes the relationship directly:
+Read the [codec contracts](wire-repr/src/codec/mod.md) and the complete
+[`wire_repr!` reference](wire-repr-macros/src/wire_repr.md) for grammar and diagnostic
+surface. The linked executable fixtures above are the runnable behavior, not decorative
+pseudocode.
 
-```rust
-wire_repr! {
-    pub layout BitcoinMessage {
-        magic: LeU32;
-        command: bytes(12);
-        payload_length: LeU32;
-        checksum: bytes(4);
-        payload: bytes(payload_length);
-    }
-}
-```
+## 🧬 Generated API and cost model
 
-`payload_length` is physical geometry. Parsing reads it and validates the payload end.
-Building derives it from the supplied payload, so callers cannot provide a conflicting
-length.
-
-```rust
-let command = *b"block\0\0\0\0\0\0\0";
-let checksum = [0x11, 0x22, 0x33, 0x44];
-let payload = [1, 2, 3, 4];
-let mut output = [0u8; 28];
-
-let message = BitcoinMessageBuilder::new()
-    .magic(0xd9b4_bef9)
-    .command(&command)
-    .checksum(&checksum)
-    .payload(&payload)
-    .build_into(&mut output)
-    .expect("complete Bitcoin message")
-    .0;
-
-assert_eq!(message.payload_length(), 4);
-assert_eq!(message.payload(), &payload);
-```
-
-Sequential layouts support three range forms:
-
-| DSL | Meaning |
-| --- | --- |
-| `bytes(length)` | `length` bytes from the current position |
-| `bytes_to(end)` | bytes up to an exclusive endpoint from representation byte zero |
-| `remaining_bytes` | the bounded input tail |
-
-A source must be an eligible physically preceding fixed integer, optionally exposed
-through a total mapping. Dynamic ranges may be empty. `remaining_bytes` must be
-physically last and consumes the complete supplied view buffer, so it cannot discover
-an external packet boundary for you.
-
-A full Bitcoin block contains a CompactSize transaction count followed by repeated,
-self-delimiting transactions. Repeated sequences are intentionally outside the current
-layout model; consumer code owns that cursor and parses each bounded item separately.
-The block header itself is a natural fixed layout, while the P2P envelope is a natural
-length-delimited layout.
-
-## 🧭 Layout vocabulary
-
-The common sequential form reads in physical order:
-
-```rust
-wire_repr! {
-    pub layout Record {
-        tag: U8;
-        padding(3);
-        align(8);
-        value: BeU16;
-    }
-}
-```
-
-Use `@ N` only when API declaration order must differ from sequential wire order:
-
-```rust
-wire_repr! {
-    pub layout Reordered {
-        checksum @ 2: BeU16;
-        tag      @ 1: U8;
-    }
-}
-```
-
-When explicit positions are used, every physical entry needs a unique contiguous
-one-based number. Declaration order controls getters, builder inputs, documentation,
-and declaration-oriented errors. Physical order controls parsing and writing.
-
-Absolute layouts use zero-based byte offsets and make gaps explicit:
-
-```rust
-wire_repr! {
-    pub absolute layout DatabasePageHeader {
-        magic   @ 0: bytes(16);
-        version @ 16: BeU32;
-        page_id @ 24: BeU64;
-    }
-}
-```
-
-Their represented width is the largest field extent. Gaps are represented bytes and
-builders preserve them. Absolute layouts are fixed-width only; they do not accept
-padding, alignment, self-delimiting fields, or dynamic ranges.
-
-Other field forms include:
-
-```rust
-fixed: crate::FixedCodec;
-variable: variable(crate::SelfDelimitedCodec);
-kind: BeU16 as crate::Kind;
-tail: remaining_bytes;
-```
-
-Unsigned built-in integer fields may expose immutable bit projections:
-
-```rust
-flags: U8 {
-    projections {
-        bit enabled: 0;
-        bits mode: 1..=3;
-    }
-};
-```
-
-Bit zero is the least-significant bit of the decoded integer regardless of wire
-endianness. Projections add direct shifts and masks; they own no bytes or runtime
-metadata.
-
-For the full grammar, mappings, builder contexts, derived fields, finalizers, and
-compile-time diagnostics, see the [`wire_repr!` reference](wire-repr-macros/src/wire_repr.md).
-
-## 🔬 What reaches the CPU
+For `pub layout Packet`, `wire_repr!` generates `Packet<'wire>` (immutable view),
+`PacketViewMut<'wire>` (restricted mutable view), `PacketBuilder<'value>`, and
+structural parse/mutation/write error types. The immutable owner is the layout stem;
+fixed layouts additionally expose `Packet::WIDTH`.
 
 Generated operations are direct safe Rust: bounded slice access, endian conversion,
 shifts, masks, and copies. There are no schema walks, erased codecs, allocation, or
-dynamic dispatch.
+dynamic dispatch. Release probes in [wire-repr/tests/codegen.rs](wire-repr/tests/codegen.rs)
+compare these paths with handwritten safe Rust.
 
-The release probes live in [`wire-repr/tests/codegen.rs`](wire-repr/tests/codegen.rs)
-beside equivalent handwritten Rust. These x86-64 snippets were captured with Rust
-1.91.0 (`f8297e351`), LLVM 21.1.2, `--release`, targeting
-`x86_64-unknown-linux-gnu`. Compiler-local labels were shortened; instructions were
-not changed.
+The following x86-64 snippets were captured with Rust 1.91.0 (`f8297e351`), LLVM
+21.1.2, `--release`, targeting `x86_64-unknown-linux-gnu`. Compiler-local labels were
+shortened; instructions were not changed.
 
 <details>
 <summary><strong>Fixed big-endian getter</strong></summary>
@@ -382,27 +476,17 @@ dispatch, and excess instruction shape.
 
 ## ✅ Contract and limits
 
-**Guaranteed**
+**Guaranteed:** safe Rust, `no_std`, no allocation, borrowed exact represented bytes,
+explicit exact/prefix framing, retained validated dynamic boundaries, framing-safe
+mutation, and builder preflight before commit.
 
-- Safe Rust, `no_std`, and no allocation.
-- Borrowed views over exact represented bytes.
-- Explicit complete-buffer or leading-representation framing.
-- Validated dynamic boundaries retained by the view.
-- Same-width mutation that cannot silently reframe bytes.
-- All fallible builder work completed before output mutation.
-- Direct generated code checked against handwritten release probes.
+**Intentionally outside the crate:** domain and protocol validation; repeated sequences;
+tagged unions and arbitrary conditional fields; nested runtime schemas or reflection;
+I/O, buffering, transport state, and allocation policy; cryptography and checksum
+policy.
 
-**Intentionally outside the crate**
-
-- Domain and protocol validation.
-- Repeated sequences and arbitrary conditional fields.
-- Nested runtime schemas or reflection.
-- I/O, buffering, transport state, and allocation policy.
-- Cryptography and application-owned checksum policy.
-
-The normative ownership and safety rules are in
-[`ARCHITECTURE.md`](ARCHITECTURE.md). The published API reference is available on
-[docs.rs](https://docs.rs/wire-repr).
+The normative ownership and safety rules are in [ARCHITECTURE.md](ARCHITECTURE.md).
+The published API reference is on [docs.rs](https://docs.rs/wire-repr).
 
 ## 📦 Workspace
 
