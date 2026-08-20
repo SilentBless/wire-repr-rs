@@ -1,45 +1,51 @@
-# Codec contracts and built-in codecs
+# Codec contracts and built-ins
 
-Codecs connect semantic Rust values to exact wire spans. Generated layouts use codecs for
-field-local decode and encoding planning; codecs do not own layout traversal, caller
-storage, or cross-field policy.
+A codec owns one field's exact wire representation. Layout generation owns physical
+order, represented extent, framing, bounded ranges, and caller storage; consumers
+own domain policy such as magic values, reserved ranges, checksums, and cross-field
+rules.
 
-## Choosing a contract
+## Choose a contract
 
-Use [`FixedCodec`] when every encoded value occupies one nonzero width. Decoding is total
-for every exact-width bit pattern. Domain rules such as magic values and reserved ranges
-belong to consumer code, not a mandatory fixed-codec validation hook.
+- Implement [`FixedCodec`] when every value has one compile-time, nonzero width.
+  Decode every exact-width bit pattern; do not make application semantics a required
+  structural-validation step.
+- Implement [`PrefixCodec`] when bounded structural validation must discover the
+  nonzero encoded width from available input. `validate_prefix` receives the remaining
+  bytes and decoding then receives exactly the accepted span.
+- Implement [`EncodePlan`] as the result of fallible `plan`. Its `encoded_len` and
+  `write_into` must describe the same representation, and writing into its exact-sized
+  destination must be infallible.
 
-Use [`PrefixCodec`] when structural validation must discover a nonzero encoded length from
-the available prefix. Validation returns [`PrefixExtent`]; decoding then receives exactly
-that accepted span. This preserves legal noncanonical input while allowing [`PrefixCodec::plan`]
-to produce a canonical representation.
+A prefix view retains the accepted extent. Its raw getter returns those original bytes,
+including a legal noncanonical encoding; it does not reconstruct them from the decoded
+value. A prefix plan may choose a canonical encoding for a value.
 
-Both traits return an [`EncodePlan`] from their fallible `plan` operation. A plan reports
-its exact output length and performs an infallible write into an exactly-sized slice.
-Generated mutation and builders validate every plan, extent, and destination capacity
-before committing any caller-buffer write.
+## Builder boundary
 
-## Built-in fixed codecs
+Generated setters and builders use plans to preserve atomic caller-buffer updates.
+Before a builder writes, it completes all fallible planning, plan-length checks,
+derivations, endpoint calculations, arithmetic, and capacity checks. A returned build
+error therefore leaves the complete supplied output slice unchanged.
 
-The module provides:
+Generated code defensively verifies claims that affect safe slicing and atomicity, but
+a custom codec that violates its trait laws is still broken. In particular:
 
-- [`U8`] and [`I8`];
-- big- and little-endian unsigned 16/24/32/64/128-bit integers;
-- big- and little-endian signed 16/32/64/128-bit integers;
-- [`Bytes<N>`](Bytes), an opaque borrowed exact-width span.
+- `FixedCodec::WIDTH` is nonzero, and every successful fixed plan is exactly that width.
+- `PrefixCodec::validate_prefix` returns a nonzero extent within its supplied input.
+- Every successful prefix plan is nonempty.
+- A successful plan encodes the semantic value it planned.
 
-Unsigned 24-bit codecs use `u32` semantic values and reject values above `0x00ff_ffff`
-while planning. `Bytes<N>` requires `N > 0` and checks a builder input's exact width before
-mutation.
+Keep framing between fields, range-source algebra, derived endpoints, and protocol
+validation outside a codec. A prefix codec discovers its own field width; it is not a
+source for a later dynamic byte range.
 
-## Implementor boundary
+## Built-ins
 
-Custom codec implementations are trusted to follow the laws documented on [`FixedCodec`],
-[`PrefixCodec`], and [`EncodePlan`]. Generated layouts defensively check structural claims
-that can affect safe slicing or atomic output, but they do not turn a law-violating codec
-into a valid one.
+This module provides [`U8`] and [`I8`], big- and little-endian unsigned
+16/24/32/64/128-bit codecs, big- and little-endian signed 16/32/64/128-bit codecs,
+and [`Bytes<N>`](Bytes) for an opaque exact-width borrowed span.
 
-A codec should own only one field's wire representation. Framing between fields, bounded byte
-ranges, derived endpoints, checksums, and domain relationships remain layout or consumer
-responsibilities.
+Unsigned 24-bit codecs use `u32` semantic values and reject values greater than
+`0x00ff_ffff` while planning. `Bytes<N>` requires `N > 0`; building checks that an
+input has exactly `N` bytes before mutation.

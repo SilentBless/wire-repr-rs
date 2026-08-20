@@ -1,45 +1,47 @@
-<h1 align="center">wire-repr</h1>
+# wire-repr
 
-<p align="center">
-  <strong>Zero-cost byte-backed representations for binary formats.</strong>
-</p>
+**Byte layouts with real boundaries, not a runtime schema engine.**
 
-`wire-repr` generates safe borrowed views, constrained mutable views, and atomic
-caller-buffer builders from compact layout declarations. It is designed for network
-protocols, file headers, storage pages, firmware formats, IPC, and other binary data
-where exact bytes and explicit ownership matter.
+`wire-repr` compiles a compact layout declaration into borrowed immutable views,
+restricted mutable views, and builders for binary formats. Use it when bytes are
+the source of truth—protocol headers, files, storage pages, firmware records, IPC—
+and you want the compiler to keep offsets, lengths, and output writes honest.
+
+The layout owns **physical representation**. Your application owns meaning: magic
+values, reserved-bit policy, checksums, protocol state, and cross-field rules.
 
 > [!IMPORTANT]
-> Generated views borrow ordinary byte slices. They do not reinterpret bytes as Rust
-> structs and do not depend on alignment, ABI layout, allocation, or `unsafe`.
+> Views borrow ordinary slices. They never reinterpret a byte buffer as a Rust
+> struct, require alignment, allocate, use `unsafe`, or carry a runtime schema.
 
----
+## ✨ Why this exists
 
-## ✨ What it does
+Handwritten parsing is easy until framing and mutation meet: an offset moves, a
+length is trusted too early, a write fails halfway through, or a prefix gets
+silently canonicalized. `wire-repr` makes those structural operations generated
+and explicit while leaving domain policy where it belongs: with the consumer.
 
-- **Zero-copy views.** Parse directly over caller-owned bytes and retain exact represented
-  spans, including legal noncanonical prefix encodings.
-- **Direct generated code.** Fixed getters compile to ordinary loads, endian conversions,
-  shifts, and masks—without runtime schemas, reflection, or field lookup.
-- **Atomic writes.** Builders plan the complete representation before touching caller
-  output; an error leaves the whole destination unchanged.
-- **Explicit framing.** `Layout::view(bytes).with_remainder()` returns one bounded
-  representation plus its suffix, while `.without_trailing()` rejects unrelated trailing bytes.
-- **Consumer-owned semantics.** The framework owns bounds and layout. Consumers keep
-  ownership of magic values, reserved-byte policy, checksums, and cross-field rules.
-- **Small runtime.** The public crate is `no_std`, `no_alloc`, dependency-free at target
-  runtime, and safe Rust only.
+- **Borrow directly.** Immutable views retain the exact accepted representation.
+- **Frame explicitly.** Choose one representation plus a suffix, or reject suffixes.
+- **Mutate narrowly.** Generated setters cannot resize or invalidate framing.
+- **Build atomically.** Any builder error leaves all caller output unchanged.
+- **Stay small.** The target library is `no_std`, `no_alloc`, safe Rust, and has no
+  target-runtime dependencies.
 
-## 🚀 Quick start
-
-Add the facade crate:
+## 📦 Installation
 
 ```toml
 [dependencies]
 wire-repr = { version = "0.4", default-features = false }
 ```
 
-Declare a sequential layout. Physical placement is inferred from declaration order:
+The package exports the `wire_repr!` macro and built-in codecs such as `U8`,
+`BeU16`, `LeU32`, and `bytes(N)`.
+
+## 🚀 Start here: one header, exact or framed
+
+A declaration generates the immutable `Header<'wire>` type itself. `Header::view`
+creates a lightweight request; the chosen terminal performs parsing and framing.
 
 ```rust
 use wire_repr::wire_repr;
@@ -58,37 +60,39 @@ wire_repr! {
 }
 
 let input = [7, 0x01, 0x00, 0b0000_1011, 0xff];
-let (view, suffix) = Header::view(&input).with_remainder().expect("valid header");
+let (header, remainder) = Header::view(&input)
+    .with_remainder()
+    .expect("valid header");
 
-assert_eq!(view.as_bytes(), &input[..4]);
-assert_eq!(suffix, &[0xff]);
-assert_eq!(view.kind(), 7);
-assert_eq!(view.length(), 256);
-assert!(view.enabled());
-assert_eq!(view.mode(), 5);
+assert_eq!(header.as_bytes(), &input[..4]);
+assert_eq!(remainder, &[0xff]);
+assert_eq!(header.kind(), 7);
+assert_eq!(header.length(), 256);
+assert!(header.enabled());
+assert_eq!(header.mode(), 5);
+```
 
-let mut output = [0u8; 4];
-let (built, suffix) = HeaderBuilder::new()
-    .kind(7)
-    .length(256)
-    .flags(0b0000_1011)
-    .build_into(&mut output)
-    .expect("complete builder");
+Use `.without_trailing()` when the whole input must be this representation:
 
-assert_eq!(built.as_bytes(), &input[..4]);
-assert!(suffix.is_empty());
+```rust
+let exact = [7, 0x01, 0x00, 0b0000_1011];
+let header = Header::view(&exact)
+    .without_trailing()
+    .expect("exact header");
+assert_eq!(header.as_bytes(), &exact);
 ```
 
 > [!NOTE]
-> `with_remainder` excludes the suffix from the generated view. Use `without_trailing` when
-> the entire input must be exactly one representation.
+> `with_remainder()` validates one bounded representation and returns the bytes
+> after it. The suffix is not part of `as_bytes()`. `without_trailing()` performs
+> the same structural validation and then rejects any suffix.
 
-## 🧭 Layout model
+## 🧭 Parsing layouts
 
-### Sequential layouts
+### Fixed sequential layouts
 
-Sequential layouts use source order by default. Fields, padding, and alignment occupy
-contiguous one-based physical positions:
+A normal layout is sequential. Fields, padding, and alignment entries occupy
+contiguous physical positions in declaration order:
 
 ```rust
 wire_repr::wire_repr! {
@@ -101,8 +105,9 @@ wire_repr::wire_repr! {
 }
 ```
 
-Use explicit `position` on **every** physical entry only when wire order must differ from
-API and documentation order:
+Use `position` only when physical wire order differs from API order. Then **every**
+physical entry needs a contiguous one-based position. Declaration order still owns
+getter, builder, and rustdoc order.
 
 ```rust
 wire_repr::wire_repr! {
@@ -113,67 +118,16 @@ wire_repr::wire_repr! {
 }
 ```
 
-Mixing explicit and implicit placement is rejected. Declaration order always controls
-the generated API and rustdoc order; explicit positions control only physical order.
+Padding and alignment are represented opaque bytes. They are not reserved-field
+semantics; use `bytes(N)` for named bytes your application wants to inspect.
 
-### Absolute layouts
+### Fixed values, bytes, and projections
 
-Absolute layouts use mandatory zero-based byte offsets:
+Built-in fixed codecs cover unsigned 8/16/24/32/64/128-bit and signed
+8/16/32/64/128-bit integers in their applicable byte orders. Fixed codecs decode
+every width-valid bit pattern. `bytes(N)` returns the original borrowed `&[u8]`.
 
-```rust
-wire_repr::wire_repr! {
-    pub absolute layout DatabaseHeader {
-        field magic: bytes(16) { offset: 0; }
-        field version: BeU32 { offset: 16; }
-    }
-}
-```
-
-Gaps remain represented bytes and are preserved verbatim. Overlapping codec extents are
-rejected before input access. Absolute layouts are fixed-width and deliberately do not
-infer offsets or support padding and alignment entries.
-
-## 🧩 Fields and framing
-
-### Fixed values and byte spans
-
-Built-in fixed codecs cover unsigned 8/16/24/32/64/128-bit integers and signed
-8/16/32/64/128-bit integers in the applicable byte orders. Fixed codecs decode every exact-width bit pattern; domain
-validation remains consumer-owned.
-
-Use `bytes(N)` when a field owns fixed-width bytes without interpreting them. Its getter
-returns the original borrowed `&[u8]`. Builders and setters check only the exact width
-before mutation.
-
-### Total semantic mappings
-
-An eligible built-in fixed integer or `bytes(N)` field can expose a nominal
-domain-facing type while retaining its physical wire codec:
-
-```rust
-wire_repr::wire_repr! {
-    pub layout Message {
-        field kind: BeU16 as crate::Kind;
-        field address: bytes(4) as crate::Address;
-    }
-}
-```
-
-`as TypePath` comes immediately after the codec, before placement or projections. It is
-not a codec declaration: `kind()` returns `Kind`, `kind_raw()` returns the codec's raw
-`u16`, and the corresponding setters and builder methods accept either form. This requires
-total `Kind: From<u16>` and `u16: From<Kind>` conversions; `bytes(4)` similarly maps
-between its semantic type and `[u8; 4]`. The raw mapping is exact (`U24` is `u32`), with no
-fallible conversion layer. Mapped byte values are owned arrays or wrappers; unmapped
-`bytes(N)` remains borrowed `&[u8]`.
-
-Declared `scalar Name: Codec;` has a different job: it creates a reusable nominal wrapper
-that owns a codec. `as Type` maps one eligible built-in physical field through `From`; it
-does not apply to declared scalar, custom/direct, prefix, or byte range fields.
-
-### Bit projections
-
-Unsigned built-in storage fields can expose named immutable projections:
+Unsigned built-in integer storage can expose bit projections:
 
 ```rust
 field flags: U8 {
@@ -184,39 +138,80 @@ field flags: U8 {
 }
 ```
 
-Bit zero is the decoded value's least-significant bit regardless of wire endianness.
-The storage field remains the only byte owner; projection getters are direct shift/mask
-operations with no runtime metadata or dispatch. On a mapped integer field, projections
-still read the physical decoded raw integer, not the semantic wrapper.
+Bit zero is the least-significant bit of the decoded integer regardless of wire
+endianness. A projection owns no bytes and has no runtime metadata or dispatch.
 
 ### Prefix fields
 
-A sequential field backed by a custom `PrefixCodec` discovers its exact encoded width
-during structural parsing:
+A custom `PrefixCodec` determines a sequential field's encoded width during
+structural parsing:
 
 ```rust
 field name: prefix(crate::Terminated);
 ```
 
-The generated view preserves the exact accepted bytes. `name()` returns the decoded
-value, while `name_raw()` exposes the exact validated raw wire bytes: the original wire
-representation. Parsing validates the
-prefix extent once and rejects any codec claim beyond the remaining input.
+The view stores the accepted extent. `name()` decodes it; `name_raw()` returns the
+exact validated bytes, including a legal noncanonical encoding. Prefix codecs are
+responsible for bounded prefix validation; the generated parser rejects a claimed
+extent beyond remaining input.
 
-### Byte ranges
+## ✍️ Mutable views
 
-Sequential layouts have three byte-range forms:
+Immutable parsing is `Layout::view(bytes)`. Mutable parsing stays deliberately
+separate:
 
-- `bytes(current_pos..current_pos + source)` is a relative payload length;
-- `bytes(current_pos..source)` is an exclusive absolute payload endpoint measured from
-  representation byte zero;
-- `bytes(current_pos..buf_end)` consumes the supplied view-buffer tail.
+```rust
+let mut bytes = [7, 0x01, 0x00, 0b0000_1011];
+let mut header = HeaderViewMut::parse_exact_mut(&mut bytes).expect("valid header");
+header.set_kind(9).expect("encodable kind");
+header.set_flags(0b0000_0010).expect("encodable flags");
+```
 
-The first two forms require an eligible physically preceding source: a built-in fixed
-integer, or a total semantic mapping over one. Framing uses the raw physical integer
-(`u32` for `U24`) and a checked conversion to `usize`. Prefix, custom/direct, declared
-scalar, nominal, and byte-range sources are unsupported. `bytes(0)` remains invalid,
-while dynamic ranges may be empty.
+Use `parse_prefix_mut` when caller bytes may have a suffix and `parse_exact_mut`
+when they may not. A mutable view preserves the same represented extent that an
+immutable view would accept.
+
+Only same-width fixed fields that cannot affect framing receive typed setters.
+Prefix fields, dynamic ranges, `buf_end`, and range-source fields have no setter.
+A dynamic range exposes an exact mutable slice instead, so it can be edited but
+not resized or reframed.
+
+## 🏗️ Builders: validate first, write second
+
+Builders write into caller-owned storage and return the bounded mutable view plus
+its untouched suffix:
+
+```rust
+let mut output = [0xa5; 6];
+let (header, suffix) = HeaderBuilder::new()
+    .kind(7)
+    .length(256)
+    .flags(0b0000_1011)
+    .build_into(&mut output)
+    .expect("complete builder and sufficient output");
+
+assert_eq!(header.as_bytes(), &[7, 0x01, 0x00, 0b0000_1011]);
+assert_eq!(suffix, &[0xa5, 0xa5]);
+```
+
+Before the first output byte changes, a builder checks required inputs, codec
+plans, derived values, dynamic lengths, source conversions, arithmetic,
+shared-source agreement, and capacity. If any of that fails, **the entire supplied
+output slice is unchanged**. On success, only the representation is written;
+padding, alignment, absolute-layout gaps, and the suffix retain their prior bytes
+unless the representation explicitly covers them.
+
+## 📏 Dynamic byte ranges
+
+Sequential layouts support three forms:
+
+| Form | Meaning |
+| --- | --- |
+| `bytes(current_pos..current_pos + source)` | a length relative to the range start |
+| `bytes(current_pos..source)` | an exclusive endpoint relative to representation byte zero |
+| `bytes(current_pos..buf_end)` | the rest of the supplied view buffer |
+
+A relative range derives its builder source from payload length:
 
 ```rust
 wire_repr::wire_repr! {
@@ -226,179 +221,256 @@ wire_repr::wire_repr! {
         field checksum: BeU32;
     }
 }
+
+let mut output = [0; 9];
+let view = FrameBuilder::new()
+    .payload(b"abc")
+    .checksum(0xfeed_beef)
+    .build_into(&mut output)
+    .expect("complete frame")
+    .0;
+assert_eq!(view.payload_length(), 3);
 ```
 
-A relative builder derives the payload length. An absolute builder derives the physical
-payload end, including preceding fixed and prefix widths, padding, alignment, and prior
-ranges. A derived source has neither builder input nor setter. Shared sources use the same
-algebra and must receive identical derived values. A source may be declared later in
-explicit-position declaration order, but it must physically precede every range it frames.
+The first two forms require an eligible **physically preceding** fixed built-in
+integer source, optionally total-mapped. The parser uses its raw physical value
+and a checked `usize` conversion. `U24` therefore uses `u32`; a semantic wrapper
+does not change geometry. Dynamic ranges may be empty; `bytes(0)` is not valid.
 
-`buf_end` has no source, may occur once, and must be physically last. It owns every byte
-left in the caller-supplied input after preceding entries, including an empty span:
+For `current_pos..source`, `source` is an exclusive endpoint from representation
+byte zero, not a length. Builders derive that physical endpoint, including earlier
+fixed and prefix widths, padding, alignment, and ranges. Later physical entries
+still belong to the representation and still affect its remainder.
+
+`buf_end` has no source, may appear once, and must be physically last. It owns all
+remaining supplied input, including an empty span. It makes `with_remainder()`
+return an empty suffix; it does **not** discover a packet, transport, or checksum
+boundary for you.
+
+## 🗺️ Absolute layouts
+
+Absolute layouts are fixed width and require zero-based offsets for every field:
 
 ```rust
 wire_repr::wire_repr! {
-    pub layout EthernetEnvelope {
-        field destination: bytes(6);
-        field source: bytes(6);
-        field ether_type: BeU16;
-        field payload: bytes(current_pos..buf_end);
+    pub absolute layout DatabaseHeader {
+        field magic: bytes(16) { offset: 0; }
+        field version: BeU32 { offset: 16; }
     }
 }
 ```
 
-Because `buf_end` consumes the supplied view buffer, `with_remainder` returns an empty suffix
-and `without_trailing` accepts the same input. It does not identify an external packet,
-transport, or FCS boundary. Conversely, `with_remainder` for a relative or absolute range
-returns the suffix after the complete represented layout; it does not automatically stop at
-an absolute range endpoint when later physical fields exist.
+Their width is the largest field extent. Gaps are represented bytes: views retain
+them and builders preserve their existing output contents. Offsets are not inferred,
+and padding, alignment, prefix fields, and dynamic ranges do not apply. Runtime
+codec-width overlap is rejected before input slicing.
 
-> [!TIP]
-> Keep unsupported variable-width-source framing—such as a WebAssembly section size encoded
-> as ULEB128—consumer-owned. The framework does not support prefix range sources.
+## 🧩 Custom codecs, mappings, and generated values
 
-## ✍️ Mutation and building
+### Custom codecs
 
-Generated mutable views preserve the same represented extent as immutable views. Same-width
-fixed fields receive typed setters only when changing them cannot invalidate range framing.
-Prefix fields, byte ranges, `buf_end`, and byte-range sources do not receive in-place
-setters; ranges instead expose mutable slices of exactly their validated spans and cannot
-resize or reframe the view.
+Implement `FixedCodec` for a compile-time-width representation or `PrefixCodec`
+for a structurally validated sequential prefix. `plan` produces an `EncodePlan`;
+its fallible work occurs before builder writes. A successful plan must encode the
+planned value, fixed plans must match their declared width, and prefix plans must
+be nonempty.
 
-Builders preflight every codec plan, dynamic extent, source conversion, checked arithmetic,
-and output-capacity requirement before writing. Relative sources derive payload lengths;
-absolute sources derive physical exclusive payload ends; `buf_end` has no source. Successful
-builds return the bounded mutable view and disjoint suffix. Failures leave all caller-owned
-output unchanged. Padding, alignment bytes, absolute gaps, and suffixes are preserved.
+### Total mappings and declared scalars
 
-Builder-only borrowed contexts make external inputs explicit without adding parser or view
-state. Fallible derived fields run during preflight. Infallible post-write finalizers then patch
-eligible fixed integer fields in compile-time dependency order, which supports checksums and
-similar values without weakening whole-output atomicity.
+`as TypePath` is a total API mapping over an eligible built-in fixed integer or
+`bytes(N)` field—not a new codec:
+
+```rust
+field kind: BeU16 as crate::Kind;
+field address: bytes(4) as crate::Address;
+```
+
+It requires `Type: From<Raw>` and `Raw: From<Type>`. The generated field has both
+semantic and raw forms (`kind()`/`kind_raw()`, semantic/raw setters, and builder
+inputs); the last supplied builder form wins. Mapped bytes use owned `[u8; N]`
+values, while unmapped `bytes(N)` remains borrowed. Mappings do not apply to
+custom, prefix, declared-scalar, or range fields.
+
+`scalar Name: Codec;` instead declares a reusable nominal wrapper around a codec.
+Use it when the codec itself—not merely one field's API—is the named concept.
+
+### Derivations, contexts, and finalizers
+
+A `derive` field is calculated during builder preflight and can fail. It has no
+ordinary input or setter. Builder-only `context` values are explicit borrowed
+inputs; they are neither bytes nor parser/view state.
+
+A `finalize` field is different: after all fallible work, the builder writes its
+target as zero and runs infallible finalizers in compile-time dependency order.
+Finalizers may read declared values, contexts, and represented bytes, but cannot
+rewrite arbitrary spans. Their `buf_end` is the represented extent—not the caller's
+whole output—and target eligibility is intentionally narrow: direct, unmapped,
+unprojected built-in fixed integers with an infallible encoding (not `U24`).
 
 ## 🔬 What reaches the CPU
 
-Generated fixed-layout operations are ordinary safe Rust: direct byte loads, endian
-conversion, shifts, masks, and bounded copies. There are no runtime descriptors, schema
-walkers, erased codecs, hidden allocation, or dynamic dispatch.
+Generated code is ordinary direct Rust: bounded slice access, endian conversion,
+shifts/masks, and bounded copies. There are no runtime descriptors, schema walks,
+erased codecs, allocation, or dynamic dispatch.
 
-Here is the generated API beside the ordinary safe Rust it replaces:
+The probes below live beside equivalent handwritten Rust in
+[`wire-repr/tests/codegen.rs`](wire-repr/tests/codegen.rs). The assembly was captured
+with Rust 1.91.0 (`f8297e351`), LLVM 21.1.2, `--release`, targeting
+`x86_64-unknown-linux-gnu`. Compiler-local labels are shortened; the instructions
+are unchanged.
+
+### [Fixed getter probe](wire-repr/tests/codegen.rs)
 
 ```rust
-wire_repr::wire_repr! {
-    pub layout Counter {
-        field value: BeU16;
-    }
+fn read_word(bytes: &[u8]) -> Option<u16> {
+    CodegenPacket::view(bytes)
+        .without_trailing()
+        .ok()
+        .map(|view| view.word())
 }
-
-fn generated_read(bytes: &[u8]) -> Option<u16> {
-    Counter::view(bytes).without_trailing().ok().map(|view| view.value())
-}
-
-fn handwritten_read(bytes: &[u8]) -> Option<u16> {
-    let bytes: &[u8; 2] = bytes.try_into().ok()?;
-    Some(u16::from_be_bytes(*bytes))
-}
-
-let wire = [0x12, 0x34];
-assert_eq!(generated_read(&wire), Some(0x1234));
-assert_eq!(generated_read(&wire), handwritten_read(&wire));
-
-let mut generated = [0u8; 2];
-CounterBuilder::new()
-    .value(0xbeef)
-    .build_into(&mut generated)
-    .unwrap();
-
-let mut handwritten = [0u8; 2];
-handwritten.copy_from_slice(&0xbeefu16.to_be_bytes());
-
-assert_eq!(generated, [0xbe, 0xef]);
-assert_eq!(generated, handwritten);
 ```
 
-At runtime, `Counter` is only a checked borrow of the two input bytes. The getter
-loads those bytes and converts them from big endian. The builder checks that two output
-bytes are available and stores the big-endian value. The generated view, builder, and
-error types improve the source-level contract; they do not introduce a runtime engine.
-
-With Rust 1.91.0 targeting `x86_64-unknown-linux-gnu`, those operations become the
-following optimized bodies (compiler-local labels simplified):
-
-<details>
-<summary>Generated and handwritten getter</summary>
-
 ```asm
-cmpq    $2, %rsi        # require exactly two input bytes
+cmpq    $2, %rsi
 jne     .invalid
-movzwl  (%rdi), %edx    # load the u16
-rolw    $8, %dx         # convert big endian to native endian
-movw    $1, %ax         # return Some(value)
+movzwl  (%rdi), %edx
+rolw    $8, %dx
+movw    $1, %ax
 retq
 .invalid:
-xorl    %eax, %eax      # return None
+xorl    %eax, %eax
 retq
 ```
 
-</details>
+### [Bit projection probe](wire-repr/tests/codegen.rs)
 
-<details>
-<summary>Generated and handwritten builder</summary>
+```rust
+fn read_low_bit(bytes: &[u8]) -> Option<bool> {
+    CodegenPacket::view(bytes)
+        .without_trailing()
+        .ok()
+        .map(|view| view.word_low())
+}
+```
 
 ```asm
-cmpq    $2, %rsi        # require at least two output bytes
-jb      .short
-rolw    $8, %dx         # convert native endian to big endian
-movw    %dx, (%rdi)     # store the u16
-.short:
+movb    $2, %al
 cmpq    $2, %rsi
-setae   %al             # report success or short output
+jne     .done
+movzbl  1(%rdi), %eax
+andb    $1, %al
+.done:
 retq
 ```
 
-</details>
+### [Same-width mutation probe](wire-repr/tests/codegen.rs)
 
-The generated and handwritten fixed getter/builders optimize to the same operation
-bodies; the comments above only map the instructions back to the visible Rust behavior.
-The [probe source](wire-repr/tests/codegen.rs) also covers projections, mutation, and
-byte ranges. The [pinned release-codegen gate](ci/check-codegen.py) compares each probe
-against equivalent handwritten safe Rust, enforces narrow per-probe instruction budgets,
-and rejects extra calls, panic paths, allocation, or dynamic dispatch:
-
-```sh
-python3 ci/check-codegen.py
+```rust
+fn replace_word(bytes: &mut [u8], value: u16) -> bool {
+    match CodegenPacketViewMut::parse_exact_mut(bytes) {
+        Ok(mut view) => view.set_word(value).is_ok(),
+        Err(_) => false,
+    }
+}
 ```
 
-The stable contract is the optimized operation shape and absence of framework
-machinery—not fragile textual assembly snapshots tied to register allocation or labels.
+```asm
+cmpq    $2, %rsi
+jne     .done
+rolw    $8, %dx
+movw    %dx, (%rdi)
+.done:
+cmpq    $2, %rsi
+sete    %al
+retq
+```
 
-## ⚠️ Deliberate limits
+### [Fixed builder probe](wire-repr/tests/codegen.rs)
 
-> [!NOTE]
-> `wire-repr` is a byte-representation compiler, not a universal schema VM or protocol
-> runtime.
+```rust
+fn write_word(output: &mut [u8], value: u16) -> bool {
+    CodegenPacketBuilder::new()
+        .word(value)
+        .build_into(output)
+        .is_ok()
+}
+```
 
-- Repeated sequences and arbitrary conditional fields are not supported.
-- Prefix fields and byte ranges are sequential-only.
-- Absolute layouts remain fixed-width and explicit-offset-only.
-- The framework does not own checksums, semantic relationships, protocol state, I/O, or
-  allocation policy.
-- Custom codecs remain explicit Rust types rather than runtime descriptors.
+```asm
+cmpq    $2, %rsi
+jb      .done
+rolw    $8, %dx
+movw    %dx, (%rdi)
+.done:
+cmpq    $2, %rsi
+setae   %al
+retq
+```
 
-For the normative ownership, parsing, mutation, and extension rules, see
-[`ARCHITECTURE.md`](ARCHITECTURE.md). Generated APIs and codec contracts are documented
-in the [crate documentation](https://docs.rs/wire-repr).
+### [Relative-range getter probe](wire-repr/tests/codegen.rs)
 
-## 📦 Workspace and contract
+```rust
+fn first_payload_byte(bytes: &[u8]) -> Option<u8> {
+    CodegenRelativeRange::view(bytes)
+        .without_trailing()
+        .ok()?
+        .payload()
+        .first()
+        .copied()
+}
+```
 
-The repository contains two crates:
+```asm
+xorl    %eax, %eax
+testq   %rsi, %rsi
+je      .done
+cmpq    $1, %rsi
+je      .done
+decq    %rsi
+movzbl  (%rdi), %ecx
+cmpq    %rcx, %rsi
+jne     .done
+movzbl  1(%rdi), %edx
+movb    $1, %al
+.done:
+retq
+```
 
-- `wire-repr` — public `no_std` runtime facade and `wire_repr!` reexport;
-- `wire-repr-macros` — host-side procedural-macro compiler.
+Snapshots are illustrative and compiler-specific. The normative release check is
+[`ci/check-codegen.py`](ci/check-codegen.py), which compares the probes with their
+handwritten safe-Rust equivalents and rejects unwanted calls, panic paths,
+allocation, dynamic dispatch, or excess instruction shape.
 
-The target-runtime contract is Rust 1.91, edition 2024, empty default features, no
-allocation, no runtime dependencies, and `unsafe_code = "deny"`.
+## ✅ Guarantees and limits
+
+**Guaranteed:** safe Rust only; exact accepted raw prefix bytes; explicit framing;
+checked dynamic endpoints; immutable views that retain their validated boundaries;
+restricted in-place mutation; and all-or-nothing caller-output builds.
+
+**Deliberately absent:** repeated sequences, arbitrary conditional fields, nested
+range schemas, independently owned bitfields, runtime schemas, allocation policy,
+I/O, protocol state, and domain validation. Prefix fields and ranges are
+sequential-only; absolute layouts are fixed-width only.
+
+> [!TIP]
+> If a variable-width value such as ULEB128 must frame a later range, retain that
+> framing in consumer code. Prefix codecs are structural fields, not range sources.
+
+## 🧬 Code generation and project contract
+
+The workspace has two crates:
+
+- [`wire-repr`](wire-repr/) — public runtime facade, codec contracts, and macro reexport;
+- [`wire-repr-macros`](wire-repr-macros/) — host-side procedural-macro compiler.
+
+The macro emits concrete layout-specific types and operations; it emits no generated
+source files or build scripts. The target contract is **Rust 1.91**, edition 2024,
+empty default features, `no_std`, no allocation requirement, no target-runtime
+dependencies, and `unsafe_code = "deny"`.
+
+For normative ownership and generation rules, read
+[`ARCHITECTURE.md`](ARCHITECTURE.md). Public API details are also available on
+[docs.rs](https://docs.rs/wire-repr).
 
 ## 📄 License
 

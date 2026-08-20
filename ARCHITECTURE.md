@@ -1,165 +1,283 @@
 # Architecture
 
-This document is normative.
+This document is normative. It defines the ownership boundaries and observable
+contracts of `wire-repr`; implementation details may vary only when they preserve
+these rules.
 
-## Package boundary
+## 1. Package boundary
 
-The repository root is a virtual workspace. It owns shared metadata,
-documentation, licensing, and toolchain settings; it owns no Rust source or
-tests. There are exactly two crates: `wire-repr/`, the public runtime facade,
-and `wire-repr-macros/`, the procedural-macro compiler. There is no third
-support crate.
+The repository root is a virtual workspace. It owns shared metadata, licensing,
+toolchain policy, and documentation; it owns no Rust source or tests.
 
-`wire-repr/` owns wire-representation types and encoding/decoding behavior
-exposed by its public API. It remains usable in
-`no_std` environments without allocation. It depends on `wire-repr-macros`
-only to reexport the public `wire_repr!` facade macro; the macro dependency
-adds no target-runtime schema or machinery.
+The workspace has exactly two crates:
 
-## Codec boundary
+- `wire-repr/` is the public runtime facade. It owns public codec contracts,
+  built-ins, and generated wire-representation behavior.
+- `wire-repr-macros/` is the procedural-macro compiler. It owns layout syntax,
+  normalization, validation, and rendering.
 
-Fixed codecs own representations with a compile-time width and decode every
-exact-width bit pattern. `bytes(N)` exposes an uninterpreted borrowed span.
-Prefix codecs own representations whose encoded width must be discovered from
-the input, so they perform bounded structural prefix parsing. Layout composition
-owns field order and exact represented extents. Domain validation belongs to
-consumers.
+There is no target-runtime support crate. The facade reexports `wire_repr!`; that
+host-side dependency must not become target-runtime schema machinery.
 
-Encoding performs all fallible work before bytes are copied into caller-owned
-output. A returned encoding error leaves the complete caller-owned output
-unchanged. Successful plans must emit a representation that decodes to the planned
-semantic value. Exact input encodings remain available
-to layout views and are not reconstructed from decoded values.
+## 2. Physical representation versus domain ownership
 
-An `as TypePath` mapping is a total nominal API adaptation, not a codec. Only built-in fixed
-integers and `bytes(N)` are eligible. Its raw type is the physical codec type exactly
-(`u32` for `U24`; `[u8; N]` for `bytes(N)`), and it uses direct `Semantic: From<Raw>` on
-read and `Raw: From<Semantic>` on write. The physical codec retains byte ownership,
-planning, range errors, and whole-destination atomicity; mappings add no fallible layer.
-Mapped byte values are owned arrays or wrappers, while unmapped `bytes(N)` remains borrowed.
-`scalar Name: Codec;` instead declares a reusable codec-owning nominal wrapper. Mappings do
-not apply to declared scalar, custom/direct, prefix, or byte range fields.
+`wire-repr` owns bytes, widths, offsets, framing, checked structural parsing,
+encoding plans, and the represented extent. Consumers own domain meaning,
+including magic values, reserved-byte policy, checksums as a protocol rule,
+cross-field relationships, state machines, I/O, and allocation policy.
 
-## Layout macro boundary
+A fixed codec owns a compile-time-width representation and decodes every
+exact-width bit pattern. `bytes(N)` is an uninterpreted physical span. A prefix
+codec owns bounded structural discovery of its encoded width. Layout composition
+owns physical order and represented extent.
 
-Procedural-macro implementation belongs exclusively to `wire-repr-macros/`.
-The compiler parses canonical layout syntax, normalizes and checks it before
-rendering, preserves user documentation, and emits concrete operations. Normalization owns
-mapping eligibility and the exact `MappingRaw` type; renderers consume that normalized fact
-rather than rediscovering codec categories. The hidden `OwnedBytes` helper exists only as
-macro support for mapped fixed bytes and is not a normal user API.
-Sequential layouts have two exclusive modes. If no physical entry supplies
-`position`, normalization infers contiguous one-based physical positions from physical
-source declaration order across fields and anonymous padding/alignment entries. If any
-entry supplies `position`, every physical entry must do so and supplied positions must be
-contiguous; explicit mode may reorder physical placement independently of declaration order.
-In both modes normalization lowers to concrete contiguous one-based physical order before
-rendering, while declaration order owns generated API and documentation.
+The framework must not turn domain rejection into structural parsing, nor use a
+semantic value to reconstruct accepted raw bytes. Exact accepted prefix encodings,
+including legal noncanonical ones, remain available from immutable views.
 
-Padding consumes a fixed nonzero length. Alignment is relative to the represented layout
-start and consumes the minimum bytes required by a nonzero boundary. Spacing bytes remain
-opaque exact input; named reserved spans use `bytes(N)` and remain consumer-interpreted.
-Sequential layouts may mix these entries with fixed codecs, custom prefix codecs, and byte
-ranges. The complete byte-range algebra is:
+## 3. Compile pipeline
 
-- `bytes(current_pos..current_pos + source)`: relative payload length;
-- `bytes(current_pos..source)`: exclusive absolute payload endpoint from representation
-  byte zero;
-- `bytes(current_pos..buf_end)`: supplied view-buffer tail.
+The macro pipeline is:
 
-The first two forms require an eligible physically preceding source: a built-in fixed
-integer or semantic mapping over one. Framing uses its raw physical integer and checked
-`usize` conversion; mappings do not change geometry. Prefix, custom/direct, declared
-scalar, nominal, and byte-range sources are unsupported. `bytes(0)` is invalid; dynamic
-ranges may be empty. A source may appear later in declaration order under explicit
-placement, but must physically precede every framed range.
+1. Parse canonical declaration syntax and preserve user documentation.
+2. Normalize declarations into physical geometry and public API facts.
+3. Validate layout-specific structural constraints before rendering.
+4. Render concrete, layout-specific public types and operations.
 
-A `buf_end` range has no source, occurs at most once, and must be physically last. It owns
-every byte after prior physical entries within the supplied input, including an empty span;
-it establishes no external packet, FCS, transport, or other boundary. `with_remainder` returns
-the suffix after the complete represented layout—not automatically after an absolute range
-endpoint if later physical fields exist. Because `buf_end` is physically terminal, its suffix
-is empty. Variable-width-source framing (for example, a ULEB128 WebAssembly section size)
-remains consumer-owned.
+Normalization is the only owner that classifies mappings and determines each
+mapping's exact raw type. Renderers consume normalized facts; they must not
+rediscover codec categories independently.
 
-Dynamic sequential views store represented bytes and exact exclusive prefix/range/buf_end
-endpoints. They never cache semantic values or scan runtime metadata.
-Exact prefix encodings remain directly available even when legal noncanonical forms.
+The dispatcher has distinct owners for fixed sequential, dynamic sequential, and
+fixed absolute layouts. A renderer may share deliberate utilities, but these three
+geometry classes must not collapse into a runtime schema abstraction.
 
-Every absolute-layout field requires an explicit zero-based offset. Absolute
-layouts check offsets in ascending offset order; their width is the maximum
-field extent, gaps remain opaque represented bytes, and runtime codec-width
-overlaps are rejected before input slicing.
+## 4. Generated public surface
 
-The render dispatcher has separate fixed-sequential, dynamic-sequential, and
-absolute owners. The layout declaration itself is the generated immutable view type;
-`Layout::view` produces a lightweight request whose `with_remainder` or
-`without_trailing` terminal validates exactly once. A generated view borrows only the accepted exact prefix and
-exposes fixed getters without content validation. Prefix extents from custom
-codecs are structurally parsed and checked before slicing. An
-eligible unsigned builtin
-storage field may own immutable bit projections. They own no bytes or parse
-errors, use LSB0 numbering over the decoded semantic integer regardless of
-endianness, and render as direct storage-getter shift/mask operations. Signed
-and custom codecs have no projection contract; there is no runtime bit-storage
-trait, metadata, or validation layer. Mappings do not alter physical storage: mapped integer
-projections operate on the decoded raw integer. Mapped fields expose semantic and raw
-getters; eligible mutable fields expose semantic and raw setters. Builder semantic and raw
-inputs share one slot and the last input wins. A mapped byte-range source exposes both
-getters but no setter or builder input; the builder derives its raw source value from the
-byte range.
+For `pub layout Foo`, the declaration itself generates immutable `Foo<'wire>`.
+`Foo::view(bytes)` returns a lightweight framing request. Its only parsing
+terminals are:
 
-Generated mutable views expose immutable getters and only those typed
-same-width setters that cannot change framing. They expose no unrestricted
-mutable-byte access. Dynamic sequential views therefore omit setters for prefix
-fields, byte ranges, `buf_end` ranges, and every fixed field used as a byte range source; each
-byte range or `buf_end` range instead exposes a mutable slice of exactly its validated span, which
-cannot resize or reframe it. View conversion preserves dynamic boundaries without
-reparsing.
+- `with_remainder()`, which returns `(Foo<'wire>, &'wire [u8])`; and
+- `without_trailing()`, which rejects a suffix.
 
-Generated builders retain values and encoding plans through complete preflight,
-then commit physical fields in physical order. Missing values and codec planning follow
-declaration order; all plans, extents, source conversions, checked arithmetic, shared-source
-agreement, and output capacity precede mutation. Relative sources derive payload lengths.
-Absolute sources derive physical exclusive payload ends, including preceding fixed and prefix
-widths, padding, alignment, and ranges. `buf_end` has no source and its supplied slice
-participates in aggregate extent. Pre-write-derived fixed fields have no ordinary builder input
-or setter; their fallible derivations run during preflight in dependency order. Shared range
-sources use identical algebra and values, and conversion/planning occur once.
+A terminal performs structural validation exactly once. The immutable view borrows
+only the accepted representation; `as_bytes()` excludes a `with_remainder` suffix.
+Fixed getters decode their validated field bytes without domain validation.
 
-Explicit contexts are borrowed builder-only inputs stored as `Option<&'value Referent>`,
-including unsized referents. They are neither encoded bytes nor parser or view state, and a
-missing context fails preflight before output mutation. Post-write finalizers target only direct,
-unmapped, unprojected built-in fixed integers whose complete semantic domain is infallibly
-encodable; `BeU24` and `LeU24` are excluded. Finalizer targets have no ordinary input or setter.
-During physical commit, every finalizer target is written as zero; finalizers then run in stable
-compile-time DAG order. Operands may borrow explicit contexts, semantic field values, or represented byte spans;
-only a value dependency on another finalized field creates a finalizer-order edge. Each
-finalizer returns the target's exact semantic type and immediately performs an infallible patch.
-Its `buf_end` is the represented extent, and existing destination spans may be read but are not
-rewritten. Thus every operation that can fail still completes before the first destination write.
-Padding, alignment bytes, absolute-layout gaps, and bytes after the represented prefix remain
-unchanged.
+Generated mutable types retain the `FooViewMut` naming family. They parse with
+`parse_prefix_mut` or `parse_exact_mut`, rather than through `Foo::view`. Builders
+retain the `FooBuilder` naming family. Error types distinguish their operation and
+phase; successful public operations must not expose a runtime schema.
 
-The macro emits no runtime descriptors, schema walkers, allocation, dynamic
-dispatch, generated source files, or build scripts. Independently owned physical
-bitfields, nested byte range schemas, and repeated sequences are excluded. Prefix,
-byte range, padding, and alignment composition is sequential-only; absolute layouts
-remain fixed-width.
+## 5. Sequential physical geometry
 
-## Constraints
+Sequential layouts have two exclusive placement modes.
 
-- The target library uses only safe Rust; `unsafe` is forbidden.
-- The target library has no runtime dependencies.
-- Allocation is not a supported requirement of the target library.
-- Default features remain empty; optional behavior requires an explicit feature
-  and must preserve the baseline contract.
-- Public behavior is deterministic from explicit inputs and does not depend on
-  ambient runtime state.
+In implicit mode, no physical entry specifies `position`; fields, padding, and
+alignment receive contiguous one-based physical positions in source order. In
+explicit mode, every physical entry specifies `position`; positions must be
+contiguous, but physical order may differ from declaration order.
 
-## Ownership
+Declaration order governs public getter, setter, builder-input, error-selection,
+and rustdoc order. Physical order governs parsing, represented bytes, dynamic
+progress, commit order, and physical layout errors. A source may therefore be
+later in declaration order but must be physically earlier than every range it
+frames.
 
-Runtime codec contracts and built-ins live under `wire-repr/src/codec`. The
-`wire-repr/src/lib.rs` crate root is the documented public facade and macro
-reexport. Public cross-owner behavior is tested through integration tests in
-`wire-repr/tests`; narrow implementation invariants remain with their owner.
+Padding consumes a fixed nonzero length. Alignment is relative to representation
+byte zero and consumes the minimum bytes for a nonzero boundary. Both are opaque
+represented bytes. Named reserved bytes are ordinary `bytes(N)` and remain
+consumer-interpreted.
+
+## 6. Fixed absolute geometry
+
+Every absolute-layout field has a mandatory zero-based `offset`. Absolute layouts
+are fixed width: their width is the maximum field extent. Parsing checks fields in
+ascending offset order and rejects invalid width, overflowing extent, and overlap
+before slicing input.
+
+Gaps are part of the represented byte span. Views preserve them; builders preserve
+existing caller-output gap bytes. Absolute layouts never infer offsets and do not
+support padding, alignment, prefix fields, or dynamic byte ranges.
+
+## 7. Immutable parsing and framing
+
+Structural parsing advances in physical order. It validates codec configuration,
+checks bounds and arithmetic, determines dynamic extents, and only then forms
+field slices. It must not blindly slice after an unchecked codec claim.
+
+For fixed sequential and absolute layouts, represented extent follows fixed
+geometry. For dynamic sequential layouts, the immutable view retains the exact
+validated `usize` endpoint for every prefix, range, and `buf_end` boundary. It
+uses those endpoints directly: getters do not re-scan bytes, recompute endpoints,
+cache semantic values, or defer framing checks.
+
+`with_remainder` returns the suffix after the complete represented layout. It does
+not stop at an intermediate absolute range endpoint if later physical entries
+exist. `without_trailing` requires that suffix to be empty.
+
+Prefix validation receives the remaining input, returns a nonzero encoded extent,
+and is checked against it. Decoding receives exactly that accepted prefix span.
+The raw getter returns those exact bytes; it does not reencode the decoded value.
+
+## 8. Dynamic range algebra
+
+Only sequential layouts may contain byte ranges:
+
+- `bytes(current_pos..current_pos + source)` uses `source` as a relative length.
+- `bytes(current_pos..source)` uses `source` as an exclusive endpoint relative to
+  representation byte zero.
+- `bytes(current_pos..buf_end)` consumes the supplied view buffer tail.
+
+The first two forms require an eligible physically preceding source: a built-in
+fixed integer or a total mapping over one. Parsing uses the physical raw integer
+and checked conversion to `usize`; a mapped value never changes geometry. Prefix,
+custom/direct, declared-scalar, nominal, and byte-range fields are not sources.
+`bytes(0)` is invalid, but a dynamic range may be empty.
+
+An absolute endpoint before `current_pos` is a range error. An endpoint beyond
+available input is an input-shortage error. These are distinct conditions.
+
+`buf_end` has no source, appears at most once, and is physically last. It owns all
+bytes after earlier physical entries in the supplied input, including an empty
+span. Its `with_remainder` suffix is therefore empty. It does not establish an
+external packet, FCS, transport, or application boundary.
+
+Variable-width prefix values are not range sources. Consumer code owns framing
+such as a ULEB128 section length.
+
+## 9. Mutable contract
+
+A mutable view has the same represented extent and dynamic boundaries as an
+immutable view accepted from the same bytes. Converting its view form must retain
+those boundaries without reparsing.
+
+Mutable views expose immutable getters and only typed, same-width setters whose
+writes cannot invalidate framing. They expose no unrestricted mutable-byte API.
+Prefix fields, dynamic ranges, `buf_end`, and every range source have no setter.
+Each range instead exposes a mutable slice of its exact validated span; that slice
+cannot resize or reframe the representation.
+
+Mapped eligible fields expose semantic and raw getters/setters. A mapping does not
+change physical encoding or range-source behavior. Projections remain immutable
+views over their storage getter; they do not independently own bytes or setters.
+
+## 10. Builder phases and atomicity
+
+A builder has a strict two-phase contract.
+
+**Preflight** completes all fallible work before any caller-output mutation:
+required inputs and contexts, codec planning, plan-length validation, derivations,
+range source conversion, shared-source agreement, dynamic geometry, checked
+arithmetic, and output capacity. Missing inputs and planning follow declaration
+order. Preflight derives each shared source once and rejects conflicting range
+values before planning/writing dependent output.
+
+**Commit** writes physical entries in physical order. It returns the mutable
+representation plus a disjoint untouched suffix. Padding, alignment, absolute
+gaps, and bytes after the represented extent retain their existing output contents
+unless a range explicitly writes them.
+
+Any returned build error leaves the complete caller-provided output slice
+unchanged. This includes a short output, codec planning failure, invalid plan
+length, failed derivation, conversion failure, arithmetic overflow, and
+shared-source conflict.
+
+Relative range sources derive payload lengths. Absolute range sources derive
+exclusive physical payload ends, including preceding fixed/prefix extents, padding,
+alignment, and earlier ranges. `buf_end` has no source; its supplied builder span
+participates in the represented extent.
+
+## 11. Codec laws
+
+`FixedCodec::WIDTH` is nonzero and its successful plan has exactly that width.
+`PrefixCodec::validate_prefix` reports a nonzero extent within its supplied bytes;
+a successful prefix plan is nonempty. `EncodePlan::encoded_len` and `write_into`
+refer to the same representation.
+
+A successful plan must encode the planned semantic value. Any violation is
+reported before output mutation where the generated operation can observe it.
+Codec contracts own representation errors, not application-level semantic policy.
+
+## 12. Mappings, projections, derivations, and finalization
+
+`as TypePath` is a total nominal mapping, not a codec. It applies only to built-in
+fixed integers and `bytes(N)`, with `Semantic: From<Raw>` and `Raw: From<Semantic>`.
+Its raw type is the exact physical type (`u32` for `U24`, `[u8; N]` for bytes).
+Mapped byte values are owned; unmapped fixed bytes are borrowed.
+
+Mapped fields expose semantic and raw forms. Semantic and raw builder inputs share
+one slot; the last input wins. A range-source mapping exposes both getters, but no
+ordinary setter or builder input because the source is derived.
+
+`scalar Name: Codec;` declares a reusable codec-owning nominal wrapper; it is not
+an `as` mapping. Mappings do not apply to declared scalars, custom/direct codecs,
+prefix codecs, or ranges.
+
+Unsigned built-in storage may declare immutable LSB0 bit projections. Bit numbering
+is over the decoded raw integer regardless of endianness. Mapped integer
+projections likewise use raw storage. Signed and custom storage have no projection
+contract.
+
+A `derive` field runs fallibly in preflight dependency order and has no ordinary
+input or setter. A builder-only `context` is stored as an explicit borrowed
+`Option<&Referent>`, including unsized referents; it is neither encoded bytes nor
+parser/view state.
+
+A `finalize` target is a direct, unmapped, unprojected built-in fixed integer whose
+complete semantic domain is infallibly encodable; `BeU24` and `LeU24` are excluded.
+It has no ordinary input or setter. Commit writes its field as zero, then finalizes
+in stable compile-time DAG order. Only value dependencies between finalizers make
+DAG edges; byte-span reads do not.
+
+Finalizers return the target's exact semantic type and patch only that target
+infallibly. They may read contexts, semantic values, represented spans, and
+existing destination spans, but may not rewrite arbitrary spans. Their `buf_end`
+is the represented extent, not caller-output length. Thus no operation that can
+fail remains after the first output write.
+
+## 13. Error phases
+
+Errors preserve structural phase and physical/declaration ownership:
+configuration/geometry errors precede input access in physical order; shortage and
+malformed prefix/range structure arise during parsing; trailing bytes arise only at
+exact framing; missing inputs and planning failures follow declaration order; range
+conflict, conversion, extent, and capacity failures arise in preflight; and mutation
+errors arise before their individual setter writes.
+
+Error reporting must not conceal a later failure by performing unchecked work
+first, and no error path may mutate caller output before preflight completes.
+
+## 14. Zero-cost and codegen contract
+
+The macro emits concrete operations, not runtime descriptors, reflection, schema
+walkers, erased codecs, dynamic dispatch, allocation, generated source files, or
+build scripts. Fixed access is ordinary safe Rust loads, conversions, shifts, masks,
+and bounded copies; dynamic access uses retained validated endpoints.
+
+Assembly text is not a stable API: instruction selection and register allocation
+are compiler- and target-specific. The release probes in `wire-repr/tests/codegen.rs`
+are illustrative comparisons with handwritten safe Rust. `ci/check-codegen.py` is
+the normative release gate for the expected optimized operation shape and absence
+of framework machinery.
+
+## 15. Explicit exclusions
+
+The architecture excludes runtime schemas, endpoint recomputation, repeated
+sequences, arbitrary conditional fields, nested range schemas, independently owned
+bitfields, parser-owned protocol semantics, and target-runtime dependencies. Each
+layout declaration has one immutable owner; alternate compatibility owners are not
+generated. These are exclusions, not deferred subsystems.
+
+## 16. Testing and ownership
+
+Runtime codec contracts and built-ins live under `wire-repr/src/codec`; the facade
+and macro reexport live in `wire-repr/src/lib.rs`; parsing/rendering belongs to
+`wire-repr-macros`. Public cross-owner behavior belongs in `wire-repr/tests`.
+Narrow owner invariants remain with their owner. Tests must exercise contracts at
+the relevant boundary rather than duplicate the production algorithm as an oracle.
+
+The baseline target library is `no_std`, safe Rust only, has no target-runtime
+dependencies, uses empty default features, and is governed by Rust 1.91 / edition
+2024 with `unsafe_code = "deny"`.

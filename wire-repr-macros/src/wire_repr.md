@@ -1,201 +1,182 @@
-Declares sequential or fixed absolute-offset byte-backed layouts.
+# `wire_repr!`
 
-Consumers normally import this macro from the facade:
+Declares a concrete byte-backed layout. The macro emits borrowed immutable views,
+restricted mutable views, builders, and layout-specific errors; it emits neither a
+runtime descriptor nor a Rust-struct reinterpretation of input bytes. Import it from
+the facade:
 
 ```rust,ignore
 use wire_repr::wire_repr;
 ```
 
-The declaration compiles to concrete borrowed views, constrained mutable views, builders,
-and layout-specific errors. It does not create runtime descriptors or reinterpret input as
-Rust structs.
+A declaration owns physical representation only. Application code still owns magic
+values, reserved-byte policy, checksums as protocol rules, and cross-field meaning.
 
-# Sequential layouts
+## Basic syntax
 
-Sequential layouts support either fully implicit or fully explicit physical placement.
-With implicit placement, fields, padding, and alignment occupy contiguous one-based
-positions in declaration order:
+```text
+[attributes]
+visibility scalar ScalarName: Codec;
 
-```rust,ignore
-wire_repr! {
-    pub layout Packet {
-        field kind: U8;
-        padding { length: 2; }
-        align { boundary: 4; }
-        field payload_length: BeU16;
-        field payload: bytes(current_pos..current_pos + payload_length);
-    }
+[attributes]
+visibility layout Name {
+    context name: Type;
+    field name: FieldForm [as SemanticType] { properties }
+    padding { properties }
+    align { properties }
+}
+
+[attributes]
+visibility absolute layout Name {
+    field name: FixedFieldForm [as SemanticType] { offset: N; }
 }
 ```
 
-To reorder physical storage independently of declaration and generated API order, every
-physical entry must provide `position`:
+Top-level `scalar` declarations and layout-local `context` declarations are optional.
+A sequential layout contains fields, padding, and alignment. An absolute layout
+contains fixed fields only.
+
+## Sequential and absolute geometry
+
+A sequential layout has exactly one placement mode:
+
+- **Implicit:** no physical entry has `position`; physical order is declaration order.
+- **Explicit:** every field, `padding`, and `align` entry has a unique contiguous
+  one-based `position`; physical order may differ from declaration order.
+
+Declaration order remains the order of getters, setters, builder inputs,
+missing/planning errors, and rustdoc. Physical order controls parsing, represented
+bytes, dynamic progress, builder commit order, and physical-layout errors.
 
 ```rust,ignore
+use wire_repr::wire_repr;
+
 wire_repr! {
     pub layout Reordered {
         field checksum: BeU16 { position: 2; }
         field tag: U8 { position: 1; }
     }
 }
+
+let bytes = [7, 0x12, 0x34];
+let view = Reordered::view(&bytes).without_trailing()?;
+assert_eq!(view.checksum(), 0x1234);
+assert_eq!(view.tag(), 7);
+# Ok::<(), ReorderedError>(())
 ```
 
-Positions are one-based, unique, contiguous, and shared by fields, padding, and alignment.
-Mixing explicit and implicit entries is rejected.
+`padding { length: N; }` consumes a fixed nonzero opaque span.
+`align { boundary: N; }` consumes the minimum bytes needed to align the current
+position relative to representation byte zero. In explicit mode use
+`padding { position: P; length: N; }` and `align { position: P; boundary: N; }`.
+Builders preserve spacing bytes already in their destination.
 
-# Absolute layouts
-
-Absolute layouts require an explicit zero-based `offset` for every field:
+An `absolute layout` requires a zero-based `offset` on every field. Its width is the
+largest field extent; gaps are represented bytes and builders preserve existing gap
+contents. Offsets are never inferred. Absolute layouts reject padding, alignment,
+prefix fields, and dynamic ranges; invalid codec widths, overflowing extents, and
+overlap are rejected before input slicing.
 
 ```rust,ignore
+use wire_repr::wire_repr;
+
 wire_repr! {
     pub absolute layout FileHeader {
         field magic: bytes(4) { offset: 0; }
         field version: BeU16 { offset: 8; }
     }
 }
+
+let bytes = [0; 10];
+let header = FileHeader::view(&bytes).without_trailing()?;
+assert_eq!(header.magic(), &[0; 4]);
+assert_eq!(header.version(), 0);
+# Ok::<(), FileHeaderError>(())
 ```
 
-Gaps are represented and preserved. Overlapping field extents are rejected. Absolute
-layouts are fixed-width and do not support prefix fields, byte ranges, padding, or alignment.
-
-# Field forms
-
-The supported field forms are:
+## Field forms
 
 ```text
 field name: U8;
 field name: BeU16;
 field name: BeU16 as path::Semantic;
-field name: codec(path::ToFixedCodec);
+field name: codec(path::FixedCodec);
 field name: bytes(N);
 field name: bytes(N) as path::Semantic;
-field name: prefix(path::ToPrefixCodec);
+field name: prefix(path::PrefixCodec);
 field name: bytes(current_pos..current_pos + source);
 field name: bytes(current_pos..source);
 field name: bytes(current_pos..buf_end);
 ```
 
-The built-in integer names are `U8`, `I8`, the `Be`/`Le` signed and unsigned
-16/32/64/128-bit codecs, and unsigned `BeU24`/`LeU24`. Custom `codec(path)` fields
-implement `wire_repr::FixedCodec`; `prefix(path)` fields implement `wire_repr::PrefixCodec`.
+Built-ins are `U8`, `I8`, unsigned `Be`/`Le` 16/24/32/64/128-bit codecs, and signed
+`Be`/`Le` 16/32/64/128-bit codecs. `codec(path)` implements `wire_repr::FixedCodec`;
+`prefix(path)` implements `wire_repr::PrefixCodec`. `bytes(N)` is a fixed, opaque,
+borrowed span and requires `N > 0`.
 
-`bytes(N)` is a fixed-width opaque borrowed span. Byte ranges are dynamic opaque borrowed
-spans: `current_pos + source` is a relative length, `source` is an exclusive absolute
-endpoint from representation byte zero, and `buf_end` consumes the supplied view-buffer
-tail. The first two require a physically preceding built-in fixed integer or semantic mapping
-over one. Geometry uses the raw physical integer and checked conversion to `usize`; prefix,
-custom/direct, declared scalar, nominal, and byte-range sources are unsupported. `bytes(0)`
-is invalid, but dynamic ranges may be empty.
+A prefix codec validates its bounded encoded extent while parsing. The generated
+`field()` decodes that exact span; `field_raw()` returns the original accepted bytes,
+including legal noncanonical encodings. A prefix's width is structural information,
+not a source for a dynamic range.
 
-Builders derive relative lengths or absolute physical endpoints; absolute derivation includes
-preceding fixed/prefix widths, padding, alignment, and ranges. Derived sources have no
-fluent input or setter. Shared sources require identical derived values under the same
-algebra. `buf_end` has no source, may occur once, and must be physically last. Its
-`with_remainder` suffix is empty; other `with_remainder` suffixes follow the complete represented
-layout, including physical entries after an absolute range. A mutable view exposes each range
-as `field_mut()`, which may change bytes but cannot resize or reframe the range. Unsupported
-variable-width-source framing, such as ULEB128 section lengths, remains consumer-owned.
+## Dynamic byte ranges
 
+Ranges are sequential-only opaque borrowed spans:
 
+- `bytes(current_pos..current_pos + source)` uses a source as a relative length.
+- `bytes(current_pos..source)` uses a source as an exclusive endpoint from
+  representation byte zero.
+- `bytes(current_pos..buf_end)` owns the supplied view buffer tail.
 
-# Builder contexts and post-write finalizers
+The first two require an eligible physically preceding built-in fixed integer or a
+total mapping over one. Parsing uses the raw physical integer and checked `usize`
+conversion; mappings do not change geometry. Prefix, custom/direct, declared-scalar,
+nominal, and range fields cannot be sources. A dynamic range may be empty.
 
-A layout may declare generated-builder-only borrowed inputs before every physical field,
-padding, or alignment entry:
+For builders, relative sources derive payload length. Absolute sources derive the
+physical exclusive end, including earlier fixed/prefix widths, padding, alignment,
+and ranges. A derived source has no ordinary builder input or setter. Shared sources
+must derive the same value under the same algebra. `buf_end` has no source, may occur
+once, and must be physically last. It makes `with_remainder()` return an empty suffix;
+it does not discover an external packet boundary. Mutable views expose each range as
+`field_mut()`, an exact validated span that may be changed but cannot resize or reframe.
+
+## Mappings, scalars, and projections
+
+`as TypePath` is a total nominal mapping placed immediately after an eligible built-in
+fixed integer or `bytes(N)` field form, before the field body:
 
 ```rust,ignore
-pub layout UdpPacket {
-    /// Transport pseudo-header used only while building.
-    context pseudo: crate::PseudoHeader;
-    field checksum: BeU16 {
-        finalize: crate::udp_checksum(
-            bytes(buf_start..buf_end),
-            context(pseudo),
-        );
+use wire_repr::wire_repr;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Kind(u16);
+impl From<u16> for Kind { fn from(value: u16) -> Self { Self(value) } }
+impl From<Kind> for u16 { fn from(value: Kind) -> Self { value.0 } }
+
+wire_repr! {
+    pub layout Mapped {
+        field kind: BeU16 as Kind;
     }
-    field payload: bytes(current_pos..buf_end);
 }
+
+let view = Mapped::view(&[0, 9]).without_trailing()?;
+assert_eq!(view.kind(), Kind(9));
+assert_eq!(view.kind_raw(), 9);
+# Ok::<(), MappedError>(())
 ```
 
-A context names its referent type rather than a reference; the generated builder will borrow it
-as `&'value T` (including unsized `T`, such as `[u8]`). Contexts accept documentation
-attributes but no visibility: they are not independent public items, encoded bytes, view state,
-or parser state. Every external input is explicit—there is no ambient finalizer state.
+Mappings require `Semantic: From<Raw>` and `Raw: From<Semantic>`. `Raw` is the exact
+physical type (`u32` for U24 and `[u8; N]` for fixed bytes). Mapped byte values are
+owned arrays or wrappers; unmapped `bytes(N)` remains borrowed. Mapped fields have
+semantic and raw getters; eligible mutable fields have semantic and raw setters; the
+two builder input methods share one slot and the last call wins. A mapped range source
+has both getters but no setter or builder input because its raw value is derived.
 
-`finalize: path(operand, ...);` is an infallible post-write field property. Its operands are
-`bytes(boundary..boundary)`, `context(name)`, and `value(field)`. `value(field)` passes the
-field's semantic value; it may name an ordinary field, an explicit pre-write-derived field, or an
-earlier finalizer. Only a finalized source creates post-write finalizer ordering. Finalizer byte
-boundaries are only `buf_start`, `buf_end`, `field.start`, and `field.end`; `current_pos`,
-arithmetic, and raw source identifiers are not valid there. A field uses either fallible pre-write
-`derive` (paired with `derive_error`) or infallible post-write `finalize`, never both.
+Mappings are not supported on `scalar`, custom, prefix, or range fields. Instead,
+`scalar Name: Codec;` declares a reusable nominal wrapper owning that codec.
 
-Before finalization, every target is zeroed. A finalizer may include its own target in a
-`bytes(...)` operand and observes those zero bytes, but `value(its_own_target)` is invalid. Finalizer
-dependencies form a compile-time DAG, and every fallible plan or capacity check completes before
-writing starts. Finalizers return their target's exact semantic integer type directly, so patching is
-infallible after commit. Generated-method type checking rejects a return type that does not
-exactly match the target's semantic integer type.
-
-The initial target set is unmapped built-in fixed integers except `BeU24`
-and `LeU24`: their `u32` semantic domain requires a fallible 24-bit representability check. Custom
-patch targets are not supported.
-
-`buf_end` means the end of the represented layout, not the capacity of the caller-provided output
-buffer. A builder may receive a larger destination, but finalizer ranges are bounded by the
-representation it constructs.
-
-
-# Pre-write derived fields
-
-A fixed-codec field may be builder-derived instead of supplied as a fluent input:
-
-```rust,ignore
-field total: BeU16 {
-    position: 1;
-    derive: crate::derive_total(len(options), len(payload));
-    derive_error: crate::LengthError;
-}
-```
-
-`derive` is a direct static function call returning `Result<FieldSemanticValue, DeclaredError>`.
-Its only operands are `value(field)`, which passes the referenced semantic fixed-field value by
-reference, and `len(range)`, which passes the borrowed or `_existing(length)` range input length
-as `usize`. The macro rejects unknown, self, cyclic, or wrong-kind dependencies. Explicit derived
-fixed fields are evaluated in a deterministic topological order (source declaration order breaks
-ties), then planned before any destination mutation; their typed failure appears as a dedicated
-`PacketWriteError::DeriveField…(LengthError)` variant. Its display text identifies the failed
-field without formatting the declared payload. The write error always implements `Debug` and
-`Error`: generated `Debug` reports the exact derivation variant while marking its payload opaque,
-so declared derivation errors need not implement `Debug`, `Display`, or `Error`. Because a public
-layout publishes its write error and typed variants, its declared derivation error must be public
-enough to appear in that API. They cannot frame byte ranges in this stage.
-
-This is pre-write input derivation, not checksum/CRC finalization: it cannot inspect output bytes,
-run after a write, or repair a partially written destination.
-
-# Total semantic mappings
-
-`as TypePath` maps one eligible physical field to a nominal consumer type. It appears
-immediately after the built-in fixed integer codec or `bytes(N)` and before a field body
-containing `position`, `offset`, or `projections`. It is not permitted on declared scalar
-codecs, `codec(path)` fields, prefix fields, or byte ranges.
-
-The physical codec remains the wire owner. Mapping is total and direct: the semantic getter
-uses `Semantic: From<Raw>`; semantic setters and builders use `Raw: From<Semantic>`. Raw is
-the codec's exact type (`u32` for `U24`, `[u8; N]` for `bytes(N)`), not a narrowed or
-validated domain value. There is no fallible conversion layer. Thus physical encoding can
-still reject a raw value (for example, an out-of-range `U24`) and preserves its usual
-whole-destination atomicity. Mapped bytes are owned arrays/wrappers; unmapped `bytes(N)`
-returns its borrowed slice.
-
-Top-level `scalar Name: Codec;` is separate syntax that declares a reusable nominal wrapper
-owning a codec. It does not make that codec eligible for `as TypePath` mapping.
-
-# Projections
-
-Unsigned built-in storage fields may declare immutable semantic projections:
+Unsigned built-in integer storage can have immutable LSB0 projections:
 
 ```rust,ignore
 field flags: U8 {
@@ -206,73 +187,88 @@ field flags: U8 {
 }
 ```
 
-Projection numbering is semantic LSB0 after endian decoding. `bit` generates a `bool`
-getter; `bits` shifts the inclusive range down to bit zero and returns the storage scalar
-type. Projection ranges on one storage field may not overlap. The storage field remains
-the sole physical byte owner. On a mapped integer storage field, projections continue to
-operate on that physical decoded raw integer.
+`bit` returns `bool`; `bits` returns the storage scalar after shifting the inclusive
+range down to bit zero. Bit numbering follows the decoded raw integer regardless of
+wire endianness. Projection ranges on one field cannot overlap. Projections on mapped
+integer storage still use raw physical storage; signed and custom fields have none.
 
-When a sequential field uses both explicit placement and projections, both properties are
-inside the same field body:
+## Contexts, derivation, and finalization
 
-```rust,ignore
-field flags: BeU16 {
-    position: 2;
-    projections {
-        bit urgent: 15;
-    }
+A `context name: Type;` appears before all physical entries. It is a builder-only
+borrowed input (`&'value Type`, including unsized types), not bytes or parser state.
+Contexts can have documentation attributes but no visibility.
+
+A fixed field can be computed before writing:
+
+```text
+field total: BeU16 {
+    derive: path(value(other_field), len(payload));
+    derive_error: path::Error;
 }
 ```
 
-# Spacing
+`derive` calls a static function returning `Result<FieldSemanticValue, DeclaredError>`.
+Its operands are `value(field)` and `len(range)`. Dependencies must be known, valid,
+acyclic, and non-self-referential. Derived fields have no ordinary input or setter;
+the builder evaluates them in deterministic topological order during preflight.
 
-Sequential layouts may contain opaque represented spacing:
+A `finalize` field is an infallible post-write patch:
 
 ```text
-padding { length: N; }
-align { boundary: N; }
-padding { position: P; length: N; }
-align { position: P; boundary: N; }
+field checksum: BeU16 {
+    finalize: path(bytes(buf_start..buf_end), context(name), value(field));
+}
 ```
 
-Padding advances by a fixed number of bytes. Alignment advances to the next offset aligned
-to the declared boundary. Builders preserve existing spacing bytes in caller output rather
-than normalizing them.
+Finalizer operands are `bytes(boundary..boundary)`, `context(name)`, and
+`value(field)`. Byte boundaries are `buf_start`, `buf_end`, `field.start`, and
+`field.end`. A field uses `derive` or `finalize`, never both. Finalizer targets are
+only direct, unmapped, unprojected built-in fixed integers with infallible encoding;
+`BeU24` and `LeU24` are excluded. The target starts zeroed, finalizers run in stable
+compile-time DAG order, and their return types must exactly equal the target semantic
+type. `buf_end` is the represented extent, not destination capacity.
 
-# Generated names and methods
+## Generated surface and framing
 
-For a declaration named `Packet`, the macro generates:
+For `layout Packet`, the macro generates `Packet<'wire>`, `PacketViewMut<'wire>`,
+`PacketBuilder<'value>`, `PacketError`, `PacketMutationError`, and `PacketWriteError`.
+Fixed layouts also have `Packet::WIDTH`. Layout and field documentation attributes
+are copied to their generated API owners, and generated items inherit layout visibility.
 
-- `Packet<'wire>` with `view(bytes).with_remainder()`,
-  `view(bytes).without_trailing()`, `as_bytes`, and field getters;
-- `PacketViewMut<'wire>` with `parse_prefix_mut`, `parse_exact_mut`, `as_bytes`, `as_view`,
-  `into_view`, eligible fixed-field setters, and mutable byte-range accessors;
-- `PacketBuilder<'value>` with `new`, fluent field inputs, and `build_into`;
-- `PacketError`, `PacketMutationError`, and `PacketWriteError`.
+`Packet::view(bytes)` is a request only. Call exactly one terminal:
+`with_remainder()` returns `(Packet<'wire>, &'wire [u8])`; `without_trailing()`
+rejects a suffix. A terminal structurally parses once. Dynamic immutable views retain
+validated endpoints instead of recomputing them in getters. `as_bytes()` is exactly
+the representation, excluding any `with_remainder` suffix.
 
-Fixed layouts also expose `Packet::WIDTH`. Prefix fields generate both `field()` for the
-decoded value and `field_raw()` for the exact validated raw wire bytes (the original wire
-representation). A bit projection
-generates a getter with the projection name. A mapped field generates `field()` for its
-semantic type and `field_raw()` for its raw codec type. If mutable, it generates both
-`set_field(semantic)` and `set_field_raw(raw)`. Its builder generates `field(semantic)` and
-`field_raw(raw)`; both set the same slot, so the last call wins. A mapped byte-range
-source has both getters but no setter or builder input because its raw value is derived from
-the byte range.
+Mutable parsing is separate: `PacketViewMut::parse_prefix_mut` permits a suffix and
+`parse_exact_mut` rejects one. Mutable views retain the same accepted extent and
+boundaries as immutable parsing. Typed setters exist only for same-width fixed fields
+that cannot change framing; range sources, prefixes, dynamic ranges, and `buf_end`
+have no setter.
 
-A successful `with_remainder` terminal or builder returns the bounded representation and a
-disjoint suffix. `without_trailing` rejects trailing bytes. Setters and builders plan every fallible
-encoding operation before mutation; failed operations preserve caller-owned output.
+Builders use `new`, fluent inputs, and `build_into`. All fallible inputs, codec plans,
+derivations, conversion, geometry, arithmetic, and capacity checks finish before the
+first caller-output mutation. Successful builds return the bounded mutable view and a
+disjoint untouched suffix; any build error leaves the whole supplied output unchanged.
 
-Generated items inherit the layout visibility. Layout and field documentation attributes
-are preserved on their generated API owners.
+## Compile-time rejection
 
-# Compile-time validation
+The macro rejects malformed declarations and structural ambiguity before generated
+methods are type-checked. This includes mixed, duplicate, zero, or gapped explicit
+positions; missing or invalid absolute offsets; overlapping projections; generated-name
+collisions; invalid range sources; unsupported field forms; invalid static extents;
+and invalid derive/finalizer dependencies. Repeated sequences, tagged unions,
+arbitrary conditional fields, nested range schemas, and inferred absolute offsets are
+outside the grammar.
 
-The macro rejects malformed or ambiguous layouts before generated code is type-checked,
-including zero, duplicate, or gapped explicit positions; mixed placement modes; invalid
-absolute offsets; overlapping projections; generated-name collisions; invalid byte range
-sources; unsupported field forms; and arithmetic overflow in statically known extents.
+```rust,ignore
+use wire_repr::wire_repr;
 
-Repeated sequences, tagged unions, arbitrary conditional fields, and inferred absolute
-offsets are deliberately outside this macro's grammar.
+wire_repr! {
+    pub layout MixedPlacement {
+        field first: U8 { position: 1; }
+        field second: U8;
+    }
+}
+```
