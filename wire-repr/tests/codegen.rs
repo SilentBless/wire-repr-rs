@@ -176,6 +176,27 @@ pub fn handwritten_builder(output: &mut [u8], value: u16) -> bool {
     }
 }
 
+/// Generated explicit prepared-layout commit probe.
+#[inline(never)]
+pub fn generated_prepared_builder(output: &mut [u8], value: u16) -> (bool, usize) {
+    let Ok(plan) = CodegenPacketBuilder::new().word(value).prepare() else {
+        return (false, 0);
+    };
+    let encoded_len = plan.encoded_len();
+    (plan.commit_into(output).is_ok(), encoded_len)
+}
+
+/// Equivalent handwritten prepared-layout commit probe.
+#[inline(never)]
+pub fn handwritten_prepared_builder(output: &mut [u8], value: u16) -> (bool, usize) {
+    if output.len() < 2 {
+        (false, 2)
+    } else {
+        output[..2].copy_from_slice(&value.to_be_bytes());
+        (true, 2)
+    }
+}
+
 /// Generated declared-scalar getter probe.
 #[inline(never)]
 pub fn generated_scalar_getter(bytes: &[u8]) -> Option<u16> {
@@ -682,6 +703,20 @@ fn generated_probes_match_handwritten_safe_rust() {
     );
     assert_eq!(generated_output, handwritten_output);
 
+    let mut generated_prepared_output = [0; 3];
+    let mut handwritten_prepared_output = [0; 3];
+    assert_eq!(
+        black_box(generated_prepared_builder(
+            black_box(&mut generated_prepared_output),
+            black_box(0x1234)
+        )),
+        black_box(handwritten_prepared_builder(
+            black_box(&mut handwritten_prepared_output),
+            black_box(0x1234)
+        ))
+    );
+    assert_eq!(generated_prepared_output, handwritten_prepared_output);
+
     let mut generated_scalar_output = [0; 3];
     let mut handwritten_scalar_output = [0; 3];
     assert_eq!(
@@ -723,6 +758,20 @@ fn generated_probes_match_handwritten_safe_rust() {
         ))
     );
     assert_eq!(generated_short, handwritten_short);
+
+    let mut generated_prepared_short = [0x55];
+    let mut handwritten_prepared_short = [0x55];
+    assert_eq!(
+        black_box(generated_prepared_builder(
+            black_box(&mut generated_prepared_short),
+            black_box(0x1234)
+        )),
+        black_box(handwritten_prepared_builder(
+            black_box(&mut handwritten_prepared_short),
+            black_box(0x1234)
+        ))
+    );
+    assert_eq!(generated_prepared_short, handwritten_prepared_short);
 
     let mut generated_scalar_short = [0x55];
     let mut handwritten_scalar_short = [0x55];

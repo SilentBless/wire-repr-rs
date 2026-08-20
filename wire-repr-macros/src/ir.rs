@@ -51,6 +51,8 @@ pub(crate) struct LayoutData {
     pub(crate) view_mut_name: Ident,
     /// Builder name reserved for sequential rendering.
     pub(crate) builder_name: Ident,
+    /// Prepared layout-plan name reserved for fixed sequential rendering.
+    pub(crate) plan_name: Ident,
     /// Private builder byte-range input representation name.
     pub(crate) range_input_name: Ident,
     /// Mutation-error name reserved for sequential rendering.
@@ -520,6 +522,12 @@ fn normalize_layout(
         "layout builder",
         errors,
     )?;
+    let plan_name = generated_ident(
+        &(stem_text.clone() + "Plan"),
+        source.name.span(),
+        "prepared layout plan",
+        errors,
+    )?;
     let range_input_name = generated_ident(
         &(stem_text.clone() + "BuilderRangeInput"),
         source.name.span(),
@@ -554,6 +562,7 @@ fn normalize_layout(
         &error_name,
         &view_mut_name,
         &builder_name,
+        &plan_name,
         &range_input_name,
         &mutation_error_name,
         &write_error_name,
@@ -1437,6 +1446,7 @@ fn normalize_layout(
         error_name,
         view_mut_name,
         builder_name,
+        plan_name,
         range_input_name,
         mutation_error_name,
         write_error_name,
@@ -1523,7 +1533,8 @@ fn normalize_contexts(
     }
     for context in &result {
         let name = normalized_name(&context.setter_name);
-        if matches!(name.as_str(), "new" | "build_into") || occupied.contains_key(&name) {
+        if matches!(name.as_str(), "new" | "prepare" | "build_into") || occupied.contains_key(&name)
+        {
             push(
                 errors,
                 Error::new(
@@ -1962,7 +1973,7 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
         !field.is_derived_range_source && field.derivation.is_none() && field.finalization.is_none()
     }) {
         let name = normalized_name(&field.name);
-        if matches!(name.as_str(), "new" | "build_into") {
+        if matches!(name.as_str(), "new" | "prepare" | "build_into") {
             push(
                 errors,
                 Error::new(
@@ -2038,7 +2049,7 @@ fn validate_fixed_layout_namespace(fields: &[Field], errors: &mut Option<Error>)
                 ),
             );
         }
-        if matches!(name.as_str(), "new" | "build_into") {
+        if matches!(name.as_str(), "new" | "prepare" | "build_into") {
             push(
                 errors,
                 Error::new(
@@ -2687,6 +2698,7 @@ mod tests {
     fn fixed_sequential_names_normalize_and_reject_builder_and_setter_collisions() {
         error("layout H { as_view @ 1: U8; }", "reserved generated");
         error("layout H { new @ 1: U8; }", "generated builder");
+        error("layout H { prepare @ 1: U8; }", "generated builder");
         error("layout H { build_into @ 1: U8; }", "generated builder");
         error(
             "layout H { set_value @ 1: U8; value @ 2: U8; }",
@@ -2703,6 +2715,10 @@ mod tests {
         );
         error(
             "layout Header { value @ 1: U8; } layout HeaderViewRequest { value @ 1: U8; }",
+            "generated layout name collision",
+        );
+        error(
+            "layout Header { value @ 1: U8; } layout HeaderPlan { value @ 1: U8; }",
             "generated layout name collision",
         );
     }

@@ -20,6 +20,7 @@ PAIRS = (
     ("projection", "generated_projection", "handwritten_projection", True, 8),
     ("mutation", "generated_mutation", "handwritten_mutation", True, 4),
     ("builder", "generated_builder", "handwritten_builder", False, 4),
+    ("prepared_builder", "generated_prepared_builder", "handwritten_prepared_builder", False, 4),
     ("scalar_getter", "generated_scalar_getter", "handwritten_scalar_getter", True, 8),
     ("scalar_mutation", "generated_scalar_mutation", "handwritten_scalar_mutation", True, 4),
     ("scalar_builder", "generated_scalar_builder", "handwritten_scalar_builder", True, 4),
@@ -38,6 +39,10 @@ PAIRS = (
     ("terminal_existing_range_builder", "generated_terminal_existing_range_builder", "handwritten_terminal_existing_range_builder", False, 4),
 )
 ALLOWED_OVERHEAD = {
+    # The generated prepared probe returns its observable fixed encoded length through
+    # two tuple-construction instructions; LLVM propagates the handwritten constant
+    # into callsites instead. Commit branches, stores, and calls remain identical.
+    "prepared_builder": {"instructions": 2},
     "relative_range_mutation": {"instructions": 2},
     "absolute_range_getter": {"instructions": 2},
 }
@@ -54,6 +59,11 @@ FORBIDDEN_MARKERS = ("__rust_alloc", "__rust_realloc", "__rust_dealloc", "vtable
 def command(root: Path, target: str) -> None:
     environment = os.environ.copy()
     environment["CARGO_TARGET_DIR"] = str(root / "target" / "codegen-gate")
+    if sys.platform == "darwin" and target.endswith("-unknown-linux-gnu"):
+        linker_variable = f"CARGO_TARGET_{target.upper().replace('-', '_')}_LINKER"
+        # LLVM IR and assembly are emitted before Cargo's mandatory final link.
+        # A Linux userspace is unavailable on macOS and the probe binary is never run.
+        environment.setdefault(linker_variable, "/usr/bin/true")
     subprocess.run(
         [
             "cargo",

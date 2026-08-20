@@ -7,7 +7,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use wire_repr::{EncodePlan, FixedCodec, wire_repr};
+use wire_repr::{EncodePlan, FixedCodec, OutputTooShortError, wire_repr};
 
 /// A borrowed two-byte builder value.
 #[derive(Debug, PartialEq, Eq)]
@@ -151,6 +151,32 @@ impl FixedCodec for WrongPlan {
     }
 }
 
+/// Counts plans requested by the prepared-layout coverage codec.
+static PREPARED_PLAN_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// A codec whose plan retains its borrowed input until commit.
+struct PreparedBorrowing;
+
+impl FixedCodec for PreparedBorrowing {
+    type Value<'wire>
+        = Borrowed<'wire>
+    where
+        Self: 'wire;
+    type EncodeError = Infallible;
+    type Plan<'value>
+        = &'value [u8]
+    where
+        Self: 'value;
+    const WIDTH: usize = 2;
+    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
+        Borrowed(bytes)
+    }
+    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
+        PREPARED_PLAN_CALLS.fetch_add(1, Ordering::Relaxed);
+        Ok(value.0)
+    }
+}
+
 wire_repr! {
     /// A mixed physical-order layout with opaque spacing.
     pub layout Mixed {
@@ -197,6 +223,13 @@ wire_repr! {
         first @ 2: crate::Failing;
         /// The second declared field, physically first.
         second @ 1: crate::Failing;
+    }
+
+    /// A layout used to exercise explicit prepared commits.
+    pub layout PreparedPacket {
+        head @ 1: U8;
+        padding(1) @ 2;
+        payload @ 3: crate::PreparedBorrowing;
     }
 }
 
@@ -369,4 +402,49 @@ fn builder_plan_errors_follow_declaration_order() {
         ))
     ));
     assert_eq!(output, [0x3c; 2]);
+}
+
+#[test]
+fn prepared_layouts_preflight_once_and_commit_without_replanning() {
+    let missing = ProblemBuilder::new().wrong(2).prepare();
+    assert!(matches!(
+        missing,
+        Err(ProblemWriteError::MissingField { field: "failing" })
+    ));
+    let rejected = ProblemBuilder::new().failing(0).wrong(2).prepare();
+    assert!(matches!(
+        rejected,
+        Err(ProblemWriteError::FieldFailing(EncodeError::Rejected))
+    ));
+
+    PREPARED_PLAN_CALLS.store(0, Ordering::Relaxed);
+    let payload = [0xca, 0xfe];
+    let plan = PreparedPacketBuilder::new()
+        .head(7)
+        .payload(Borrowed(&payload))
+        .prepare()
+        .expect("preparation does not require a destination");
+    assert_eq!(plan.encoded_len(), 4);
+    assert_eq!(PREPARED_PLAN_CALLS.load(Ordering::Relaxed), 1);
+
+    let mut short = [0x55; 3];
+    assert!(matches!(
+        plan.commit_into(&mut short),
+        Err(OutputTooShortError {
+            required: 4,
+            available: 3
+        })
+    ));
+    assert_eq!(short, [0x55; 3]);
+
+    let plan = PreparedPacketBuilder::new()
+        .head(7)
+        .payload(Borrowed(&payload))
+        .prepare()
+        .expect("a fresh plan commits once");
+    let mut output = [0, 0xaa, 0, 0, 0x99];
+    let (view, suffix) = plan.commit_into(&mut output).expect("enough output");
+    assert_eq!(view.as_bytes(), &[7, 0xaa, 0xca, 0xfe]);
+    assert_eq!(suffix, [0x99]);
+    assert_eq!(PREPARED_PLAN_CALLS.load(Ordering::Relaxed), 2);
 }

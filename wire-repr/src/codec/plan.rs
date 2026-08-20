@@ -15,6 +15,49 @@ pub trait EncodePlan {
     fn write_into(&self, output: &mut [u8]);
 }
 
+/// A prepared layout encoding that can be committed into an output buffer.
+///
+/// Preparation performs every fallible codec operation. Implementations only check
+/// output capacity and copy already-prepared encodings when committed.
+pub trait PreparedLayout {
+    /// The mutable view returned over the committed layout bytes.
+    type ViewMut<'output>;
+
+    /// Returns the exact number of output bytes required for this layout.
+    #[must_use]
+    fn encoded_len(&self) -> usize;
+
+    /// Commits this prepared layout into the leading output bytes.
+    ///
+    /// Extra output bytes are returned as a disjoint suffix. A short output is left
+    /// unchanged.
+    fn commit_into<'output>(
+        self,
+        output: &'output mut [u8],
+    ) -> Result<(Self::ViewMut<'output>, &'output mut [u8]), OutputTooShortError>;
+}
+
+/// Reports that an output buffer cannot contain a prepared layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputTooShortError {
+    /// The exact number of bytes required by the prepared layout.
+    pub required: usize,
+    /// The number of bytes available in the supplied output buffer.
+    pub available: usize,
+}
+
+impl core::fmt::Display for OutputTooShortError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            formatter,
+            "output too short: need {} bytes, got {}",
+            self.required, self.available
+        )
+    }
+}
+
+impl core::error::Error for OutputTooShortError {}
+
 impl<const N: usize> EncodePlan for [u8; N] {
     #[inline]
     fn encoded_len(&self) -> usize {
