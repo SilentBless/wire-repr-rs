@@ -21,6 +21,7 @@ PAIRS = (
     ("mutation", "generated_mutation", "handwritten_mutation", True, 4),
     ("builder", "generated_builder", "handwritten_builder", False, 4),
     ("prepared_builder", "generated_prepared_builder", "handwritten_prepared_builder", False, 4),
+    ("absolute_prepared_builder", "generated_absolute_prepared_builder", "handwritten_absolute_prepared_builder", False, 4),
     ("scalar_getter", "generated_scalar_getter", "handwritten_scalar_getter", True, 8),
     ("scalar_mutation", "generated_scalar_mutation", "handwritten_scalar_mutation", True, 4),
     ("scalar_builder", "generated_scalar_builder", "handwritten_scalar_builder", True, 4),

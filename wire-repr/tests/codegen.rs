@@ -46,6 +46,14 @@ wire_repr! {
         };
     }
 
+    /// A sparse fixed absolute layout used only by the release-codegen gate.
+    pub absolute layout CodegenAbsolutePacket {
+        /// The trailing big-endian word.
+        word @ 3: BeU16;
+        /// The leading byte.
+        head @ 0: U8;
+    }
+
     /// A compact nominal-scalar layout used only by the release-codegen gate.
     pub layout CodegenScalarPacket {
         /// The nominal big-endian word under test.
@@ -194,6 +202,31 @@ pub fn handwritten_prepared_builder(output: &mut [u8], value: u16) -> (bool, usi
     } else {
         output[..2].copy_from_slice(&value.to_be_bytes());
         (true, 2)
+    }
+}
+
+/// Generated fixed-absolute prepared-layout commit probe.
+#[inline(never)]
+pub fn generated_absolute_prepared_builder(output: &mut [u8], head: u8, value: u16) -> bool {
+    let Ok(plan) = CodegenAbsolutePacketBuilder::new()
+        .word(value)
+        .head(head)
+        .prepare()
+    else {
+        return false;
+    };
+    plan.commit_into(output).is_ok()
+}
+
+/// Equivalent handwritten fixed-absolute prepared-layout commit probe.
+#[inline(never)]
+pub fn handwritten_absolute_prepared_builder(output: &mut [u8], head: u8, value: u16) -> bool {
+    if output.len() < 5 {
+        false
+    } else {
+        output[0] = head;
+        output[3..5].copy_from_slice(&value.to_be_bytes());
+        true
     }
 }
 
@@ -716,6 +749,49 @@ fn generated_probes_match_handwritten_safe_rust() {
         ))
     );
     assert_eq!(generated_prepared_output, handwritten_prepared_output);
+
+    let mut generated_absolute_prepared_output = [0xa5; 6];
+    let mut handwritten_absolute_prepared_output = [0xa5; 6];
+    assert_eq!(
+        black_box(generated_absolute_prepared_builder(
+            black_box(&mut generated_absolute_prepared_output),
+            black_box(0x12),
+            black_box(0x3456)
+        )),
+        black_box(handwritten_absolute_prepared_builder(
+            black_box(&mut handwritten_absolute_prepared_output),
+            black_box(0x12),
+            black_box(0x3456)
+        ))
+    );
+    assert_eq!(
+        generated_absolute_prepared_output,
+        handwritten_absolute_prepared_output
+    );
+    assert_eq!(
+        generated_absolute_prepared_output,
+        [0x12, 0xa5, 0xa5, 0x34, 0x56, 0xa5]
+    );
+
+    let mut generated_absolute_prepared_short = [0xa5; 4];
+    let mut handwritten_absolute_prepared_short = [0xa5; 4];
+    assert_eq!(
+        black_box(generated_absolute_prepared_builder(
+            black_box(&mut generated_absolute_prepared_short),
+            black_box(0x12),
+            black_box(0x3456)
+        )),
+        black_box(handwritten_absolute_prepared_builder(
+            black_box(&mut handwritten_absolute_prepared_short),
+            black_box(0x12),
+            black_box(0x3456)
+        ))
+    );
+    assert_eq!(
+        generated_absolute_prepared_short,
+        handwritten_absolute_prepared_short
+    );
+    assert_eq!(generated_absolute_prepared_short, [0xa5; 4]);
 
     let mut generated_scalar_output = [0; 3];
     let mut handwritten_scalar_output = [0; 3];

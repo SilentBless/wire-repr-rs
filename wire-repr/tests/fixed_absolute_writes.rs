@@ -6,12 +6,13 @@ use core::{
     convert::Infallible,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use wire_repr::{EncodePlan, FixedCodec, wire_repr};
+use wire_repr::{EncodePlan, FixedCodec, OutputTooShortError, wire_repr};
 
 #[derive(Debug, PartialEq, Eq)]
-struct Borrowed<'wire>(&'wire [u8]);
+struct Borrowed<'wire>(&'wire [u8; 2]);
 
 struct Borrowing;
+static BORROWING_PLANS: AtomicUsize = AtomicUsize::new(0);
 impl FixedCodec for Borrowing {
     type Value<'wire>
         = Borrowed<'wire>
@@ -19,15 +20,20 @@ impl FixedCodec for Borrowing {
         Self: 'wire;
     type EncodeError = Infallible;
     type Plan<'value>
-        = [u8; 2]
+        = &'value [u8]
     where
         Self: 'value;
     const WIDTH: usize = 2;
     fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
-        Borrowed(bytes)
+        Borrowed(
+            bytes
+                .try_into()
+                .expect("fixed codec receives its exact declared width"),
+        )
     }
     fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
-        Ok([value.0[0], value.0[1]])
+        BORROWING_PLANS.fetch_add(1, Ordering::Relaxed);
+        Ok(value.0)
     }
 }
 
@@ -333,4 +339,93 @@ fn structural_errors_precede_missing_values_and_planning() {
     ));
     assert_eq!(WIDE_PLANS.load(Ordering::Relaxed), 0);
     assert_eq!(output, [0xa5]);
+}
+
+#[test]
+fn prepared_absolute_layouts_preflight_once_and_commit_without_replanning() {
+    let borrowed = [0xca, 0xfe];
+
+    assert!(matches!(
+        ProblemBuilder::new().wrong(2).prepare(),
+        Err(ProblemWriteError::MissingField { field: "first" })
+    ));
+    assert!(matches!(
+        ProblemBuilder::new().first(0).wrong(2).prepare(),
+        Err(ProblemWriteError::FieldFirst(PlanError::Rejected))
+    ));
+    assert!(matches!(
+        ProblemBuilder::new().first(1).wrong(2).prepare(),
+        Err(ProblemWriteError::InvalidPlanLength {
+            field: "wrong",
+            expected: 2,
+            actual: 1
+        })
+    ));
+
+    ZERO_PLANS.store(0, Ordering::Relaxed);
+    assert!(matches!(
+        ZeroLayoutBuilder::new().prepare(),
+        Err(ZeroLayoutWriteError::InvalidCodecWidth { offset: 3 })
+    ));
+    assert_eq!(ZERO_PLANS.load(Ordering::Relaxed), 0);
+    HUGE_PLANS.store(0, Ordering::Relaxed);
+    assert!(matches!(
+        OverflowLayoutBuilder::new().huge(0).prepare(),
+        Err(OverflowLayoutWriteError::InvalidCodecExtent { offset: 1, width }) if width == usize::MAX
+    ));
+    assert_eq!(HUGE_PLANS.load(Ordering::Relaxed), 0);
+    WIDE_PLANS.store(0, Ordering::Relaxed);
+    assert!(matches!(
+        OverlapLayoutBuilder::new().wide(1).later(2).prepare(),
+        Err(OverlapLayoutWriteError::OverlappingFields {
+            earlier_offset: 0,
+            later_offset: 2
+        })
+    ));
+    assert_eq!(WIDE_PLANS.load(Ordering::Relaxed), 0);
+
+    BORROWING_PLANS.store(0, Ordering::Relaxed);
+    let plan = PacketBuilder::new()
+        .tail(0x1234)
+        .borrowed(Borrowed(&borrowed))
+        .head(7)
+        .prepare()
+        .expect("preparation does not require a destination");
+    assert_eq!(plan.encoded_len(), 6);
+    assert_eq!(BORROWING_PLANS.load(Ordering::Relaxed), 1);
+
+    let mut short = [0x55; 5];
+    assert!(matches!(
+        plan.commit_into(&mut short),
+        Err(OutputTooShortError {
+            required: 6,
+            available: 5
+        })
+    ));
+    assert_eq!(short, [0x55; 5]);
+    assert_eq!(BORROWING_PLANS.load(Ordering::Relaxed), 1);
+
+    let plan = PacketBuilder::new()
+        .tail(0x1234)
+        .borrowed(Borrowed(&borrowed))
+        .head(7)
+        .prepare()
+        .expect("a fresh borrowed plan commits into the exact extent");
+    let mut exact = [0xde, 0xaa, 0xbb, 0xcc, 0xad, 0xbe];
+    let (view, suffix) = plan.commit_into(&mut exact).expect("exact output");
+    assert_eq!(view.as_bytes(), &[7, 0xca, 0xfe, 0xcc, 0x12, 0x34]);
+    assert!(suffix.is_empty());
+    assert_eq!(BORROWING_PLANS.load(Ordering::Relaxed), 2);
+
+    let plan = PacketBuilder::new()
+        .tail(0x1234)
+        .borrowed(Borrowed(&borrowed))
+        .head(7)
+        .prepare()
+        .expect("a fresh borrowed plan commits with a suffix");
+    let mut output = [0xde, 0xaa, 0xbb, 0xcc, 0xad, 0xbe, 0x99];
+    let (view, suffix) = plan.commit_into(&mut output).expect("extra output");
+    assert_eq!(view.as_bytes(), &[7, 0xca, 0xfe, 0xcc, 0x12, 0x34]);
+    assert_eq!(suffix, [0x99]);
+    assert_eq!(BORROWING_PLANS.load(Ordering::Relaxed), 3);
 }

@@ -17,6 +17,7 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
     let error_name = &data.error_name;
     let view_mut_name = &data.view_mut_name;
     let builder_name = &data.builder_name;
+    let plan_name = &data.plan_name;
     let mutation_error_name = &data.mutation_error_name;
     let write_error_name = &data.write_error_name;
     let widths = layout.offset_order.iter().filter_map(|&index| {
@@ -99,6 +100,17 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
             }
         })
     }).collect();
+    let plan_fields = data.fields.iter().enumerate().filter_map(|(index, field)| {
+        let codec = effective_fixed_codec_tokens(field)?;
+        let plan = plan_ident(index);
+        Some(quote! { #plan: <#codec as ::wire_repr::FixedCodec>::Plan<'value> })
+    });
+    let plan_names: Vec<_> = data
+        .fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| field.codec().map(|_| plan_ident(index)))
+        .collect();
     let commits = layout.offset_order.iter().filter_map(|&index| {
         let field = &data.fields[index];
         let codec = effective_fixed_codec_tokens(field)?;
@@ -228,22 +240,53 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
         #[doc = "An atomic fluent builder for a fixed absolute-offset wire layout."]
         #(#docs)*
         #visibility struct #builder_name<'value> { #(#builder_fields,)* }
+
+        #[doc = "A prepared fixed absolute-offset layout encoding."]
+        #visibility struct #plan_name<'value> { #(#plan_fields,)* }
+
+        impl<'value> #plan_name<'value> {
+            #[doc = "Returns the exact number of bytes required by this prepared layout."]
+            #[must_use]
+            #[inline]
+            #visibility const fn encoded_len(&self) -> usize { #layout_name::WIDTH }
+            #[doc = "Commits this prepared layout into the leading output bytes."]
+            #[inline]
+            #visibility fn commit_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), ::wire_repr::OutputTooShortError> {
+                <Self as ::wire_repr::PreparedLayout>::commit_into(self, output)
+            }
+        }
+        impl<'value> ::wire_repr::PreparedLayout for #plan_name<'value> {
+            type ViewMut<'output> = #view_mut_name<'output>;
+            #[inline]
+            fn encoded_len(&self) -> usize { #layout_name::WIDTH }
+            #[inline]
+            fn commit_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), ::wire_repr::OutputTooShortError> {
+                let needed = #layout_name::WIDTH;
+                if output.len() < needed { return Err(::wire_repr::OutputTooShortError { required: needed, available: output.len() }); }
+                let (bytes, suffix) = output.split_at_mut(needed);
+                let Self { #(#plan_names,)* } = self;
+                #(#commits)*
+                Ok((#view_mut_name { bytes }, suffix))
+            }
+        }
+
         impl<'value> #builder_name<'value> {
             #[doc = "Creates an empty builder."]
             #[must_use]
             #visibility fn new() -> Self { Self { #(#builder_initializers,)* } }
             #(#fluent_methods)*
-            #[doc = "Preflights every field, then writes this layout into the leading output bytes."]
+            #[doc = "Prepares every field for a later output-buffer commit."]
             #[inline]
-            #visibility fn build_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), #write_error_name> {
+            #visibility fn prepare(self) -> ::core::result::Result<#plan_name<'value>, #write_error_name> {
                 let Self { #(#destructured,)* .. } = self;
                 #(#write_width)* #(#write_extents)* #(#write_overlaps)*
                 #(#missing)* #(#preflight)*
-                let needed = #layout_name::WIDTH;
-                if output.len() < needed { return Err(#write_error_name::OutputTooShort { needed, available: output.len() }); }
-                let (bytes, suffix) = output.split_at_mut(needed);
-                #(#commits)*
-                Ok((#view_mut_name { bytes }, suffix))
+                Ok(#plan_name { #(#plan_names,)* })
+            }
+            #[doc = "Preflights every field, then writes this layout into the leading output bytes."]
+            #[inline]
+            #visibility fn build_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), #write_error_name> {
+                self.prepare()?.commit_into(output).map_err(|error| #write_error_name::OutputTooShort { needed: error.required, available: error.available })
             }
         }
 
