@@ -235,9 +235,10 @@ type. `buf_end` is the represented extent, not destination capacity.
 ## Generated surface and framing
 
 For `layout Packet`, the macro generates `Packet<'wire>`, `PacketViewMut<'wire>`,
-`PacketBuilder<'value>`, `PacketError`, `PacketMutationError`, and `PacketWriteError`.
-Fixed layouts also have `Packet::WIDTH`. Layout and field documentation attributes are
-copied to their generated API owners, and generated items inherit layout visibility.
+`PacketBuilder<'value>`, `PacketPlan<'value>`, `PacketError`, `PacketMutationError`, and
+`PacketWriteError`. Fixed layouts also have `Packet::WIDTH`. Layout and field
+documentation attributes are copied to their generated API owners, and generated
+items inherit layout visibility.
 
 `Packet::view(bytes)` is a request only. Call exactly one terminal:
 `with_remainder()` returns `(Packet<'wire>, &'wire [u8])`; `without_trailing()`
@@ -251,10 +252,14 @@ boundaries as immutable parsing. Typed setters exist only for same-width fixed f
 that cannot change framing; range sources, self-delimiting codecs, dynamic ranges, and
 `remaining_bytes` have no setter.
 
-Builders use `new`, fluent inputs, and `build_into`. All fallible inputs, codec plans,
-derivations, conversion, geometry, arithmetic, and capacity checks finish before the
-first caller-output mutation. Successful builds return the bounded mutable view and a
-disjoint untouched suffix; any build error leaves the whole supplied output unchanged.
+Builders use `new`, fluent inputs, `prepare`, and `build_into`. `prepare` completes all
+fallible inputs, codec plans, derivations, conversion, and dynamic geometry without an
+output buffer, returning a layout-specific prepared plan. Its `encoded_len()` reports
+the exact represented length, and consuming `commit_into(output)` writes the leading
+represented bytes. A short commit returns `OutputTooShortError` and leaves output
+unchanged; a successful commit returns the bounded mutable view and a disjoint
+untouched suffix. `build_into` preserves the same atomic behavior by preparing and
+committing in one call, mapping a short commit to the layout write error.
 
 ## Compile-time rejection
 

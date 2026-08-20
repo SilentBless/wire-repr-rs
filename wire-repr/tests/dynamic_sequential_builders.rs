@@ -1,8 +1,11 @@
+use core::cell::Cell;
 use core::convert::Infallible;
 use core::num::NonZeroUsize;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use wire_repr::{EncodePlan, FixedCodec, PrefixCodec, PrefixExtent, wire_repr};
+use wire_repr::{
+    EncodePlan, FixedCodec, OutputTooShortError, PrefixCodec, PrefixExtent, wire_repr,
+};
 
 struct TwoBytePrefix;
 
@@ -414,7 +417,12 @@ pub fn finalize_represented_length(bytes: &[u8]) -> u8 {
     bytes.len() as u8
 }
 
+std::thread_local! {
+    static EXISTING_FINALIZER_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
 pub fn finalize_existing_sum(bytes: &[u8]) -> u8 {
+    EXISTING_FINALIZER_CALLS.with(|calls| calls.set(calls.get() + 1));
     bytes.iter().copied().fold(0, u8::wrapping_add)
 }
 
@@ -1022,6 +1030,26 @@ fn capacity_failure_happens_after_each_plan_and_before_every_write() {
     assert_eq!(CAPACITY_SECOND_PLANS.load(Ordering::Relaxed), 1);
     assert_eq!(CAPACITY_WRITES.load(Ordering::Relaxed), 0);
     assert_eq!(output, initial);
+
+    CAPACITY_FIRST_PLANS.store(0, Ordering::Relaxed);
+    CAPACITY_SECOND_PLANS.store(0, Ordering::Relaxed);
+    let plan = CapacityCheckBuilder::new()
+        .first(1)
+        .second(2)
+        .dynamic(0x33)
+        .prepare()
+        .expect("preflight succeeds without capacity");
+    assert_eq!(plan.encoded_len(), 4);
+    assert_eq!(CAPACITY_FIRST_PLANS.load(Ordering::Relaxed), 1);
+    assert_eq!(CAPACITY_SECOND_PLANS.load(Ordering::Relaxed), 1);
+
+    let mut output = [0xa5; 5];
+    let (view, suffix) = plan.commit_into(&mut output).expect("extra output commits");
+    assert_eq!(view.as_bytes(), &[1, 2, 0xf0, 0x33]);
+    assert_eq!(suffix, &[0xa5]);
+    assert_eq!(CAPACITY_FIRST_PLANS.load(Ordering::Relaxed), 1);
+    assert_eq!(CAPACITY_SECOND_PLANS.load(Ordering::Relaxed), 1);
+    assert_eq!(CAPACITY_WRITES.load(Ordering::Relaxed), 2);
 }
 
 #[test]
@@ -1352,6 +1380,158 @@ fn borrowed_non_finalizer_value_remains_supported() {
         .unwrap();
     assert_eq!(view.as_bytes(), &[0x10, 0x20, 0x30, 0xa5]);
     assert_eq!(suffix, &[0xfe]);
+}
+
+#[test]
+fn dynamic_prepared_plans_expose_mixed_geometry_without_an_output() {
+    let plan = StemBuilder::new()
+        .tail(0x1234)
+        .tag(0xa1)
+        .prefix(0x55)
+        .body(&[0xaa, 0xbb])
+        .prepare()
+        .expect("preparation does not require a destination");
+    assert_eq!(plan.encoded_len(), 10);
+}
+
+#[test]
+fn dynamic_prepared_plans_retain_preflight_errors_and_precedence() {
+    MISSING_PLANS.store(0, Ordering::Relaxed);
+    assert!(matches!(
+        MissingOrderBuilder::new().prepare(),
+        Err(MissingOrderWriteError::MissingField { field: "later" })
+    ));
+    assert_eq!(MISSING_PLANS.load(Ordering::Relaxed), 0);
+    assert!(matches!(
+        ContextFinalizationBuilder::new().tag(0x44).prepare(),
+        Err(ContextFinalizationWriteError::MissingContext { context: "seed" })
+    ));
+
+    ZERO_WIDTH_PLANS.store(0, Ordering::Relaxed);
+    assert!(matches!(
+        ZeroWidthBeforeInputsBuilder::new().prepare(),
+        Err(ZeroWidthBeforeInputsWriteError::InvalidCodecWidth { position: 1 })
+    ));
+    assert_eq!(ZERO_WIDTH_PLANS.load(Ordering::Relaxed), 0);
+
+    assert!(matches!(
+        SharedRangesBuilder::new()
+            .first(&[1])
+            .second(&[2, 3])
+            .prepare(),
+        Err(SharedRangesWriteError::ConflictingRangeSources {
+            source_position: 1,
+            first_range_position: 2,
+            conflicting_range_position: 3,
+            expected: 1,
+            actual: 2,
+        })
+    ));
+    assert!(matches!(
+        ReverseFailureBuilder::new().body(&[0; 256]).prepare(),
+        Err(ReverseFailureWriteError::InvalidRangeSource {
+            position: 2,
+            source_position: 1,
+            value: 256,
+        })
+    ));
+    assert!(matches!(
+        OrdinaryPlanningFailureBuilder::new()
+            .value(1)
+            .dynamic(0)
+            .prepare(),
+        Err(OrdinaryPlanningFailureWriteError::FieldValue(
+            PlanError::Rejected
+        ))
+    ));
+    assert!(matches!(
+        WrongFixedPlanningBuilder::new()
+            .value(1)
+            .dynamic(0)
+            .prepare(),
+        Err(WrongFixedPlanningWriteError::InvalidPlanLength {
+            field: "value",
+            expected: 2,
+            actual: 1,
+        })
+    ));
+    assert!(matches!(
+        EmptyPrefixPlanningBuilder::new().value(()).prepare(),
+        Err(EmptyPrefixPlanningWriteError::InvalidPrefixPlanLength { field: "value" })
+    ));
+    assert!(matches!(
+        OverflowAfterPrefixBuilder::new()
+            .prefix(())
+            .tail(1)
+            .prepare(),
+        Err(OverflowAfterPrefixWriteError::InvalidLayoutExtent {
+            position: 2,
+            offset: usize::MAX,
+            advance: 1,
+        })
+    ));
+    assert!(matches!(
+        DerivedAssemblyBuilder::new()
+            .tag(1)
+            .options(&[0; 255])
+            .payload_existing(1)
+            .prepare(),
+        Err(DerivedAssemblyWriteError::DeriveFieldTotal(
+            DeriveFailure::Rejected
+        ))
+    ));
+}
+
+#[test]
+fn short_prepared_commits_do_not_write_or_finalize_and_existing_ranges_remain_visible() {
+    EXISTING_FINALIZER_CALLS.with(|calls| calls.set(0));
+    let plan = ExistingFinalizerSpanBuilder::new()
+        .body_existing(2)
+        .prepare()
+        .expect("existing range preparation needs no output");
+    assert_eq!(plan.encoded_len(), 4);
+    let initial = [0xfe, 0x10, 0x20];
+    let mut short = initial;
+    assert!(matches!(
+        plan.commit_into(&mut short),
+        Err(OutputTooShortError {
+            required: 4,
+            available: 3,
+        })
+    ));
+    assert_eq!(short, initial);
+    assert_eq!(EXISTING_FINALIZER_CALLS.with(|calls| calls.get()), 0);
+
+    let plan = ExistingFinalizerSpanBuilder::new()
+        .body_existing(2)
+        .prepare()
+        .expect("a fresh plan commits once");
+    let mut output = [0xfe, 0x10, 0x20, 0xfe, 0xa5];
+    let (view, suffix) = plan.commit_into(&mut output).expect("enough output");
+    assert_eq!(view.as_bytes(), &[2, 0x10, 0x20, 0x30]);
+    assert_eq!(view.body(), &[0x10, 0x20]);
+    assert_eq!(view.checksum(), 0x30);
+    assert_eq!(suffix, &[0xa5]);
+    assert_eq!(output, [2, 0x10, 0x20, 0x30, 0xa5]);
+    assert_eq!(EXISTING_FINALIZER_CALLS.with(|calls| calls.get()), 1);
+
+    let plan = RepresentedFinalizerExtentBuilder::new()
+        .header(0x44)
+        .prepare()
+        .expect("finalizer extent preparation succeeds");
+    let mut output = [0xfe; 5];
+    let (view, suffix) = plan.commit_into(&mut output).expect("extra output commits");
+    assert_eq!(view.as_bytes(), &[0x44, 2]);
+    assert_eq!(suffix, &[0xfe, 0xfe, 0xfe]);
+}
+
+#[test]
+fn non_copy_borrowed_values_remain_accepted_by_public_prepare() {
+    let plan = BorrowedNonFinalizerBuilder::new()
+        .payload(BorrowedPrefixValue(&[0x10, 0x20, 0x30]))
+        .prepare()
+        .expect("unrelated borrowed values do not require Copy");
+    assert_eq!(plan.encoded_len(), 4);
 }
 
 #[test]

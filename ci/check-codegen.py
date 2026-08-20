@@ -21,6 +21,7 @@ PAIRS = (
     ("mutation", "generated_mutation", "handwritten_mutation", True, 4),
     ("builder", "generated_builder", "handwritten_builder", False, 4),
     ("prepared_builder", "generated_prepared_builder", "handwritten_prepared_builder", False, 4),
+    ("dynamic_prepared_builder", "generated_dynamic_prepared_builder", "handwritten_dynamic_prepared_builder", False, 4),
     ("absolute_prepared_builder", "generated_absolute_prepared_builder", "handwritten_absolute_prepared_builder", False, 4),
     ("scalar_getter", "generated_scalar_getter", "handwritten_scalar_getter", True, 8),
     ("scalar_mutation", "generated_scalar_mutation", "handwritten_scalar_mutation", True, 4),
@@ -44,8 +45,19 @@ ALLOWED_OVERHEAD = {
     # two tuple-construction instructions; LLVM propagates the handwritten constant
     # into callsites instead. Commit branches, stores, and calls remain identical.
     "prepared_builder": {"instructions": 2},
+    # Safe exact slicing of private, prevalidated dynamic geometry retains one
+    # bounds-check path across the prepared-plan handoff on the pinned toolchain.
+    "dynamic_prepared_builder": {
+        "instructions": 13,
+        "calls": 1,
+        "branches": 2,
+        "panic_paths": 1,
+    },
     "relative_range_mutation": {"instructions": 2},
     "absolute_range_getter": {"instructions": 2},
+}
+ALLOWED_EXTRA_CALLEE_MARKERS = {
+    "dynamic_prepared_builder": ("slice_index_fail",),
 }
 PANIC_MARKERS = (
     "panic",
@@ -256,7 +268,14 @@ def main() -> int:
             > allowed_overhead.get(key, 0)
         }
         forbidden = [marker for marker in FORBIDDEN_MARKERS if marker in generated_body]
-        unexpected_callees = external_callees(generated_body) - external_callees(handwritten_body)
+        extra_callees = external_callees(generated_body) - external_callees(handwritten_body)
+        allowed_callee_markers = ALLOWED_EXTRA_CALLEE_MARKERS.get(label, ())
+        allowed_callees = {
+            callee
+            for callee in extra_callees
+            if any(marker in callee for marker in allowed_callee_markers)
+        }
+        unexpected_callees = extra_callees - allowed_callees
         print(
             f"{label}: generated={generated_symbol} handwritten={handwritten_symbol} "
             f"identical={identical} generated_metrics={generated_metrics} "
@@ -266,6 +285,11 @@ def main() -> int:
             failures.append(f"{label}: generated body contains forbidden codegen markers: {forbidden}")
         if unexpected_callees:
             failures.append(f"{label}: generated body has unexpected callees: {sorted(unexpected_callees)}")
+        if len(allowed_callees) > len(allowed_callee_markers):
+            failures.append(
+                f"{label}: generated body has too many allowed extra callees: "
+                f"{sorted(allowed_callees)}"
+            )
         if strict and not identical:
             failures.append(f"{label}: generated and handwritten optimized bodies differ")
         elif not identical and extra:

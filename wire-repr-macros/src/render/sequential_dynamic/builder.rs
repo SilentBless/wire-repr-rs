@@ -233,7 +233,23 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
 
         enum #range_input_name<'value> { Borrowed(&'value [u8]), Existing(usize) }
 
-        struct #plan_name<'value> { #(#plan_fields,)* }
+        #[doc = "A prepared dynamic sequential layout encoding."]
+        #visibility struct #plan_name<'value> { #(#plan_fields,)* }
+
+        impl<'value> #plan_name<'value> {
+            #[doc = "Returns the exact number of bytes required by this prepared layout."]
+            #[must_use]
+            #[inline]
+            #visibility fn encoded_len(&self) -> usize {
+                <Self as ::wire_repr::PreparedLayout>::encoded_len(self)
+            }
+
+            #[doc = "Commits this prepared layout into the leading output bytes."]
+            #[inline]
+            #visibility fn commit_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), ::wire_repr::OutputTooShortError> {
+                <Self as ::wire_repr::PreparedLayout>::commit_into(self, output)
+            }
+        }
 
         impl<'value> ::wire_repr::PreparedLayout for #plan_name<'value> {
             type ViewMut<'output> = #view_mut_name<'output>;
@@ -263,8 +279,9 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             #(#fluent)*
             #(#context_fluent)*
 
+            #[doc = "Prepares every field and dynamic layout extent for a later output-buffer commit."]
             #[inline]
-            fn prepare(self) -> ::core::result::Result<#plan_name<'value>, #write_error_name>
+            #visibility fn prepare(self) -> ::core::result::Result<#plan_name<'value>, #write_error_name>
             where
                 #(#copy_bounds,)*
             {

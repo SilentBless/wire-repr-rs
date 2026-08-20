@@ -1,4 +1,4 @@
-//! Release-codegen regression probes for generated fixed layouts.
+//! Release-codegen regression probes for generated layouts.
 
 use core::hint::black_box;
 use wire_repr::wire_repr;
@@ -91,6 +91,15 @@ wire_repr! {
             derive: crate::codegen_derived_total(len(payload));
             derive_error: core::convert::Infallible;
         };
+    }
+
+    /// A prepared dynamic range layout used only by the release-codegen gate.
+    pub layout CodegenPreparedDynamic {
+        tag @ 1: U8;
+        length @ 2: U8;
+        payload @ 3: bytes(length);
+        padding(1) @ 4;
+        align(4) @ 5;
     }
 
     /// A post-write-finalized layout used only by the release-codegen gate.
@@ -203,6 +212,50 @@ pub fn handwritten_prepared_builder(output: &mut [u8], value: u16) -> (bool, usi
         output[..2].copy_from_slice(&value.to_be_bytes());
         (true, 2)
     }
+}
+
+/// Generated dynamic prepared-layout probe with derived range geometry.
+#[inline(never)]
+pub fn generated_dynamic_prepared_builder(
+    output: &mut [u8],
+    tag: u8,
+    payload: &[u8],
+) -> (bool, usize) {
+    let Ok(plan) = CodegenPreparedDynamicBuilder::new()
+        .tag(tag)
+        .payload(payload)
+        .prepare()
+    else {
+        return (false, 0);
+    };
+    let encoded_len = plan.encoded_len();
+    (plan.commit_into(output).is_ok(), encoded_len)
+}
+
+/// Equivalent handwritten dynamic prepared-layout probe.
+#[inline(never)]
+pub fn handwritten_dynamic_prepared_builder(
+    output: &mut [u8],
+    tag: u8,
+    payload: &[u8],
+) -> (bool, usize) {
+    let Ok(length) = u8::try_from(payload.len()) else {
+        return (false, 0);
+    };
+    let Some(after_padding) = payload.len().checked_add(3) else {
+        return (false, 0);
+    };
+    let padding = (4 - after_padding % 4) % 4;
+    let Some(encoded_len) = after_padding.checked_add(padding) else {
+        return (false, 0);
+    };
+    if output.len() < encoded_len {
+        return (false, encoded_len);
+    }
+    output[0] = tag;
+    output[1] = length;
+    output[2..2 + payload.len()].copy_from_slice(payload);
+    (true, encoded_len)
 }
 
 /// Generated fixed-absolute prepared-layout commit probe.
@@ -749,6 +802,47 @@ fn generated_probes_match_handwritten_safe_rust() {
         ))
     );
     assert_eq!(generated_prepared_output, handwritten_prepared_output);
+
+    let dynamic_payload = [0x10, 0x20];
+    let mut generated_dynamic_prepared = [0xa5; 9];
+    let mut handwritten_dynamic_prepared = [0xa5; 9];
+    assert_eq!(
+        black_box(generated_dynamic_prepared_builder(
+            black_box(&mut generated_dynamic_prepared),
+            black_box(0x44),
+            black_box(&dynamic_payload),
+        )),
+        black_box(handwritten_dynamic_prepared_builder(
+            black_box(&mut handwritten_dynamic_prepared),
+            black_box(0x44),
+            black_box(&dynamic_payload),
+        ))
+    );
+    assert_eq!(generated_dynamic_prepared, handwritten_dynamic_prepared);
+    assert_eq!(
+        generated_dynamic_prepared,
+        [0x44, 2, 0x10, 0x20, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5]
+    );
+
+    let mut generated_dynamic_prepared_short = [0xa5; 7];
+    let mut handwritten_dynamic_prepared_short = [0xa5; 7];
+    assert_eq!(
+        black_box(generated_dynamic_prepared_builder(
+            black_box(&mut generated_dynamic_prepared_short),
+            black_box(0x44),
+            black_box(&dynamic_payload),
+        )),
+        black_box(handwritten_dynamic_prepared_builder(
+            black_box(&mut handwritten_dynamic_prepared_short),
+            black_box(0x44),
+            black_box(&dynamic_payload),
+        ))
+    );
+    assert_eq!(
+        generated_dynamic_prepared_short,
+        handwritten_dynamic_prepared_short
+    );
+    assert_eq!(generated_dynamic_prepared_short, [0xa5; 7]);
 
     let mut generated_absolute_prepared_output = [0xa5; 6];
     let mut handwritten_absolute_prepared_output = [0xa5; 6];
