@@ -90,7 +90,9 @@ fn ihdr_and_iend_parse_exactly_preserving_raw_fields_and_suffix() {
     let mut input = IHDR.to_vec();
     input.extend_from_slice(&suffix);
 
-    let (view, parsed_suffix) = PngChunkView::parse_prefix(&input).expect("IHDR parses");
+    let (view, parsed_suffix) = PngChunk::view(&input)
+        .with_remainder()
+        .expect("IHDR parses");
     assert_eq!(view.as_bytes().len(), 25);
     assert_eq!(view.as_bytes(), IHDR);
     assert_eq!(parsed_suffix, suffix);
@@ -100,14 +102,16 @@ fn ihdr_and_iend_parse_exactly_preserving_raw_fields_and_suffix() {
     assert_eq!(view.data(), &IHDR[8..21]);
     assert_eq!(view.crc(), read_be_u32(&IHDR, 21));
     assert!(matches!(
-        PngChunkView::parse_exact(&input),
+        PngChunk::view(&input).without_trailing(),
         Err(PngChunkError::TrailingBytes {
             expected: 25,
             actual: 27
         })
     ));
 
-    let iend = PngChunkView::parse_exact(&IEND).expect("zero-length IEND parses");
+    let iend = PngChunk::view(&IEND)
+        .without_trailing()
+        .expect("zero-length IEND parses");
     assert_eq!(iend.data_length(), 0);
     assert_eq!(iend.chunk_type(), b"IEND");
     assert_eq!(iend.data(), []);
@@ -124,7 +128,9 @@ fn malformed_domains_parse_structurally_then_consumer_checks_reject_them() {
 
     let mut malformed = IEND;
     malformed[4] = b'1';
-    let chunk = PngChunkView::parse_exact(&malformed).expect("raw type is structurally opaque");
+    let chunk = PngChunk::view(&malformed)
+        .without_trailing()
+        .expect("raw type is structurally opaque");
     assert_eq!(chunk.chunk_type(), b"1END");
     assert_eq!(
         validate_chunk_type(chunk.chunk_type()),
@@ -136,7 +142,7 @@ fn malformed_domains_parse_structurally_then_consumer_checks_reject_them() {
 
     let overclaimed_data = [0, 0, 0, 1, b'I', b'E', b'N', b'D'];
     assert!(matches!(
-        PngChunkView::parse_prefix(&overclaimed_data),
+        PngChunk::view(&overclaimed_data).with_remainder(),
         Err(PngChunkError::InputTooShort {
             position: 3,
             expected: 1,
@@ -144,7 +150,7 @@ fn malformed_domains_parse_structurally_then_consumer_checks_reject_them() {
         })
     ));
     assert!(matches!(
-        PngChunkView::parse_exact(&IHDR[..20]),
+        PngChunk::view(&IHDR[..20]).without_trailing(),
         Err(PngChunkError::InputTooShort {
             position: 3,
             expected: 13,
@@ -157,14 +163,16 @@ fn malformed_domains_parse_structurally_then_consumer_checks_reject_them() {
 fn crc_stays_consumer_validation_not_layout_validation() {
     assert_eq!(crc32_iso_hdlc(&IHDR[4..21]), 0x1f15_c489);
     assert_eq!(crc32_iso_hdlc(&IEND[4..8]), 0xae42_6082);
-    let ihdr = PngChunkView::parse_exact(&IHDR).unwrap();
-    let iend = PngChunkView::parse_exact(&IEND).unwrap();
+    let ihdr = PngChunk::view(&IHDR).without_trailing().unwrap();
+    let iend = PngChunk::view(&IEND).without_trailing().unwrap();
     assert!(crc_matches(&ihdr.as_bytes()[4..21], ihdr.crc()));
     assert!(crc_matches(&iend.as_bytes()[4..8], iend.crc()));
 
     let mut wrong_crc = IHDR;
     wrong_crc[24] ^= 1;
-    let view = PngChunkView::parse_exact(&wrong_crc).expect("CRC bytes are structurally opaque");
+    let view = PngChunk::view(&wrong_crc)
+        .without_trailing()
+        .expect("CRC bytes are structurally opaque");
     assert!(!crc_matches(&view.as_bytes()[4..21], view.crc()));
 }
 

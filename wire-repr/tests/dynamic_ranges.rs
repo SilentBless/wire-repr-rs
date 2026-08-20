@@ -47,7 +47,7 @@ wire_repr! {
 #[test]
 fn fixed_lengths_frame_exact_ranges_and_preserve_caller_suffix() {
     let noncanonical = [2, b'a', b'b', 0xee, b'c', b'd', 0xff, 0xf0, 9, 0xaa];
-    let (view, suffix) = FramedView::parse_prefix(&noncanonical).unwrap();
+    let (view, suffix) = Framed::view(&noncanonical).with_remainder().unwrap();
 
     assert_eq!(view.as_bytes(), &noncanonical[..9]);
     assert_eq!(suffix, &[0xaa]);
@@ -57,7 +57,7 @@ fn fixed_lengths_frame_exact_ranges_and_preserve_caller_suffix() {
     assert_eq!(view.tail(), 9);
 
     let canonical = [2, b'a', b'b', 0xee, b'c', b'd', 0xf0, 0xf1, 9];
-    let view = FramedView::parse_exact(&canonical).unwrap();
+    let view = Framed::view(&canonical).without_trailing().unwrap();
     assert_eq!(view.length(), 2);
     assert_eq!(view.first(), b"ab");
     assert_eq!(view.second(), b"cd");
@@ -67,7 +67,7 @@ fn fixed_lengths_frame_exact_ranges_and_preserve_caller_suffix() {
 #[test]
 fn adjacent_zero_length_ranges_are_exact_and_do_not_stall_physical_progress() {
     let bytes = [0, 9];
-    let view = EmptyRangesView::parse_exact(&bytes).unwrap();
+    let view = EmptyRanges::view(&bytes).without_trailing().unwrap();
 
     assert_eq!(view.length(), 0);
     assert!(view.first().is_empty());
@@ -102,7 +102,7 @@ fn adjacent_mutable_ranges_respect_each_validated_boundary() {
 #[test]
 fn absolute_endpoints_frame_intermediate_ranges_and_preserve_later_entries() {
     let input = [3, b'a', b'b', 0xee, 9, 0xaa];
-    let (view, suffix) = AbsoluteFramedView::parse_prefix(&input).unwrap();
+    let (view, suffix) = AbsoluteFramed::view(&input).with_remainder().unwrap();
     assert_eq!(view.as_bytes(), &input[..5]);
     assert_eq!(suffix, &[0xaa]);
     assert_eq!(view.payload(), b"ab");
@@ -118,7 +118,7 @@ fn absolute_endpoints_frame_intermediate_ranges_and_preserve_later_entries() {
     assert_eq!(mutable, [3, b'A', b'B', 0xee, 9]);
 
     assert!(matches!(
-        AbsoluteFramedView::parse_prefix(&[0]),
+        AbsoluteFramed::view(&[0]).with_remainder(),
         Err(AbsoluteFramedError::RangeEndBeforeStart {
             position: 2,
             source_position: 1,
@@ -132,7 +132,7 @@ fn absolute_endpoints_frame_intermediate_ranges_and_preserve_later_entries() {
 fn conversion_and_shortage_errors_precede_later_physical_entries() {
     let too_wide = [0xff; 16];
     assert!(matches!(
-        WideLengthView::parse_prefix(&too_wide),
+        WideLength::view(&too_wide).with_remainder(),
         Err(WideLengthError::InvalidRangeSource {
             position: 2,
             source_position: 1,
@@ -141,7 +141,7 @@ fn conversion_and_shortage_errors_precede_later_physical_entries() {
 
     let short = [3, b'a'];
     assert!(matches!(
-        ShortFramedView::parse_prefix(&short),
+        ShortFramed::view(&short).with_remainder(),
         Err(ShortFramedError::InputTooShort {
             position: 2,
             expected: 3,
@@ -150,7 +150,7 @@ fn conversion_and_shortage_errors_precede_later_physical_entries() {
     ));
 
     assert!(matches!(
-        ShortFramedView::parse_prefix(&[]),
+        ShortFramed::view(&[]).with_remainder(),
         Err(ShortFramedError::InputTooShort {
             position: 1,
             expected: 1,

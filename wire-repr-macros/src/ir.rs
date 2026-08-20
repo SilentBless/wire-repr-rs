@@ -41,7 +41,11 @@ pub(crate) enum Layout {
 pub(crate) struct LayoutData {
     pub(crate) docs: Vec<Attribute>,
     pub(crate) visibility: Visibility,
-    pub(crate) view_name: Ident,
+    /// Source declaration name, emitted as the immutable layout view.
+    pub(crate) layout_name: Ident,
+    /// Fluent immutable-view request helper generated for this layout.
+    pub(crate) view_request_name: Ident,
+
     pub(crate) error_name: Ident,
     /// Mutable-view name reserved for sequential rendering.
     pub(crate) view_mut_name: Ident,
@@ -491,10 +495,11 @@ fn normalize_layout(
             ),
         );
     }
-    let view_name = generated_ident(
-        &(stem_text.clone() + "View"),
+    let layout_name = source.name.clone();
+    let view_request_name = generated_ident(
+        &(stem_text.clone() + "ViewRequest"),
         source.name.span(),
-        "layout view",
+        "layout view request",
         errors,
     )?;
     let error_name = generated_ident(
@@ -535,17 +540,18 @@ fn normalize_layout(
     )?;
     register_name(
         generated_layout_names,
-        &view_name,
+        &layout_name,
         errors,
         "generated layout name collision",
     );
     register_name(
         generated_layout_names,
-        &error_name,
+        &view_request_name,
         errors,
         "generated layout name collision",
     );
     for name in [
+        &error_name,
         &view_mut_name,
         &builder_name,
         &range_input_name,
@@ -680,10 +686,7 @@ fn normalize_layout(
                 ),
             );
         }
-        if matches!(
-            generated_stem.as_str(),
-            "parse_prefix" | "parse_exact" | "as_bytes" | "WIDTH"
-        ) {
+        if matches!(generated_stem.as_str(), "view" | "as_bytes" | "WIDTH") {
             push(
                 errors,
                 Error::new(
@@ -1430,6 +1433,7 @@ fn normalize_layout(
             || field.derivation.is_some()
             || field.finalization.is_some()
     }) || !contexts.is_empty();
+
     if kind == syntax::LayoutKind::Absolute
         || (kind == syntax::LayoutKind::Sequential && !has_dynamic)
     {
@@ -1440,7 +1444,9 @@ fn normalize_layout(
     let data = LayoutData {
         docs: source.docs,
         visibility: source.visibility,
-        view_name,
+        layout_name,
+        view_request_name,
+
         error_name,
         view_mut_name,
         builder_name,
@@ -1834,6 +1840,8 @@ fn finalizer_dependencies(target: usize, fields: &[Field]) -> Vec<usize> {
 
 fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error>) {
     let reserved = [
+        "view",
+        "as_bytes",
         "parse_prefix_mut",
         "parse_exact_mut",
         "as_view",
@@ -2023,8 +2031,7 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
 
 fn validate_fixed_layout_namespace(fields: &[Field], errors: &mut Option<Error>) {
     let reserved = [
-        "parse_prefix",
-        "parse_exact",
+        "view",
         "as_bytes",
         "WIDTH",
         "parse_prefix_mut",
@@ -2189,7 +2196,7 @@ fn normalize_projections(
         }
         if matches!(
             name_text.strip_prefix("r#").unwrap_or(&name_text),
-            "parse_prefix" | "parse_exact" | "as_bytes" | "WIDTH"
+            "view" | "as_bytes" | "WIDTH"
         ) {
             push(
                 errors,
@@ -2406,6 +2413,7 @@ mod tests {
             Err(value) => assert!(value.to_string().contains(needle), "{value}"),
         }
     }
+
     #[test]
     fn normalizes_fixed_mappings_with_physical_raw_types() {
         let names = [
@@ -2564,7 +2572,7 @@ mod tests {
             ("scalar S: crate::Other;", "custom path"),
             ("scalar S: Unknown;", "supported builtin"),
             (
-                "layout Header { field value: U8; } scalar HeaderView: U8;",
+                "layout Header { field value: U8; } scalar Header: U8;",
                 "top-level name collision",
             ),
             (
@@ -2638,7 +2646,11 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(header.data.view_name.to_string(), "HeaderView");
+        assert_eq!(header.data.layout_name.to_string(), "Header");
+        assert_eq!(
+            header.data.view_request_name.to_string(),
+            "HeaderViewRequest"
+        );
         assert_eq!(header.data.error_name.to_string(), "HeaderError");
         assert_eq!(header.data.view_mut_name.to_string(), "HeaderViewMut");
         assert_eq!(header.data.builder_name.to_string(), "HeaderBuilder");
@@ -2690,8 +2702,10 @@ mod tests {
         assert_eq!(field.name.to_string(), "r#type");
         assert_eq!(field.error_variant.to_string(), "FieldType");
 
+        assert!(model("layout Header { field r#parse_prefix: U8 { position: 1; } }").is_ok());
+        assert!(model("layout Header { field parse_exact: U8 { position: 1; } }").is_ok());
         error(
-            "layout Header { field r#parse_prefix: U8 { position: 1; } }",
+            "layout Header { field view: U8 { position: 1; } }",
             "reserved generated",
         );
     }
@@ -2724,6 +2738,10 @@ mod tests {
         );
         error(
             "layout Header { field value: U8 { position: 1; } } layout HeaderMutation { field value: U8 { position: 1; } }",
+            "generated layout name collision",
+        );
+        error(
+            "layout Header { field value: U8 { position: 1; } } layout HeaderViewRequest { field value: U8 { position: 1; } }",
             "generated layout name collision",
         );
     }
@@ -2778,10 +2796,6 @@ mod tests {
             (
                 "layout L { field foo_bar: U8 { position: 1; } field foo__bar: U8 { position: 2; } }",
                 "generated field error variant collision",
-            ),
-            (
-                "layout L { field parse_exact: U8 { position: 1; } }",
-                "reserved generated",
             ),
             (
                 "layout L { field as_bytes: U8 { position: 1; } }",
@@ -2847,14 +2861,13 @@ mod tests {
             "layout H { field flags: U8 { position: 1; projections { bits x: 1..=3; bit y: 3; } } }",
             "must not overlap",
         );
-        error(
-            "layout H { field flags: U8 { position: 1; projections { bit parse_exact: 0; } } }",
-            "reserved",
+        assert!(
+            model(
+                "layout H { field flags: U8 { position: 1; projections { bit parse_exact: 0; } } }"
+            )
+            .is_ok()
         );
-        error(
-            "layout H { field flags: U8 { position: 1; projections { bit r#parse_exact: 0; } } }",
-            "reserved",
-        );
+        assert!(model("layout H { field flags: U8 { position: 1; projections { bit r#parse_exact: 0; } } }").is_ok());
         error(
             "layout H { field flags: U8 { position: 1; projections { bit x: 0; bit x: 1; } } }",
             "conflicts",

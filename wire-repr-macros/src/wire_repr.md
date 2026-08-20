@@ -92,7 +92,7 @@ Builders derive relative lengths or absolute physical endpoints; absolute deriva
 preceding fixed/prefix widths, padding, alignment, and ranges. Derived sources have no
 fluent input or setter. Shared sources require identical derived values under the same
 algebra. `buf_end` has no source, may occur once, and must be physically last. Its
-`parse_prefix` suffix is empty; other `parse_prefix` suffixes follow the complete represented
+`with_remainder` suffix is empty; other `with_remainder` suffixes follow the complete represented
 layout, including physical entries after an absolute range. A mutable view exposes each range
 as `field_mut()`, which may change bytes but cannot resize or reframe the range. Unsupported
 variable-width-source framing, such as ULEB128 section lengths, remains consumer-owned.
@@ -243,13 +243,14 @@ than normalizing them.
 
 For a declaration named `Packet`, the macro generates:
 
-- `PacketView<'wire>` with `parse_prefix`, `parse_exact`, `as_bytes`, and field getters;
+- `Packet<'wire>` with `view(bytes).with_remainder()`,
+  `view(bytes).without_trailing()`, `as_bytes`, and field getters;
 - `PacketViewMut<'wire>` with `parse_prefix_mut`, `parse_exact_mut`, `as_bytes`, `as_view`,
   `into_view`, eligible fixed-field setters, and mutable byte-range accessors;
 - `PacketBuilder<'value>` with `new`, fluent field inputs, and `build_into`;
 - `PacketError`, `PacketMutationError`, and `PacketWriteError`.
 
-Fixed layouts also expose `PacketView::WIDTH`. Prefix fields generate both `field()` for the
+Fixed layouts also expose `Packet::WIDTH`. Prefix fields generate both `field()` for the
 decoded value and `field_raw()` for the exact validated raw wire bytes (the original wire
 representation). A bit projection
 generates a getter with the projection name. A mapped field generates `field()` for its
@@ -259,8 +260,8 @@ semantic type and `field_raw()` for its raw codec type. If mutable, it generates
 source has both getters but no setter or builder input because its raw value is derived from
 the byte range.
 
-A successful prefix parser or builder returns the bounded representation and a disjoint
-suffix. Exact parsing rejects trailing bytes. Setters and builders plan every fallible
+A successful `with_remainder` terminal or builder returns the bounded representation and a
+disjoint suffix. `without_trailing` rejects trailing bytes. Setters and builders plan every fallible
 encoding operation before mutation; failed operations preserve caller-owned output.
 
 Generated items inherit the layout visibility. Layout and field documentation attributes

@@ -28,19 +28,23 @@ fn scalars_are_nominal_fixed_codecs_and_layout_fields_use_direct_paths() {
     assert_eq!(HardwareType::decode(&[0, 1]), hardware);
 
     let input = [0, 1, 0x12, 0x34, 0x56, 0xaa];
-    let (view, suffix) = HeaderView::parse_prefix(&input).unwrap();
+    let (view, suffix) = Header::view(&input).with_remainder().unwrap();
     assert_eq!(suffix, &[0xaa]);
     assert_eq!(view.hardware_type(), hardware);
     assert_eq!(view.payload_size(), PayloadSize::new(0x12_3456));
     assert_eq!(view.as_bytes(), &input[..5]);
-    assert!(HeaderView::parse_exact(&input).is_err());
+    assert!(Header::view(&input).without_trailing().is_err());
     assert_eq!(
-        HeaderView::parse_exact(&input[..5]).unwrap().as_bytes(),
+        Header::view(&input[..5])
+            .without_trailing()
+            .unwrap()
+            .as_bytes(),
         &input[..5]
     );
 
     assert_eq!(
-        ExternalHeaderView::parse_exact(&[0x12, 0x34])
+        ExternalHeader::view(&[0x12, 0x34])
+            .without_trailing()
             .unwrap()
             .code(),
         0x1234

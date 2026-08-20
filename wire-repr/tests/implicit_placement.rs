@@ -20,10 +20,12 @@ wire_repr! {
 
 #[test]
 fn implicit_fixed_layout_normalizes_spacing_and_write_paths() {
-    assert_eq!(ImplicitFixedView::WIDTH, 5);
+    assert_eq!(ImplicitFixed::WIDTH, 5);
 
     let input = [7, 0xaa, 0xbb, 0xcc, 0x0b, 0x99];
-    let (view, suffix) = ImplicitFixedView::parse_prefix(&input).expect("valid prefix");
+    let (view, suffix) = ImplicitFixed::view(&input)
+        .with_remainder()
+        .expect("valid prefix");
     assert_eq!(view.as_bytes(), &input[..5]);
     assert_eq!(suffix, &[0x99]);
     assert_eq!(view.tag(), 7);
@@ -47,7 +49,9 @@ fn implicit_fixed_layout_normalizes_spacing_and_write_paths() {
 #[test]
 fn implicit_dynamic_layout_frames_ranges_in_declaration_order() {
     let input = [2, 0xca, 0xfe, 0x12, 0x34, 0x99];
-    let (view, suffix) = ImplicitDynamicView::parse_prefix(&input).expect("valid prefix");
+    let (view, suffix) = ImplicitDynamic::view(&input)
+        .with_remainder()
+        .expect("valid prefix");
     assert_eq!(view.as_bytes(), &input[..5]);
     assert_eq!(suffix, &[0x99]);
     assert_eq!(view.length(), 2);

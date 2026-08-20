@@ -154,7 +154,7 @@ wire_repr! {
 #[test]
 fn sequential_mappings_preserve_semantics_raw_values_and_atomic_failures() {
     let input = [0x12, 0x34, 1, 2, 3, 4, 0b0000_1011, 0x12, 0x34, 0x56, 0xee];
-    let (view, suffix) = SequentialView::parse_prefix(&input).unwrap();
+    let (view, suffix) = Sequential::view(&input).with_remainder().unwrap();
     assert_eq!(suffix, &[0xee]);
     assert_eq!(view.kind(), Kind(0x1234));
     assert_eq!(view.kind_raw(), 0x1234);
@@ -167,9 +167,12 @@ fn sequential_mappings_preserve_semantics_raw_values_and_atomic_failures() {
     assert_eq!(view.value(), Value(0x12_3456));
     assert_eq!(view.value_raw(), 0x12_3456);
     assert_eq!(view.as_bytes(), &input[..10]);
-    assert!(SequentialView::parse_exact(&input).is_err());
+    assert!(Sequential::view(&input).without_trailing().is_err());
     assert_eq!(
-        SequentialView::parse_exact(&input[..10]).unwrap().kind(),
+        Sequential::view(&input[..10])
+            .without_trailing()
+            .unwrap()
+            .kind(),
         Kind(0x1234)
     );
 
@@ -251,7 +254,7 @@ fn sequential_mappings_preserve_semantics_raw_values_and_atomic_failures() {
 #[test]
 fn absolute_mappings_use_offsets_for_both_builder_forms_and_mutation() {
     let input = [1, 2, 3, 4, 7, 0x12, 0x34, 0xff];
-    let (view, suffix) = AbsoluteView::parse_prefix(&input).unwrap();
+    let (view, suffix) = Absolute::view(&input).with_remainder().unwrap();
     assert_eq!(suffix, &[0xff]);
     assert_eq!(view.address(), Address([1, 2, 3, 4]));
     assert_eq!(view.address_raw(), [1, 2, 3, 4]);
@@ -259,7 +262,7 @@ fn absolute_mappings_use_offsets_for_both_builder_forms_and_mutation() {
     assert_eq!(view.code_raw(), 7);
     assert_eq!(view.kind(), Kind(0x1234));
     assert_eq!(view.kind_raw(), 0x1234);
-    assert!(AbsoluteView::parse_exact(&input).is_err());
+    assert!(Absolute::view(&input).without_trailing().is_err());
 
     let mut bytes: [u8; 7] = input[..7].try_into().unwrap();
     let mut mutable = AbsoluteViewMut::parse_exact_mut(&mut bytes).unwrap();
@@ -285,7 +288,7 @@ fn absolute_mappings_use_offsets_for_both_builder_forms_and_mutation() {
 #[test]
 fn dynamic_mappings_derive_range_lengths_without_losing_boundaries() {
     let input = [3, b'a', b'b', b'c', 7, 0xee];
-    let (view, suffix) = DynamicView::parse_prefix(&input).unwrap();
+    let (view, suffix) = Dynamic::view(&input).with_remainder().unwrap();
     assert_eq!(suffix, &[0xee]);
     assert_eq!(view.length(), Length(3));
     assert_eq!(view.length_raw(), 3);
@@ -293,7 +296,7 @@ fn dynamic_mappings_derive_range_lengths_without_losing_boundaries() {
     assert_eq!(view.code(), Code(7));
     assert_eq!(view.code_raw(), 7);
     assert_eq!(view.as_bytes(), &input[..5]);
-    assert!(DynamicView::parse_exact(&input).is_err());
+    assert!(Dynamic::view(&input).without_trailing().is_err());
 
     let mut bytes: [u8; 5] = input[..5].try_into().unwrap();
     let mut mutable = DynamicViewMut::parse_exact_mut(&mut bytes).unwrap();
@@ -320,7 +323,7 @@ fn dynamic_mappings_derive_range_lengths_without_losing_boundaries() {
 #[test]
 fn absolute_endpoint_mapped_raw_source_preserves_physical_endpoints_and_suffix() {
     let input = [0xaa, 0, 6, 0xa5, b'x', b'y', 9, 0xee];
-    let (view, suffix) = AbsoluteEndpointView::parse_prefix(&input).unwrap();
+    let (view, suffix) = AbsoluteEndpoint::view(&input).with_remainder().unwrap();
     assert_eq!(view.end(), Endpoint(6));
     assert_eq!(view.end_raw(), 6);
     assert_eq!(view.payload(), b"xy");
@@ -328,7 +331,7 @@ fn absolute_endpoint_mapped_raw_source_preserves_physical_endpoints_and_suffix()
     assert_eq!(view.as_bytes(), &input[..7]);
     assert_eq!(suffix, &[0xee]);
     assert!(matches!(
-        AbsoluteEndpointView::parse_exact(&input),
+        AbsoluteEndpoint::view(&input).without_trailing(),
         Err(AbsoluteEndpointError::TrailingBytes {
             expected: 7,
             actual: 8
@@ -350,12 +353,12 @@ fn absolute_endpoint_mapped_raw_source_preserves_physical_endpoints_and_suffix()
 
 #[test]
 fn absolute_endpoint_parse_boundaries_and_signed_conversion_are_precise() {
-    let empty = EndpointCasesView::parse_exact(&[0xaa, 2]).unwrap();
+    let empty = EndpointCases::view(&[0xaa, 2]).without_trailing().unwrap();
     assert!(empty.payload().is_empty());
     assert_eq!(empty.as_bytes(), &[0xaa, 2]);
 
     assert!(matches!(
-        EndpointCasesView::parse_prefix(&[0xaa, 1]),
+        EndpointCases::view(&[0xaa, 1]).with_remainder(),
         Err(EndpointCasesError::RangeEndBeforeStart {
             position: 3,
             source_position: 2,
@@ -364,7 +367,7 @@ fn absolute_endpoint_parse_boundaries_and_signed_conversion_are_precise() {
         })
     ));
     assert!(matches!(
-        EndpointCasesView::parse_prefix(&[0xaa, 6]),
+        EndpointCases::view(&[0xaa, 6]).with_remainder(),
         Err(EndpointCasesError::InputTooShort {
             position: 3,
             expected: 4,
@@ -372,7 +375,7 @@ fn absolute_endpoint_parse_boundaries_and_signed_conversion_are_precise() {
         })
     ));
     assert!(matches!(
-        SignedEndpointView::parse_prefix(&[0xff, 0xff]),
+        SignedEndpoint::view(&[0xff, 0xff]).with_remainder(),
         Err(SignedEndpointError::InvalidRangeSource {
             position: 2,
             source_position: 1,

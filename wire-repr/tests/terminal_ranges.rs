@@ -25,7 +25,9 @@ fn implicit_terminal_range_borrows_every_byte_after_the_header() {
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x00, 0x45,
         0x00, 0x12,
     ];
-    let (view, suffix) = EthernetEnvelopeView::parse_prefix(&input).expect("valid envelope");
+    let (view, suffix) = EthernetEnvelope::view(&input)
+        .with_remainder()
+        .expect("valid envelope");
 
     assert_eq!(view.as_bytes(), &input);
     assert_eq!(view.as_bytes().as_ptr(), input.as_ptr());
@@ -36,7 +38,9 @@ fn implicit_terminal_range_borrows_every_byte_after_the_header() {
     assert_eq!(view.payload().as_ptr(), input[14..].as_ptr());
     assert!(suffix.is_empty());
 
-    let exact = EthernetEnvelopeView::parse_exact(&input).expect("same complete input");
+    let exact = EthernetEnvelope::view(&input)
+        .without_trailing()
+        .expect("same complete input");
     assert_eq!(exact.as_bytes(), view.as_bytes());
     assert_eq!(exact.payload(), view.payload());
 }
@@ -46,7 +50,9 @@ fn terminal_range_may_be_empty() {
     let input = [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x00,
     ];
-    let view = EthernetEnvelopeView::parse_exact(&input).expect("empty payload is valid");
+    let view = EthernetEnvelope::view(&input)
+        .without_trailing()
+        .expect("empty payload is valid");
 
     assert_eq!(view.as_bytes(), &input);
     assert!(view.payload().is_empty());

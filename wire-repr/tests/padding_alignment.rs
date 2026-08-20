@@ -67,16 +67,20 @@ wire_repr! {
 
 #[test]
 fn fixed_padding_and_alignment_preserve_opaque_bytes_and_static_width() {
-    assert_eq!(StaticPaddedView::WIDTH, 6);
+    assert_eq!(StaticPadded::WIDTH, 6);
     let input = [7, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 0x99];
-    let (view, suffix) = StaticPaddedView::parse_prefix(&input).expect("layout should parse");
+    let (view, suffix) = StaticPadded::view(&input)
+        .with_remainder()
+        .expect("layout should parse");
     assert_eq!(view.as_bytes(), &input[..6]);
     assert_eq!(suffix, &[0x99]);
     assert_eq!(view.head(), 7);
     assert_eq!(view.tail(), 0x1234);
 
-    assert_eq!(BoundaryOneView::WIDTH, 2);
-    let boundary_one = BoundaryOneView::parse_exact(&[1, 2]).expect("boundary one is a no-op");
+    assert_eq!(BoundaryOne::WIDTH, 2);
+    let boundary_one = BoundaryOne::view(&[1, 2])
+        .without_trailing()
+        .expect("boundary one is a no-op");
     assert_eq!(boundary_one.head(), 1);
     assert_eq!(boundary_one.tail(), 2);
 }
@@ -84,7 +88,9 @@ fn fixed_padding_and_alignment_preserve_opaque_bytes_and_static_width() {
 #[test]
 fn dynamic_alignment_uses_the_represented_offset_and_preserves_exact_boundaries() {
     let canonical = [7, 42, 0xaa, 0xbb, 0x12, 0x34, 0x99];
-    let (view, suffix) = DynamicPaddedView::parse_prefix(&canonical).expect("layout should parse");
+    let (view, suffix) = DynamicPadded::view(&canonical)
+        .with_remainder()
+        .expect("layout should parse");
     assert_eq!(view.as_bytes(), &canonical[..6]);
     assert_eq!(suffix, &[0x99]);
     assert_eq!(view.head(), 7);
@@ -93,7 +99,9 @@ fn dynamic_alignment_uses_the_represented_offset_and_preserves_exact_boundaries(
     assert_eq!(view.tail(), 0x1234);
 
     let noncanonical = [7, 0, 41, 0xaa, 0x12, 0x34];
-    let view = DynamicPaddedView::parse_exact(&noncanonical).expect("layout should parse");
+    let view = DynamicPadded::view(&noncanonical)
+        .without_trailing()
+        .expect("layout should parse");
     assert_eq!(view.as_bytes(), &noncanonical);
     assert_eq!(view.value_raw(), &[0, 41]);
     assert_eq!(view.value(), 41);
@@ -103,7 +111,7 @@ fn dynamic_alignment_uses_the_represented_offset_and_preserves_exact_boundaries(
 #[test]
 fn dynamic_padding_and_alignment_shortage_errors_identify_physical_positions() {
     assert!(matches!(
-        DynamicPaddedView::parse_prefix(&[7, 42]),
+        DynamicPadded::view(&[7, 42]).with_remainder(),
         Err(DynamicPaddedError::InputTooShort {
             position: 3,
             expected: 1,
@@ -111,7 +119,7 @@ fn dynamic_padding_and_alignment_shortage_errors_identify_physical_positions() {
         })
     ));
     assert!(matches!(
-        DynamicPaddedView::parse_prefix(&[7, 42, 0xaa]),
+        DynamicPadded::view(&[7, 42, 0xaa]).with_remainder(),
         Err(DynamicPaddedError::InputTooShort {
             position: 4,
             expected: 1,

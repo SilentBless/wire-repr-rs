@@ -12,7 +12,8 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
     let data = &layout.data;
     let docs = &data.docs;
     let visibility = &data.visibility;
-    let view_name = &data.view_name;
+    let layout_name = &data.layout_name;
+    let view_request_name = &data.view_request_name;
     let error_name = &data.error_name;
     let view_mut_name = &data.view_mut_name;
     let builder_name = &data.builder_name;
@@ -117,7 +118,10 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         #[doc = "An immutable byte-backed view of a fixed absolute-offset wire layout."]
         #(#docs)*
-        #visibility struct #view_name<'wire> { bytes: &'wire [u8] }
+        #visibility struct #layout_name<'wire> { bytes: &'wire [u8] }
+
+        #[doc(hidden)]
+        #visibility struct #view_request_name<'wire> { input: &'wire [u8] }
 
         #[derive(Debug)]
         #[doc = "Reports why parsing this fixed absolute-offset layout failed."]
@@ -142,28 +146,37 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
         } } }
         impl ::core::error::Error for #error_name {}
 
-        impl<'wire> #view_name<'wire> {
+        impl<'wire> #layout_name<'wire> {
             #[doc = "The maximum saturated field extent in bytes."]
             #visibility const WIDTH: usize = { let mut width = 0usize; #(#widths)* width };
-            #[doc = "Parses the leading layout bytes, returning its suffix."]
+            #[doc = "Requests an immutable view over input bytes."]
             #[must_use]
-            #visibility fn parse_prefix(input: &'wire [u8]) -> ::core::result::Result<(Self, &'wire [u8]), #error_name> {
-                #(#zero_width)* #(#extents)* #(#overlaps)*
-                if input.len() < Self::WIDTH { return Err(#error_name::InputTooShort { expected: Self::WIDTH, actual: input.len() }); }
-                let (bytes, suffix) = input.split_at(Self::WIDTH);
-                Ok((Self { bytes }, suffix))
-            }
-            #[doc = "Parses exactly one complete layout with no trailing bytes."]
-            #[must_use]
-            #visibility fn parse_exact(input: &'wire [u8]) -> ::core::result::Result<Self, #error_name> {
-                let (view, suffix) = Self::parse_prefix(input)?;
-                if !suffix.is_empty() { return Err(#error_name::TrailingBytes { expected: Self::WIDTH, actual: input.len() }); }
-                Ok(view)
-            }
+            #visibility fn view(input: &'wire [u8]) -> #view_request_name<'wire> { #view_request_name { input } }
             #[doc = "Returns the exact bytes represented by this view, including gaps."]
             #[must_use]
             #visibility fn as_bytes(&self) -> &'wire [u8] { self.bytes }
             #(#getters)*
+        }
+
+        impl<'wire> #view_request_name<'wire> {
+            #[doc = "Parses the leading layout bytes, returning its disjoint suffix."]
+            #[must_use]
+            #visibility fn with_remainder(self) -> ::core::result::Result<(#layout_name<'wire>, &'wire [u8]), #error_name> {
+                let input = self.input;
+                #(#zero_width)* #(#extents)* #(#overlaps)*
+                if input.len() < #layout_name::WIDTH { return Err(#error_name::InputTooShort { expected: #layout_name::WIDTH, actual: input.len() }); }
+                let (bytes, suffix) = input.split_at(#layout_name::WIDTH);
+                Ok((#layout_name { bytes }, suffix))
+            }
+            #[doc = "Parses exactly one complete layout with no trailing bytes."]
+            #[must_use]
+            #visibility fn without_trailing(self) -> ::core::result::Result<#layout_name<'wire>, #error_name> {
+                let input = self.input;
+                #(#zero_width)* #(#extents)* #(#overlaps)*
+                if input.len() < #layout_name::WIDTH { return Err(#error_name::InputTooShort { expected: #layout_name::WIDTH, actual: input.len() }); }
+                if input.len() != #layout_name::WIDTH { return Err(#error_name::TrailingBytes { expected: #layout_name::WIDTH, actual: input.len() }); }
+                Ok(#layout_name { bytes: input })
+            }
         }
 
         #[doc = "A mutable byte-backed view of a fixed absolute-offset wire layout."]
@@ -174,8 +187,8 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
             #[must_use]
             #visibility fn parse_prefix_mut(input: &'wire mut [u8]) -> ::core::result::Result<(Self, &'wire mut [u8]), #error_name> {
                 #(#zero_width)* #(#extents)* #(#overlaps)*
-                if input.len() < #view_name::WIDTH { return Err(#error_name::InputTooShort { expected: #view_name::WIDTH, actual: input.len() }); }
-                let (bytes, suffix) = input.split_at_mut(#view_name::WIDTH);
+                if input.len() < #layout_name::WIDTH { return Err(#error_name::InputTooShort { expected: #layout_name::WIDTH, actual: input.len() }); }
+                let (bytes, suffix) = input.split_at_mut(#layout_name::WIDTH);
                 Ok((Self { bytes }, suffix))
             }
             #[doc = "Parses exactly one complete mutable layout with no trailing bytes."]
@@ -183,7 +196,7 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
             #visibility fn parse_exact_mut(input: &'wire mut [u8]) -> ::core::result::Result<Self, #error_name> {
                 let actual = input.len();
                 let (view, suffix) = Self::parse_prefix_mut(input)?;
-                if !suffix.is_empty() { return Err(#error_name::TrailingBytes { expected: #view_name::WIDTH, actual }); }
+                if !suffix.is_empty() { return Err(#error_name::TrailingBytes { expected: #layout_name::WIDTH, actual }); }
                 Ok(view)
             }
             #[doc = "Returns the exact bytes represented by this mutable view, including gaps."]
@@ -191,10 +204,10 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
             #visibility fn as_bytes(&self) -> &[u8] { self.bytes }
             #[doc = "Returns an immutable view borrowing these bytes."]
             #[must_use]
-            #visibility fn as_view(&self) -> #view_name<'_> { #view_name { bytes: self.bytes } }
+            #visibility fn as_view(&self) -> #layout_name<'_> { #layout_name { bytes: self.bytes } }
             #[doc = "Consumes this mutable view and returns an immutable view with the original lifetime."]
             #[must_use]
-            #visibility fn into_view(self) -> #view_name<'wire> { #view_name { bytes: self.bytes } }
+            #visibility fn into_view(self) -> #layout_name<'wire> { #layout_name { bytes: self.bytes } }
             #(#mutable_getters)*
             #(#setters)*
         }
@@ -226,7 +239,7 @@ pub(super) fn render_layout(layout: &AbsoluteLayout) -> TokenStream {
                 let Self { #(#destructured,)* .. } = self;
                 #(#write_width)* #(#write_extents)* #(#write_overlaps)*
                 #(#missing)* #(#preflight)*
-                let needed = #view_name::WIDTH;
+                let needed = #layout_name::WIDTH;
                 if output.len() < needed { return Err(#write_error_name::OutputTooShort { needed, available: output.len() }); }
                 let (bytes, suffix) = output.split_at_mut(needed);
                 #(#commits)*

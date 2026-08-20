@@ -156,31 +156,39 @@ wire_repr! {
 
 #[test]
 fn builtins_use_absolute_offsets_and_preserve_gaps() {
+    fn assert_copy_clone<T: Copy + Clone>() {}
+
     let input = [0x7f, 0xaa, 0xbb, 0xcc, 0x12, 0x34];
-    let view = HeaderView::parse_exact(&input).expect("absolute header should parse");
-    assert_eq!(HeaderView::WIDTH, 6);
+    let view = Header::view(&input)
+        .without_trailing()
+        .expect("absolute header should parse");
+    assert_copy_clone::<Header<'_>>();
+    assert_eq!(Header::WIDTH, 6);
     assert_eq!(view.tail(), 0x1234);
     assert_eq!(view.kind(), 0x7f);
     assert_eq!(view.as_bytes(), input);
+    let copied = view;
+    assert_eq!(copied.as_bytes(), input);
 }
 
 #[test]
 fn prefix_and_exact_errors_use_maximum_extent() {
     let input = [0x7f, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 0xee];
-    let (view, suffix) =
-        HeaderView::parse_prefix(&input).expect("absolute header prefix should parse");
+    let (view, suffix) = Header::view(&input)
+        .with_remainder()
+        .expect("absolute header prefix should parse");
     assert_eq!(view.as_bytes().as_ptr(), input.as_ptr());
     assert_eq!(suffix.as_ptr(), input[6..].as_ptr());
     assert_eq!(suffix, &[0xee]);
     assert!(matches!(
-        HeaderView::parse_exact(&input),
+        Header::view(&input).without_trailing(),
         Err(HeaderError::TrailingBytes {
             expected: 6,
             actual: 7
         })
     ));
     assert!(matches!(
-        HeaderView::parse_exact(&input[..5]),
+        Header::view(&input[..5]).without_trailing(),
         Err(HeaderError::InputTooShort {
             expected: 6,
             actual: 5
@@ -191,7 +199,9 @@ fn prefix_and_exact_errors_use_maximum_extent() {
 #[test]
 fn custom_fields_borrow_and_arbitrary_raw_markers_structurally_parse() {
     let input = [0xff, 0xca, 0xfe];
-    let view = CustomView::parse_exact(&input).expect("exact-width raw marker should parse");
+    let view = Custom::view(&input)
+        .without_trailing()
+        .expect("exact-width raw marker should parse");
     assert_eq!(view.borrowed(), Borrowed(&[0xca, 0xfe]));
     assert_eq!(view.borrowed().0.as_ptr(), input[1..].as_ptr());
     assert_eq!(view.tracked(), 0xff);
@@ -201,14 +211,14 @@ fn custom_fields_borrow_and_arbitrary_raw_markers_structurally_parse() {
 #[test]
 fn configuration_errors_precede_input_in_offset_order() {
     assert!(matches!(
-        ZeroLayoutView::parse_prefix(&[]),
+        ZeroLayout::view(&[]).with_remainder(),
         Err(ZeroLayoutError::InvalidCodecWidth { offset: 2 })
     ));
     assert!(
-        matches!(OverflowLayoutView::parse_prefix(&[]), Err(OverflowLayoutError::InvalidCodecExtent { offset: 1, width }) if width == usize::MAX)
+        matches!(OverflowLayout::view(&[]).with_remainder(), Err(OverflowLayoutError::InvalidCodecExtent { offset: 1, width }) if width == usize::MAX)
     );
     assert!(matches!(
-        OverlapLayoutView::parse_prefix(&[]),
+        OverlapLayout::view(&[]).with_remainder(),
         Err(OverlapLayoutError::OverlappingFields {
             earlier_offset: 0,
             later_offset: 2
@@ -218,7 +228,7 @@ fn configuration_errors_precede_input_in_offset_order() {
 
 #[test]
 fn mixed_layout_modes_remain_public_through_the_facade() {
-    assert!(SequentialHereView::parse_exact(&[1]).is_ok());
-    assert!(AbsoluteHereView::parse_exact(&[2]).is_ok());
+    assert!(SequentialHere::view(&[1]).without_trailing().is_ok());
+    assert!(AbsoluteHere::view(&[2]).without_trailing().is_ok());
     assert_eq!(<wire_repr::BeU16 as wire_repr::FixedCodec>::WIDTH, 2);
 }

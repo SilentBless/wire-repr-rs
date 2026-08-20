@@ -107,7 +107,8 @@ wire_repr! {
 /// Generated fixed getter probe.
 #[inline(never)]
 pub fn generated_fixed_getter(bytes: &[u8]) -> Option<u16> {
-    CodegenPacketView::parse_exact(bytes)
+    CodegenPacket::view(bytes)
+        .without_trailing()
         .ok()
         .map(|view| view.word())
 }
@@ -122,7 +123,8 @@ pub fn handwritten_fixed_getter(bytes: &[u8]) -> Option<u16> {
 /// Generated projection probe.
 #[inline(never)]
 pub fn generated_projection(bytes: &[u8]) -> Option<bool> {
-    CodegenPacketView::parse_exact(bytes)
+    CodegenPacket::view(bytes)
+        .without_trailing()
         .ok()
         .map(|view| view.word_low())
 }
@@ -177,7 +179,8 @@ pub fn handwritten_builder(output: &mut [u8], value: u16) -> bool {
 /// Generated declared-scalar getter probe.
 #[inline(never)]
 pub fn generated_scalar_getter(bytes: &[u8]) -> Option<u16> {
-    CodegenScalarPacketView::parse_exact(bytes)
+    CodegenScalarPacket::view(bytes)
+        .without_trailing()
         .ok()
         .map(|view| view.hardware_type().raw())
 }
@@ -234,7 +237,8 @@ pub fn handwritten_scalar_builder(output: &mut [u8], value: u16) -> bool {
 /// Generated total-mapped getter probe.
 #[inline(never)]
 pub fn generated_mapped_getter(bytes: &[u8]) -> Option<u32> {
-    CodegenMappedPacketView::parse_exact(bytes)
+    CodegenMappedPacket::view(bytes)
+        .without_trailing()
         .ok()
         .map(|view| view.mapped().into())
 }
@@ -289,7 +293,8 @@ pub fn handwritten_mapped_builder(output: &mut [u8], value: u32) -> bool {
 /// Generated relative range getter probe.
 #[inline(never)]
 pub fn generated_relative_range_getter(bytes: &[u8]) -> Option<u8> {
-    CodegenRelativeRangeView::parse_exact(bytes)
+    CodegenRelativeRange::view(bytes)
+        .without_trailing()
         .ok()?
         .payload()
         .first()
@@ -305,7 +310,6 @@ pub fn handwritten_relative_range_getter(bytes: &[u8]) -> Option<u8> {
     }
     payload.first().copied()
 }
-
 /// Generated relative range mutation probe.
 #[inline(never)]
 pub fn generated_relative_range_mutation(bytes: &mut [u8], value: u8) -> bool {
@@ -341,7 +345,8 @@ pub fn handwritten_relative_range_mutation(bytes: &mut [u8], value: u8) -> bool 
 /// Generated absolute range getter probe.
 #[inline(never)]
 pub fn generated_absolute_range_getter(bytes: &[u8]) -> Option<u8> {
-    CodegenAbsoluteRangeView::parse_exact(bytes)
+    CodegenAbsoluteRange::view(bytes)
+        .without_trailing()
         .ok()?
         .payload()
         .first()
@@ -481,7 +486,8 @@ pub fn handwritten_finalizer_builder(output: &mut [u8], tag: u8) -> bool {
 /// Generated terminal range getter probe.
 #[inline(never)]
 pub fn generated_terminal_range_getter(bytes: &[u8]) -> Option<u8> {
-    CodegenTerminalRangeView::parse_exact(bytes)
+    CodegenTerminalRange::view(bytes)
+        .without_trailing()
         .ok()?
         .payload()
         .first()
@@ -826,6 +832,7 @@ fn generated_probes_match_handwritten_safe_rust() {
 #[test]
 fn generated_byte_range_probes_match_handwritten_safe_rust() {
     let relative = [2, 0x10, 0x20];
+
     assert_eq!(
         black_box(generated_relative_range_getter(black_box(&relative))),
         black_box(handwritten_relative_range_getter(black_box(&relative)))
@@ -836,6 +843,7 @@ fn generated_byte_range_probes_match_handwritten_safe_rust() {
             handwritten_relative_range_getter(invalid)
         );
     }
+
     let mut generated_relative = relative;
     let mut handwritten_relative = relative;
     assert_eq!(

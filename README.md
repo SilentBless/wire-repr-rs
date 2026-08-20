@@ -23,8 +23,8 @@ where exact bytes and explicit ownership matter.
   shifts, and masks—without runtime schemas, reflection, or field lookup.
 - **Atomic writes.** Builders plan the complete representation before touching caller
   output; an error leaves the whole destination unchanged.
-- **Explicit framing.** `parse_prefix` returns one bounded representation plus its suffix,
-  while `parse_exact` rejects unrelated trailing bytes.
+- **Explicit framing.** `Layout::view(bytes).with_remainder()` returns one bounded
+  representation plus its suffix, while `.without_trailing()` rejects unrelated trailing bytes.
 - **Consumer-owned semantics.** The framework owns bounds and layout. Consumers keep
   ownership of magic values, reserved-byte policy, checksums, and cross-field rules.
 - **Small runtime.** The public crate is `no_std`, `no_alloc`, dependency-free at target
@@ -58,7 +58,7 @@ wire_repr! {
 }
 
 let input = [7, 0x01, 0x00, 0b0000_1011, 0xff];
-let (view, suffix) = HeaderView::parse_prefix(&input).expect("valid header");
+let (view, suffix) = Header::view(&input).with_remainder().expect("valid header");
 
 assert_eq!(view.as_bytes(), &input[..4]);
 assert_eq!(suffix, &[0xff]);
@@ -80,8 +80,8 @@ assert!(suffix.is_empty());
 ```
 
 > [!NOTE]
-> `parse_prefix` excludes the suffix from the generated view. Use `parse_exact` when the
-> entire input must be exactly one representation.
+> `with_remainder` excludes the suffix from the generated view. Use `without_trailing` when
+> the entire input must be exactly one representation.
 
 ## 🧭 Layout model
 
@@ -248,9 +248,9 @@ wire_repr::wire_repr! {
 }
 ```
 
-Because `buf_end` consumes the supplied view buffer, `parse_prefix` returns an empty suffix
-and `parse_exact` accepts the same input. It does not identify an external packet,
-transport, or FCS boundary. Conversely, `parse_prefix` for a relative or absolute range
+Because `buf_end` consumes the supplied view buffer, `with_remainder` returns an empty suffix
+and `without_trailing` accepts the same input. It does not identify an external packet,
+transport, or FCS boundary. Conversely, `with_remainder` for a relative or absolute range
 returns the suffix after the complete represented layout; it does not automatically stop at
 an absolute range endpoint when later physical fields exist.
 
@@ -293,7 +293,7 @@ wire_repr::wire_repr! {
 }
 
 fn generated_read(bytes: &[u8]) -> Option<u16> {
-    CounterView::parse_exact(bytes).ok().map(|view| view.value())
+    Counter::view(bytes).without_trailing().ok().map(|view| view.value())
 }
 
 fn handwritten_read(bytes: &[u8]) -> Option<u16> {
@@ -318,7 +318,7 @@ assert_eq!(generated, [0xbe, 0xef]);
 assert_eq!(generated, handwritten);
 ```
 
-At runtime, `CounterView` is only a checked borrow of the two input bytes. The getter
+At runtime, `Counter` is only a checked borrow of the two input bytes. The getter
 loads those bytes and converts them from big endian. The builder checks that two output
 bytes are available and stores the big-endian value. The generated view, builder, and
 error types improve the source-level contract; they do not introduce a runtime engine.

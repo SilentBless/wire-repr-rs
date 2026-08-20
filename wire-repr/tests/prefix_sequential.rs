@@ -377,7 +377,9 @@ fn mixed_layout_preserves_exact_prefix_encoding_suffix_and_declaration_api() {
     MIXED_VALIDATIONS.store(0, Ordering::Relaxed);
     MIXED_DECODE_LENGTH.store(0, Ordering::Relaxed);
     let input = [7, 0, 41, 0x12, 0x34, 0xaa];
-    let (view, suffix) = MixedView::parse_prefix(&input).expect("mixed prefix layout should parse");
+    let (view, suffix) = Mixed::view(&input)
+        .with_remainder()
+        .expect("mixed prefix layout should parse");
 
     assert_eq!(view.as_bytes(), &[7, 0, 41, 0x12, 0x34]);
     assert_eq!(suffix, &[0xaa]);
@@ -389,8 +391,9 @@ fn mixed_layout_preserves_exact_prefix_encoding_suffix_and_declaration_api() {
     assert_eq!(MIXED_VALIDATIONS.load(Ordering::Relaxed), 1);
     assert_eq!(view.tail(), 0x1234);
 
-    let canonical =
-        MixedView::parse_exact(&[7, 42, 0x12, 0x34]).expect("canonical prefix layout should parse");
+    let canonical = Mixed::view(&[7, 42, 0x12, 0x34])
+        .without_trailing()
+        .expect("canonical prefix layout should parse");
     assert_eq!(canonical.value_raw(), &[42]);
     assert_eq!(canonical.value(), 41);
 }
@@ -398,7 +401,7 @@ fn mixed_layout_preserves_exact_prefix_encoding_suffix_and_declaration_api() {
 #[test]
 fn exact_parse_reports_dynamic_represented_length() {
     assert!(matches!(
-        ShortAfterPrefixView::parse_exact(&[42, 0x12, 0x34, 0xaa]),
+        ShortAfterPrefix::view(&[42, 0x12, 0x34, 0xaa]).without_trailing(),
         Err(ShortAfterPrefixError::TrailingBytes {
             expected: 3,
             actual: 4
@@ -407,25 +410,47 @@ fn exact_parse_reports_dynamic_represented_length() {
 }
 
 #[test]
+fn each_fluent_terminal_validates_a_counting_prefix_once() {
+    fn assert_copy_clone<T: Copy + Clone>() {}
+
+    let input = [7, 42, 0x12, 0x34];
+    MIXED_VALIDATIONS.store(0, Ordering::Relaxed);
+    let _ = Mixed::view(&input).with_remainder().expect("prefix parses");
+    assert_eq!(MIXED_VALIDATIONS.load(Ordering::Relaxed), 1);
+
+    MIXED_VALIDATIONS.store(0, Ordering::Relaxed);
+    let view = Mixed::view(&input)
+        .without_trailing()
+        .expect("exact layout parses");
+    assert_eq!(MIXED_VALIDATIONS.load(Ordering::Relaxed), 1);
+    assert_copy_clone::<Mixed<'_>>();
+    let copied = view;
+    assert_eq!(copied.as_bytes(), input);
+}
+
+#[test]
 fn borrowing_and_multiple_prefix_boundaries_are_exact() {
     let borrowed_input = [b'a', b'b', 0, 9];
-    let borrowed =
-        BorrowedView::parse_exact(&borrowed_input).expect("borrowing prefix layout should parse");
+    let borrowed = Borrowed::view(&borrowed_input)
+        .without_trailing()
+        .expect("borrowing prefix layout should parse");
     assert_eq!(borrowed.body_raw(), &[b'a', b'b', 0]);
     assert_eq!(borrowed.body(), b"ab");
     assert_eq!(borrowed.body().as_ptr(), borrowed_input.as_ptr());
     assert_eq!(borrowed.tail(), 9);
 
-    let multiple =
-        MultipleView::parse_exact(&[42, 7, 0, 8]).expect("multiple prefix layout should parse");
+    let multiple = Multiple::view(&[42, 7, 0, 8])
+        .without_trailing()
+        .expect("multiple prefix layout should parse");
     assert_eq!(multiple.first_raw(), &[42]);
     assert_eq!(multiple.first(), 41);
     assert_eq!(multiple.middle(), 7);
     assert_eq!(multiple.second_raw(), &[0, 8]);
     assert_eq!(multiple.second(), 8);
 
-    let adjacent =
-        AdjacentView::parse_exact(&[42, 0, 8]).expect("adjacent prefix fields should parse");
+    let adjacent = Adjacent::view(&[42, 0, 8])
+        .without_trailing()
+        .expect("adjacent prefix fields should parse");
     assert_eq!(adjacent.first_raw(), &[42]);
     assert_eq!(adjacent.first(), 41);
     assert_eq!(adjacent.second_raw(), &[0, 8]);
@@ -435,11 +460,11 @@ fn borrowing_and_multiple_prefix_boundaries_are_exact() {
 #[test]
 fn codec_and_structural_failures_are_mapped_without_blind_slicing() {
     assert!(matches!(
-        FailedView::parse_prefix(&[1]),
+        Failed::view(&[1]).with_remainder(),
         Err(FailedError::FieldValue(Rejected))
     ));
     assert!(matches!(
-        OverclaimedView::parse_prefix(&[1, 2]),
+        Overclaimed::view(&[1, 2]).with_remainder(),
         Err(OverclaimedError::InvalidPrefixExtent {
             position: 1,
             claimed: 4,
@@ -447,7 +472,7 @@ fn codec_and_structural_failures_are_mapped_without_blind_slicing() {
         })
     ));
     assert!(matches!(
-        ShortAfterPrefixView::parse_prefix(&[42, 0x12]),
+        ShortAfterPrefix::view(&[42, 0x12]).with_remainder(),
         Err(ShortAfterPrefixError::InputTooShort {
             position: 2,
             expected: 2,
@@ -459,7 +484,8 @@ fn codec_and_structural_failures_are_mapped_without_blind_slicing() {
 #[test]
 fn borrowed_fixed_getters_use_the_exact_post_prefix_span() {
     let input = [42, 0xca, 0xfe];
-    let view = BorrowedFixedAfterPrefixView::parse_exact(&input)
+    let view = BorrowedFixedAfterPrefix::view(&input)
+        .without_trailing()
         .expect("borrowed fixed field after prefix should parse");
     assert_eq!(view.bytes(), &[0xca, 0xfe]);
     assert_eq!(view.bytes().as_ptr(), input[1..].as_ptr());
@@ -469,7 +495,7 @@ fn borrowed_fixed_getters_use_the_exact_post_prefix_span() {
 fn dynamic_validation_uses_physical_not_declaration_order() {
     ORDER_VALIDATIONS.store(0, Ordering::Relaxed);
     assert!(matches!(
-        PhysicalOrderDynamicView::parse_prefix(&[0x12]),
+        PhysicalOrderDynamic::view(&[0x12]).with_remainder(),
         Err(PhysicalOrderDynamicError::InputTooShort {
             position: 1,
             expected: 2,
@@ -482,7 +508,7 @@ fn dynamic_validation_uses_physical_not_declaration_order() {
 #[test]
 fn zero_width_fixed_fields_fail_before_prefix_validation() {
     assert!(matches!(
-        InvalidFixedWidthView::parse_prefix(&[42]),
+        InvalidFixedWidth::view(&[42]).with_remainder(),
         Err(InvalidFixedWidthError::InvalidCodecWidth { position: 1 })
     ));
 }

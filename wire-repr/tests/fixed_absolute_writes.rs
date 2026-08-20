@@ -311,7 +311,7 @@ fn structural_errors_precede_missing_values_and_planning() {
     assert_eq!(output, [0xa5]);
 
     HUGE_PLANS.store(0, Ordering::Relaxed);
-    assert_eq!(OverflowLayoutView::WIDTH, usize::MAX);
+    assert_eq!(OverflowLayout::WIDTH, usize::MAX);
     assert!(matches!(
         OverflowLayoutViewMut::parse_prefix_mut(&mut []),
         Err(OverflowLayoutError::InvalidCodecExtent { offset: 1, width }) if width == usize::MAX

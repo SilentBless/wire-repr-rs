@@ -76,16 +76,15 @@ placement, but must physically precede every framed range.
 
 A `buf_end` range has no source, occurs at most once, and must be physically last. It owns
 every byte after prior physical entries within the supplied input, including an empty span;
-it establishes no external packet, FCS, transport, or other boundary. `parse_prefix` returns
+it establishes no external packet, FCS, transport, or other boundary. `with_remainder` returns
 the suffix after the complete represented layout—not automatically after an absolute range
 endpoint if later physical fields exist. Because `buf_end` is physically terminal, its suffix
 is empty. Variable-width-source framing (for example, a ULEB128 WebAssembly section size)
 remains consumer-owned.
 
-Dynamic sequential views store represented bytes and exact exclusive endpoints for every
-prefix field and byte range, including `buf_end`; they never cache semantic values or scan
-runtime metadata. Exact prefix encodings remain directly available even when legal
-noncanonical forms.
+Dynamic sequential views store represented bytes and exact exclusive prefix/range/buf_end
+endpoints. They never cache semantic values or scan runtime metadata.
+Exact prefix encodings remain directly available even when legal noncanonical forms.
 
 Every absolute-layout field requires an explicit zero-based offset. Absolute
 layouts check offsets in ascending offset order; their width is the maximum
@@ -93,7 +92,9 @@ field extent, gaps remain opaque represented bytes, and runtime codec-width
 overlaps are rejected before input slicing.
 
 The render dispatcher has separate fixed-sequential, dynamic-sequential, and
-absolute owners. A generated view borrows only the accepted exact prefix and
+absolute owners. The layout declaration itself is the generated immutable view type;
+`Layout::view` produces a lightweight request whose `with_remainder` or
+`without_trailing` terminal validates exactly once. A generated view borrows only the accepted exact prefix and
 exposes fixed getters without content validation. Prefix extents from custom
 codecs are structurally parsed and checked before slicing. An
 eligible unsigned builtin

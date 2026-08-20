@@ -44,14 +44,16 @@ fn bytes_codec_borrows_exact_width_input_and_plans_that_width() {
 #[test]
 fn bytes_fields_parse_sequential_and_absolute_layouts_without_semantic_validation() {
     let sequential_input = [0xff, 0x00, 0x80, 0x2a];
-    let sequential = SequentialBytesView::parse_exact(&sequential_input)
+    let sequential = SequentialBytes::view(&sequential_input)
+        .without_trailing()
         .expect("arbitrary sequential bytes should structurally parse");
     assert_eq!(sequential.payload(), &[0xff, 0x00, 0x80]);
     assert_eq!(sequential.payload().as_ptr(), sequential_input.as_ptr());
     assert_eq!(sequential.tag(), 0x2a);
 
     let absolute_input = [0x2a, 0xff, 0x00];
-    let absolute = AbsoluteBytesView::parse_exact(&absolute_input)
+    let absolute = AbsoluteBytes::view(&absolute_input)
+        .without_trailing()
         .expect("arbitrary absolute bytes should structurally parse");
     assert_eq!(absolute.payload(), &[0xff, 0x00]);
     assert_eq!(absolute.payload().as_ptr(), absolute_input[1..].as_ptr());

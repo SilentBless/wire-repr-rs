@@ -61,7 +61,7 @@ enum HeaderSemanticError {
     NonZeroReservedExpansion,
 }
 
-fn validate_sqlite_header(view: &HeaderView<'_>) -> Result<(), HeaderSemanticError> {
+fn validate_sqlite_header(view: &Header<'_>) -> Result<(), HeaderSemanticError> {
     if view.magic() != SQLITE_MAGIC {
         Err(HeaderSemanticError::WrongMagic)
     } else if view.reserved_expansion().iter().any(|byte| *byte != 0) {
@@ -143,8 +143,10 @@ fn real_header_parses_as_an_exact_absolute_view_with_consumer_semantics_and_a_di
     let mut input = header.clone();
     input.extend_from_slice(&suffix);
 
-    let (view, parsed_suffix) = HeaderView::parse_prefix(&input).expect("real header parses");
-    assert_eq!(HeaderView::WIDTH, 100);
+    let (view, parsed_suffix) = Header::view(&input)
+        .with_remainder()
+        .expect("real header parses");
+    assert_eq!(Header::WIDTH, 100);
     assert_eq!(view.as_bytes(), header.as_slice());
     assert_eq!(parsed_suffix, suffix);
     assert_eq!(view.as_bytes().as_ptr(), input.as_ptr());
@@ -163,14 +165,14 @@ fn real_header_parses_as_an_exact_absolute_view_with_consumer_semantics_and_a_di
     assert_eq!(view.sqlite_version_number(), read_be_u32(&header, 96));
 
     assert!(matches!(
-        HeaderView::parse_exact(&input),
+        Header::view(&input).without_trailing(),
         Err(HeaderError::TrailingBytes {
             expected: 100,
             actual: 104
         })
     ));
     assert!(matches!(
-        HeaderView::parse_exact(&header[..99]),
+        Header::view(&header[..99]).without_trailing(),
         Err(HeaderError::InputTooShort {
             expected: 100,
             actual: 99
@@ -183,7 +185,9 @@ fn consumer_semantics_reject_wrong_magic_after_structural_parse() {
     let mut bytes = sqlite_header();
     bytes[0] = b'X';
 
-    let view = HeaderView::parse_exact(&bytes).expect("all exact-layout bytes parse");
+    let view = Header::view(&bytes)
+        .without_trailing()
+        .expect("all exact-layout bytes parse");
     assert_eq!(view.magic(), &bytes[0..16]);
     assert_eq!(
         validate_sqlite_header(&view),
@@ -196,7 +200,9 @@ fn consumer_semantics_reject_nonzero_reserved_expansion_after_structural_parse()
     let mut bytes = sqlite_header();
     bytes[80] = 1;
 
-    let view = HeaderView::parse_exact(&bytes).expect("all exact-layout bytes parse");
+    let view = Header::view(&bytes)
+        .without_trailing()
+        .expect("all exact-layout bytes parse");
     assert_eq!(view.reserved_expansion(), &bytes[72..92]);
     assert_eq!(
         validate_sqlite_header(&view),
@@ -214,7 +220,8 @@ fn sqlite_page_size_semantics_remain_handwritten_consumer_logic() {
 
     let mut structurally_valid = sqlite_header();
     write_be_u16(&mut structurally_valid, 16, 513);
-    let view = HeaderView::parse_exact(&structurally_valid)
+    let view = Header::view(&structurally_valid)
+        .without_trailing()
         .expect("layout parsing does not impose SQLite page-size semantics");
     assert_eq!(view.page_size(), 513);
     assert_eq!(

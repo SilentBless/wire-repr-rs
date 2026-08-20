@@ -29,7 +29,7 @@ wire_repr! {
 }
 
 let input = [7, 0x01, 0x00, 0b0000_1011, 0xff];
-let (view, suffix) = HeaderView::parse_prefix(&input).unwrap();
+let (view, suffix) = Header::view(&input).with_remainder().unwrap();
 
 assert_eq!(view.as_bytes(), &input[..4]);
 assert_eq!(suffix, &[0xff]);
@@ -53,17 +53,17 @@ assert_eq!(suffix, &[0]);
 
 ## Parsing and represented bytes
 
-Every generated immutable view provides two explicit entry points:
+Every generated immutable layout provides `Layout::view(input)`, followed by one terminal:
 
-- `parse_prefix` parses one representation and returns the disjoint suffix;
-- `parse_exact` requires the complete input to be exactly one representation.
+- `with_remainder` parses one representation and returns the disjoint suffix;
+- `without_trailing` requires the complete input to be exactly one representation.
 
 `as_bytes` returns only the bytes owned by the representation. Accepted bytes are
 borrowed and preserved verbatim, including opaque gaps and legal noncanonical encodings
 accepted by a custom [`PrefixCodec`]. Parsing performs structural validation; it does
 not reconstruct bytes from decoded values or apply consumer policy.
 
-Fixed layouts expose `View::WIDTH`. Dynamic sequential layouts discover their represented
+Fixed layouts expose `Layout::WIDTH`. Dynamic sequential layouts discover their represented
 extent while validating prefix fields, byte ranges, padding, and alignment.
 
 ## Generated API
@@ -72,7 +72,7 @@ For `layout Packet`, [`wire_repr!`] generates a family centered on the declarati
 
 | Generated item | Purpose |
 | --- | --- |
-| `PacketView<'wire>` | Immutable borrowed representation and field getters |
+| `Packet<'wire>` | Immutable borrowed representation and field getters |
 | `PacketViewMut<'wire>` | Constrained mutable representation and eligible setters |
 | `PacketBuilder<'value>` | Fluent caller-buffer construction |
 | `PacketError` | Structural parse errors |
@@ -183,7 +183,7 @@ The first two require a physically preceding built-in fixed integer or semantic 
 one. Geometry uses the raw physical integer and checked `usize` conversion; prefix,
 custom/direct, declared scalar, nominal, and byte-range sources are unsupported. `bytes(0)`
 is invalid, although dynamic ranges may be empty. An absolute range does not itself end
-`parse_prefix`: the suffix follows the complete represented layout, including later physical
+`with_remainder`: the suffix follows the complete represented layout, including later physical
 fields. `buf_end` has no source, is physically terminal, and therefore produces an empty
 suffix. Variable-width-source framing such as ULEB128 section lengths remains
 consumer-owned.

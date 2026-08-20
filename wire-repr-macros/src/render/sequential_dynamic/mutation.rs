@@ -15,7 +15,7 @@ pub(super) fn render_layout(
     let data = &layout.data;
     let docs = &data.docs;
     let visibility = &data.visibility;
-    let view_name = &data.view_name;
+    let layout_name = &data.layout_name;
     let view_mut_name = &data.view_mut_name;
     let error_name = &data.error_name;
     let mutation_error_name = &data.mutation_error_name;
@@ -27,7 +27,7 @@ pub(super) fn render_layout(
         .collect();
     let boundary_initializers = boundaries.clone();
     let as_view_boundaries = boundaries.clone();
-    let into_view_boundaries = boundaries.clone();
+    let into_view_boundaries = as_view_boundaries.clone();
     let getters = data.fields.iter().flat_map(|field| {
         let mut methods = render_getters(layout, field);
         methods.extend(projection_getters(field, visibility));
@@ -103,15 +103,15 @@ pub(super) fn render_layout(
             #[doc = "Returns an immutable view borrowing these validated bytes and boundaries."]
             #[inline]
             #[must_use]
-            #visibility fn as_view(&self) -> #view_name<'_> {
-                #view_name { bytes: self.bytes, #(#as_view_boundaries: self.#as_view_boundaries,)* }
+            #visibility fn as_view(&self) -> #layout_name<'_> {
+                #layout_name { bytes: self.bytes, #(#as_view_boundaries: self.#as_view_boundaries,)* }
             }
 
             #[doc = "Consumes this mutable view and returns an immutable view with the original lifetime."]
             #[inline]
             #[must_use]
-            #visibility fn into_view(self) -> #view_name<'wire> {
-                #view_name { bytes: self.bytes, #(#into_view_boundaries: self.#into_view_boundaries,)* }
+            #visibility fn into_view(self) -> #layout_name<'wire> {
+                #layout_name { bytes: self.bytes, #(#into_view_boundaries: self.#into_view_boundaries,)* }
             }
 
             #(#getters)*

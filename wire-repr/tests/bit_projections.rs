@@ -62,7 +62,7 @@ wire_repr! {
 
 #[test]
 fn sequential_storage_and_projections_are_both_available() {
-    let parsed = SequentialBitsView::parse_exact(&[0b0001_1011]);
+    let parsed = SequentialBits::view(&[0b0001_1011]).without_trailing();
     let view = match parsed {
         Ok(value) => value,
         Err(error) => panic!("valid sequential layout was rejected: {error}"),
@@ -75,7 +75,7 @@ fn sequential_storage_and_projections_are_both_available() {
 
 #[test]
 fn absolute_and_little_endian_use_semantic_lsb_numbering() {
-    let absolute = AbsoluteBitsView::parse_exact(&[0xaa, 0xbb, 0x80, 0x09]);
+    let absolute = AbsoluteBits::view(&[0xaa, 0xbb, 0x80, 0x09]).without_trailing();
     let absolute = match absolute {
         Ok(value) => value,
         Err(error) => panic!("valid absolute layout was rejected: {error}"),
@@ -85,7 +85,7 @@ fn absolute_and_little_endian_use_semantic_lsb_numbering() {
     assert!(absolute.high());
     assert_eq!(absolute.low(), 9);
 
-    let little = LittleBitsView::parse_exact(&[0x01, 0x80]);
+    let little = LittleBits::view(&[0x01, 0x80]).without_trailing();
     let little = match little {
         Ok(value) => value,
         Err(error) => panic!("valid little-endian layout was rejected: {error}"),
@@ -97,7 +97,7 @@ fn absolute_and_little_endian_use_semantic_lsb_numbering() {
 
 #[test]
 fn u24_and_u128_ranges_normalize_without_high_bits() {
-    let narrow = Narrow24View::parse_exact(&[0x80, 0x00, 0x00, 0x80, 0x00, 0x01]);
+    let narrow = Narrow24::view(&[0x80, 0x00, 0x00, 0x80, 0x00, 0x01]).without_trailing();
     let narrow = match narrow {
         Ok(value) => value,
         Err(error) => panic!("valid U24 layout was rejected: {error}"),
@@ -106,7 +106,7 @@ fn u24_and_u128_ranges_normalize_without_high_bits() {
     assert_eq!(narrow.all(), 0x0080_0001);
 
     let bytes = [0xff; 16];
-    let wide = WideView::parse_exact(&bytes);
+    let wide = Wide::view(&bytes).without_trailing();
     let wide = match wide {
         Ok(value) => value,
         Err(error) => panic!("valid U128 layout was rejected: {error}"),
@@ -117,18 +117,18 @@ fn u24_and_u128_ranges_normalize_without_high_bits() {
 #[test]
 fn parsing_and_errors_remain_owned_by_storage() {
     assert!(matches!(
-        SequentialBitsView::parse_exact(&[]),
+        SequentialBits::view(&[]).without_trailing(),
         Err(SequentialBitsError::InputTooShort {
             expected: 1,
             actual: 0
         })
     ));
     assert!(matches!(
-        SequentialBitsView::parse_exact(&[1, 2]),
+        SequentialBits::view(&[1, 2]).without_trailing(),
         Err(SequentialBitsError::TrailingBytes {
             expected: 1,
             actual: 2
         })
     ));
-    assert!(SequentialBitsView::parse_exact(&[0]).is_ok());
+    assert!(SequentialBits::view(&[0]).without_trailing().is_ok());
 }

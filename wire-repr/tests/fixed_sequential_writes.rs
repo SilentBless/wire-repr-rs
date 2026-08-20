@@ -324,9 +324,9 @@ fn builders_reject_zero_width_codecs_before_missing_values_or_writing() {
 
 #[test]
 fn overflowing_fixed_extents_fail_before_slicing_or_writing() {
-    assert_eq!(OverflowPacketView::WIDTH, usize::MAX);
+    assert_eq!(OverflowPacket::WIDTH, usize::MAX);
     assert!(matches!(
-        OverflowPacketView::parse_prefix(&[]),
+        OverflowPacket::view(&[]).with_remainder(),
         Err(OverflowPacketError::InvalidLayoutExtent {
             position: 2,
             offset: usize::MAX,

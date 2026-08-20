@@ -15,7 +15,8 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let data = &layout.data;
     let docs = &data.docs;
     let visibility = &data.visibility;
-    let view_name = &data.view_name;
+    let layout_name = &data.layout_name;
+    let view_request_name = &data.view_request_name;
     let error_name = &data.error_name;
     let boundaries: Vec<_> = data
         .fields
@@ -106,6 +107,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         methods.extend(projection_getters(field, visibility));
         methods
     });
+
     let mutation = mutation::render_layout(layout, &zero_width, &validation);
     let builder = builder::render_layout(layout);
 
@@ -113,10 +115,13 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         #[doc = "An immutable validated view of a dynamic sequential wire layout."]
         #(#docs)*
-        #visibility struct #view_name<'wire> {
+        #visibility struct #layout_name<'wire> {
             bytes: &'wire [u8],
             #(#boundaries: usize,)*
         }
+
+        #[doc(hidden)]
+        #visibility struct #view_request_name<'wire> { input: &'wire [u8] }
 
         #[derive(Debug)]
         #[doc = "Reports why parsing this sequential layout failed."]
@@ -160,6 +165,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                 #[doc = "The physical start of the range."]
                 start: usize,
             },
+
             #[doc = "Reports a prefix codec extent that exceeds the available input."]
             InvalidPrefixExtent {
                 #[doc = "The one-based physical position of the invalid field."]
@@ -195,6 +201,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                         formatter,
                         "range at position {position} has endpoint {end} from position {source_position} before its start {start}",
                     ),
+
                     Self::InvalidPrefixExtent { position, claimed, available } => write!(
                         formatter,
                         "prefix codec at position {position} claimed {claimed} bytes with {available} available",
@@ -206,39 +213,12 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
 
         impl ::core::error::Error for #error_name {}
 
-        impl<'wire> #view_name<'wire> {
-            #[doc = "Parses and validates the leading layout bytes, returning its suffix."]
+        impl<'wire> #layout_name<'wire> {
+            #[doc = "Requests an immutable view over input bytes."]
             #[inline]
             #[must_use]
-            #visibility fn parse_prefix(
-                input: &'wire [u8],
-            ) -> ::core::result::Result<(Self, &'wire [u8]), #error_name> {
-                #(#zero_width)*
-                let input_bytes = input;
-                let mut remaining = input_bytes;
-                #(#validation)*
-                let represented_len = input_bytes.len() - remaining.len();
-                let (bytes, suffix) = input_bytes.split_at(represented_len);
-                Ok((Self { bytes, #(#boundary_initializers,)* }, suffix))
-            }
-
-            #[doc = "Parses and validates exactly one complete layout with no trailing bytes."]
-            #[inline]
-            #[must_use]
-            #visibility fn parse_exact(
-                input: &'wire [u8],
-            ) -> ::core::result::Result<Self, #error_name> {
-                #(#zero_width)*
-                let input_bytes = input;
-                let mut remaining = input_bytes;
-                #(#validation)*
-                if !remaining.is_empty() {
-                    return Err(#error_name::TrailingBytes {
-                        expected: input_bytes.len() - remaining.len(),
-                        actual: input_bytes.len(),
-                    });
-                }
-                Ok(Self { bytes: input_bytes, #(#exact_boundary_initializers,)* })
+            #visibility fn view(input: &'wire [u8]) -> #view_request_name<'wire> {
+                #view_request_name { input }
             }
 
             #[doc = "Returns the exact validated bytes represented by this view."]
@@ -249,6 +229,40 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             }
 
             #(#getters)*
+        }
+
+        impl<'wire> #view_request_name<'wire> {
+            #[doc = "Parses and validates the leading layout bytes, returning its disjoint suffix."]
+            #[inline]
+            #[must_use]
+            #visibility fn with_remainder(self) -> ::core::result::Result<(#layout_name<'wire>, &'wire [u8]), #error_name> {
+                let input = self.input;
+                #(#zero_width)*
+                let input_bytes = input;
+                let mut remaining = input_bytes;
+                #(#validation)*
+                let represented_len = input_bytes.len() - remaining.len();
+                let (bytes, suffix) = input_bytes.split_at(represented_len);
+                Ok((#layout_name { bytes, #(#boundary_initializers,)* }, suffix))
+            }
+
+            #[doc = "Parses and validates exactly one complete layout with no trailing bytes."]
+            #[inline]
+            #[must_use]
+            #visibility fn without_trailing(self) -> ::core::result::Result<#layout_name<'wire>, #error_name> {
+                let input = self.input;
+                #(#zero_width)*
+                let input_bytes = input;
+                let mut remaining = input_bytes;
+                #(#validation)*
+                if !remaining.is_empty() {
+                    return Err(#error_name::TrailingBytes {
+                        expected: input_bytes.len() - remaining.len(),
+                        actual: input_bytes.len(),
+                    });
+                }
+                Ok(#layout_name { bytes: input_bytes, #(#exact_boundary_initializers,)* })
+            }
         }
 
         #mutation
@@ -424,7 +438,8 @@ pub(super) fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<To
         FieldKind::Codec(codec) if codec.is_prefix() => {
             let codec = codec_tokens(codec);
             let raw_getter = &field.raw_getter;
-            let end = &field.boundary;
+            let boundary = &field.boundary;
+            let end = quote!(self.#boundary);
             vec![
                 quote! {
                     #[doc = "Returns the decoded value of this validated prefix field."]
@@ -441,7 +456,7 @@ pub(super) fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<To
                     #[must_use]
                     #visibility fn #raw_getter(&self) -> &'wire [u8] {
                         let bytes: &'wire [u8] = self.bytes;
-                        &bytes[(#start)..self.#end]
+                        &bytes[(#start)..#end]
                     }
                 },
             ]
@@ -471,7 +486,7 @@ pub(super) fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<To
         FieldKind::ByteRange { .. } => {
             let terminal = matches!(
                 layout.physical_order.last(),
-                Some(crate::ir::PhysicalItem::Field { index, .. })
+                Some(PhysicalItem::Field { index, .. })
                     if *index == field.declaration_index
             );
             let bytes = if terminal {
@@ -492,7 +507,7 @@ pub(super) fn render_getters(layout: &SequentialLayout, field: &Field) -> Vec<To
     }
 }
 
-fn field_start(layout: &SequentialLayout, field_index: usize) -> TokenStream {
+pub(super) fn field_start(layout: &SequentialLayout, field_index: usize) -> TokenStream {
     let preceding = &layout.physical_order[..layout.data.fields[field_index].placement - 1];
     let last_dynamic = preceding
         .iter()
