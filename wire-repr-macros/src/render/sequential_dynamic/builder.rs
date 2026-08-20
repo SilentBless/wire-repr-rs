@@ -14,6 +14,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let docs = &data.docs;
     let visibility = &data.visibility;
     let builder_name = &data.builder_name;
+    let plan_name = &data.plan_name;
     let range_input_name = &data.range_input_name;
     let view_mut_name = &data.view_mut_name;
     let write_error_name = &data.write_error_name;
@@ -158,6 +159,13 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let explicit_derivations = explicit_derivations(layout, write_error_name, range_input_name);
     let derived_plans = derived_field_plans(layout, write_error_name);
     let (extent, boundaries) = extent_checks(layout, write_error_name, range_input_name);
+    let plan_fields = plan_fields(layout, range_input_name);
+    let plan_names = plan_names(layout);
+    let range_names = range_names(layout);
+    let geometry_names = geometry_names(layout);
+    let retained_names = retained_names(layout);
+    let retained_bindings = ordinary_retained_bindings(layout);
+    let copy_bounds = copy_bounds(layout);
     let commits = commits(layout, range_input_name);
     let finalizers = finalizers(layout);
     let variants = data
@@ -225,6 +233,29 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
 
         enum #range_input_name<'value> { Borrowed(&'value [u8]), Existing(usize) }
 
+        struct #plan_name<'value> { #(#plan_fields,)* }
+
+        impl<'value> ::wire_repr::PreparedLayout for #plan_name<'value> {
+            type ViewMut<'output> = #view_mut_name<'output>;
+
+            #[inline]
+            fn encoded_len(&self) -> usize { self.__wire_represented_len }
+
+            #[inline]
+            fn commit_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), ::wire_repr::OutputTooShortError> {
+                let required = self.__wire_represented_len;
+                let available = output.len();
+                if available < required {
+                    return Err(::wire_repr::OutputTooShortError { required, available });
+                }
+                let (bytes, suffix) = output.split_at_mut(required);
+                let Self { #(#plan_names,)* #(#range_names,)* #(#geometry_names,)* #(#retained_names,)* #(#context_destructured,)* __wire_represented_len, __wire_value: _, } = self;
+                #(#commits)*
+                #(#finalizers)*
+                Ok((#view_mut_name { bytes, #(#boundaries,)* }, suffix))
+            }
+        }
+
         impl<'value> #builder_name<'value> {
             #[doc = "Creates an empty builder."]
             #[must_use]
@@ -232,27 +263,32 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             #(#fluent)*
             #(#context_fluent)*
 
-            #[doc = "Preflights the complete layout, then writes it into leading output bytes."]
             #[inline]
-            #visibility fn build_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), #write_error_name> {
+            fn prepare(self) -> ::core::result::Result<#plan_name<'value>, #write_error_name>
+            where
+                #(#copy_bounds,)*
+            {
                 #(#zero_width)*
                 let Self { #(#destructured,)* #(#context_destructured,)* #lifetime_destructured } = self;
                 #(#missing)*
                 #(#missing_contexts)*
+                #(#retained_bindings)*
                 #(#ordinary_preflight)*
                 #(#extent)*
                 #(#automatic_range_preflight)*
                 #(#explicit_derivations)*
                 #(#derived_plans)*
-                let expected = __wire_offset;
-                let actual = output.len();
-                if actual < expected {
-                    return Err(#write_error_name::OutputTooShort { expected, actual });
-                }
-                let (bytes, suffix) = output.split_at_mut(expected);
-                #(#commits)*
-                #(#finalizers)*
-                Ok((#view_mut_name { bytes, #(#boundaries,)* }, suffix))
+                Ok(#plan_name { #(#plan_names,)* #(#range_names,)* #(#geometry_names,)* #(#retained_names,)* #(#context_destructured,)* __wire_represented_len: __wire_offset, __wire_value: ::core::marker::PhantomData })
+            }
+
+            #[doc = "Preflights the complete layout, then writes it into leading output bytes."]
+            #[inline]
+            #visibility fn build_into<'output>(self, output: &'output mut [u8]) -> ::core::result::Result<(#view_mut_name<'output>, &'output mut [u8]), #write_error_name>
+            where
+                #(#copy_bounds,)*
+            {
+                <#plan_name<'value> as ::wire_repr::PreparedLayout>::commit_into(self.prepare()?, output)
+                    .map_err(|error| #write_error_name::OutputTooShort { expected: error.required, actual: error.available })
             }
         }
 
@@ -317,6 +353,182 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     }
 }
 
+fn finalizer_value_sources(layout: &SequentialLayout) -> Vec<usize> {
+    let mut sources = Vec::new();
+    for field in &layout.data.fields {
+        let Some(finalization) = &field.finalization else {
+            continue;
+        };
+        for operand in &finalization.operands {
+            if let FinalizeOperand::Value { source, .. } = operand {
+                let source_field = &layout.data.fields[*source];
+                if source_field.finalization.is_none() && !sources.contains(source) {
+                    sources.push(*source);
+                }
+            }
+        }
+    }
+    sources
+}
+
+fn copied_value_sources(layout: &SequentialLayout) -> Vec<usize> {
+    let mut sources = finalizer_value_sources(layout);
+    for field in &layout.data.fields {
+        let Some(derivation) = &field.derivation else {
+            continue;
+        };
+        for operand in &derivation.operands {
+            let DeriveOperand::Value { source, .. } = operand else {
+                continue;
+            };
+            if layout.data.fields[*source].derivation.is_none() && !sources.contains(source) {
+                sources.push(*source);
+            }
+        }
+    }
+    sources
+}
+
+fn retained_ident(index: usize) -> syn::Ident {
+    format_ident!("__wire_retained_value_{index}")
+}
+
+fn retained_type(field: &Field) -> Option<TokenStream> {
+    if field.derivation.is_some() && field.mapping.is_some() {
+        return field.mapping.as_ref().map(|mapping| {
+            let semantic = &mapping.semantic;
+            quote!(#semantic)
+        });
+    }
+    if let Some(raw) = mapping_raw_type_tokens(field) {
+        return Some(raw);
+    }
+    let codec = if field.codec().is_some_and(|codec| codec.is_prefix()) {
+        codec_tokens(field.codec()?)
+    } else {
+        effective_fixed_codec_tokens(field)?
+    };
+    Some(if field.is_derived_range_source {
+        quote!(<#codec as ::wire_repr::FixedCodec>::Value<'static>)
+    } else if field.codec().is_some_and(|codec| codec.is_prefix()) {
+        quote!(<#codec as ::wire_repr::PrefixCodec>::Value<'value>)
+    } else {
+        quote!(<#codec as ::wire_repr::FixedCodec>::Value<'value>)
+    })
+}
+
+fn retained_names(layout: &SequentialLayout) -> Vec<syn::Ident> {
+    finalizer_value_sources(layout)
+        .into_iter()
+        .map(retained_ident)
+        .collect()
+}
+
+fn copy_bounds(layout: &SequentialLayout) -> Vec<TokenStream> {
+    copied_value_sources(layout)
+        .into_iter()
+        .filter_map(|index| {
+            let ty = retained_type(&layout.data.fields[index])?;
+            Some(quote!(#ty: ::core::marker::Copy))
+        })
+        .collect()
+}
+
+fn ordinary_retained_bindings(layout: &SequentialLayout) -> Vec<TokenStream> {
+    finalizer_value_sources(layout)
+        .into_iter()
+        .filter_map(|index| {
+            let field = &layout.data.fields[index];
+            if field.derivation.is_some() || field.is_derived_range_source {
+                return None;
+            }
+            let name = &field.name;
+            let retained = retained_ident(index);
+            Some(quote!(let #retained = #name;))
+        })
+        .collect()
+}
+
+fn plan_names(layout: &SequentialLayout) -> Vec<syn::Ident> {
+    layout
+        .data
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| field.codec().is_some() && field.finalization.is_none())
+        .map(|(index, _)| plan_ident(index))
+        .collect()
+}
+
+fn range_names(layout: &SequentialLayout) -> Vec<syn::Ident> {
+    layout
+        .data
+        .fields
+        .iter()
+        .filter(|field| field.is_byte_range())
+        .map(|field| field.name.clone())
+        .collect()
+}
+
+fn geometry_names(layout: &SequentialLayout) -> Vec<syn::Ident> {
+    let mut names = Vec::new();
+    for item in &layout.physical_order {
+        if let PhysicalItem::Field { index, .. } = item {
+            names.push(format_ident!("__wire_start_{index}"));
+            names.push(format_ident!("__wire_end_{index}"));
+        }
+    }
+    names
+}
+
+fn plan_fields(layout: &SequentialLayout, range_input: &syn::Ident) -> Vec<TokenStream> {
+    let mut fields = Vec::new();
+    for (index, field) in layout.data.fields.iter().enumerate() {
+        if field.codec().is_some() && field.finalization.is_none() {
+            let plan = plan_ident(index);
+            let codec = if field.codec().is_some_and(|codec| codec.is_prefix()) {
+                codec_tokens(field.codec().expect("codec"))
+            } else {
+                effective_fixed_codec_tokens(field).expect("fixed codec")
+            };
+            let ty = if field.is_derived_range_source {
+                quote!(<#codec as ::wire_repr::FixedCodec>::Plan<'static>)
+            } else if field.codec().is_some_and(|codec| codec.is_prefix()) {
+                quote!(<#codec as ::wire_repr::PrefixCodec>::Plan<'value>)
+            } else {
+                quote!(<#codec as ::wire_repr::FixedCodec>::Plan<'value>)
+            };
+            fields.push(quote!(#plan: #ty));
+        }
+        if field.is_byte_range() {
+            let name = &field.name;
+            fields.push(quote!(#name: #range_input<'value>));
+        }
+    }
+    for item in &layout.physical_order {
+        if let PhysicalItem::Field { index, .. } = item {
+            let start = format_ident!("__wire_start_{index}");
+            let end = format_ident!("__wire_end_{index}");
+            fields.push(quote!(#start: usize));
+            fields.push(quote!(#end: usize));
+        }
+    }
+    fields.push(quote!(__wire_represented_len: usize));
+    fields.push(quote!(__wire_value: ::core::marker::PhantomData<&'value ()>));
+    for index in finalizer_value_sources(layout) {
+        let retained = retained_ident(index);
+        if let Some(ty) = retained_type(&layout.data.fields[index]) {
+            fields.push(quote!(#retained: #ty));
+        }
+    }
+    for context in &layout.data.contexts {
+        let name = &context.name;
+        let referent = &context.referent;
+        fields.push(quote!(#name: &'value #referent));
+    }
+    fields
+}
+
 fn derived_field_plans(layout: &SequentialLayout, error: &syn::Ident) -> Vec<TokenStream> {
     layout
         .derived_order
@@ -329,7 +541,11 @@ fn derived_field_plans(layout: &SequentialLayout, error: &syn::Ident) -> Vec<Tok
             let text = field_name(field);
             let expression = fixed_plan_expression(field, plan_value(field, quote!(#name)))?;
             let length_check = fixed_plan_length_check(field, &plan, &text, error)?;
-            Some(quote! { let #plan = #expression.map_err(#error::#variant)?; #length_check })
+            let retain = finalizer_value_sources(layout).contains(index).then(|| {
+                let retained = retained_ident(*index);
+                quote!(let #retained = #name;)
+            });
+            Some(quote! { #retain let #plan = #expression.map_err(#error::#variant)?; #length_check })
         })
         .collect()
 }
@@ -463,6 +679,10 @@ fn derived_source_preflight(
         let source_name = &field.name;
         let source_binding = derived_range_source_value_binding(layout, source)
             .then(|| quote!(let #source_name = #source_value;));
+        let retained_binding = finalizer_value_sources(layout).contains(&source).then(|| {
+            let retained = retained_ident(source);
+            quote!(let #retained = #source_value;)
+        });
         let plan = plan_ident(source);
         let variant = &field.error_variant;
         let text = field_name(field);
@@ -480,6 +700,7 @@ fn derived_source_preflight(
                 }),
             };
             #source_binding
+            #retained_binding
             let #plan = #plan_expression.map_err(#error::#variant)?;
             #length_check
         });
@@ -583,7 +804,7 @@ fn extent_checks(
     layout: &SequentialLayout,
     error: &syn::Ident,
     range_input: &syn::Ident,
-) -> (Vec<TokenStream>, Vec<syn::Ident>) {
+) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut output = vec![quote!(let mut __wire_offset = 0usize;)];
     let mut boundaries = Vec::new();
     for item in &layout.physical_order {
@@ -621,14 +842,18 @@ fn extent_checks(
             ),
         };
         let start = match item {
-            PhysicalItem::Field { index, .. } => Some(format_ident!("__wire_start_{index}")),
+            PhysicalItem::Field { index, .. } => Some((
+                format_ident!("__wire_start_{index}"),
+                format_ident!("__wire_end_{index}"),
+            )),
             _ => None,
         };
         output.push(match start {
-            Some(start) => quote! {
+            Some((start, end)) => quote! {
                 let __wire_advance = #advance;
                 let #start = __wire_offset;
                 __wire_offset = match __wire_offset.checked_add(__wire_advance) { Some(value) => value, None => return Err(#error::InvalidLayoutExtent { position: #position, offset: #start, advance: __wire_advance }) };
+                let #end = __wire_offset;
             },
             None => quote! {
                 let __wire_advance = #advance;
@@ -640,8 +865,8 @@ fn extent_checks(
             let field = &layout.data.fields[*index];
             if field.is_prefix() || field.is_byte_range() {
                 let boundary = &field.boundary;
-                boundaries.push(boundary.clone());
-                output.push(quote!(let #boundary = __wire_offset;));
+                let end = format_ident!("__wire_end_{}", index);
+                boundaries.push(quote!(#boundary: #end));
             }
         }
     }
@@ -659,26 +884,6 @@ fn commits(layout: &SequentialLayout, range_input: &syn::Ident) -> Vec<TokenStre
             let field = &layout.data.fields[*index];
             let start = format_ident!("__wire_start_{index}");
             let end = format_ident!("__wire_end_{index}");
-            let advance = match &field.kind {
-                FieldKind::ByteRange { .. } => {
-                    let name = &field.name;
-                    quote!(match &#name { #range_input::Borrowed(value) => value.len(), #range_input::Existing(length) => *length })
-                }
-                _ => match field.codec() {
-                    Some(codec) if codec.is_prefix() => {
-                        let plan = plan_ident(*index);
-                        quote!(::wire_repr::EncodePlan::encoded_len(&#plan))
-                    }
-                    Some(_) => {
-                        let codec = effective_fixed_codec_tokens(field)?;
-                        quote!(<#codec as ::wire_repr::FixedCodec>::WIDTH)
-                    }
-                    None => {
-                        let name = &field.name;
-                        quote!(#name.len())
-                    }
-                },
-            };
             let write = if field.finalization.is_some() {
                 quote!(bytes[#start..#end].fill(0);)
             } else if field.is_byte_range() {
@@ -693,7 +898,7 @@ fn commits(layout: &SequentialLayout, range_input: &syn::Ident) -> Vec<TokenStre
                     None => quote!(),
                 }
             };
-            Some(quote! { let #end = #start + #advance; #write })
+            Some(quote! { #write })
         })
         .collect()
 }
@@ -767,6 +972,16 @@ fn plan_ident(index: usize) -> syn::Ident {
     format_ident!("__wire_plan_{index}")
 }
 
+fn retained_semantic_value(field: &Field, index: usize) -> TokenStream {
+    let retained = retained_ident(index);
+    if field.derivation.is_some() || field.mapping.is_none() {
+        quote!(&#retained)
+    } else {
+        let semantic = &field.mapping.as_ref().expect("mapping").semantic;
+        quote!(&<#semantic as ::core::convert::From<_>>::from(#retained))
+    }
+}
+
 fn finalizers(layout: &SequentialLayout) -> Vec<TokenStream> {
     layout
         .finalizer_order
@@ -796,7 +1011,7 @@ fn finalizers(layout: &SequentialLayout) -> Vec<TokenStream> {
                         let value = final_value_ident(*source);
                         quote!(&#value)
                     } else {
-                        semantic_value(field)
+                        retained_semantic_value(field, *source)
                     }
                 }
             });
@@ -814,7 +1029,7 @@ fn finalizers(layout: &SequentialLayout) -> Vec<TokenStream> {
 fn finalizer_boundary(boundary: FinalizeBoundary) -> TokenStream {
     match boundary {
         FinalizeBoundary::BufStart => quote!(0usize),
-        FinalizeBoundary::BufEnd => quote!(expected),
+        FinalizeBoundary::BufEnd => quote!(__wire_represented_len),
         FinalizeBoundary::FieldStart(index) => {
             let start = format_ident!("__wire_start_{index}");
             quote!(#start)

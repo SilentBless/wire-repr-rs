@@ -6,6 +6,43 @@ use wire_repr::{EncodePlan, FixedCodec, PrefixCodec, PrefixExtent, wire_repr};
 
 struct TwoBytePrefix;
 
+struct BorrowedPrefix;
+
+struct BorrowedPrefixValue<'wire>(&'wire [u8; 3]);
+
+#[derive(Debug)]
+struct BorrowedPrefixError;
+
+impl PrefixCodec for BorrowedPrefix {
+    type Value<'wire>
+        = BorrowedPrefixValue<'wire>
+    where
+        Self: 'wire;
+    type DecodeError = BorrowedPrefixError;
+    type EncodeError = Infallible;
+    type Plan<'value>
+        = &'value [u8]
+    where
+        Self: 'value;
+
+    fn validate_prefix(bytes: &[u8]) -> Result<PrefixExtent, Self::DecodeError> {
+        if bytes.len() < 3 {
+            return Err(BorrowedPrefixError);
+        }
+        Ok(PrefixExtent::new(NonZeroUsize::new(3).unwrap()))
+    }
+    fn decode<'wire>(bytes: &'wire [u8]) -> Self::Value<'wire> {
+        BorrowedPrefixValue(
+            bytes
+                .try_into()
+                .expect("prefix codec receives its exact validated extent"),
+        )
+    }
+    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
+        Ok(value.0)
+    }
+}
+
 impl PrefixCodec for TwoBytePrefix {
     type Value<'wire>
         = u8
@@ -763,6 +800,14 @@ wire_repr! {
         le_i128 @ 18: LeI128 {  finalize: crate::finalize_le_i128(bytes(buf_start..buf_start)); };
     }
 
+    /// A non-Copy borrowed prefix value that no finalizer consumes.
+    pub layout BorrowedNonFinalizer {
+        payload @ 1: variable(crate::BorrowedPrefix);
+        checksum @ 2: U8 {
+            finalize: crate::finalize_u8(bytes(buf_start..buf_start));
+        };
+    }
+
 }
 
 #[test]
@@ -1296,6 +1341,17 @@ fn finalizer_spans_include_existing_ranges_without_rewriting_them() {
     assert_eq!(view.checksum(), 0x30);
     assert_eq!(suffix, &[0xfe]);
     assert_eq!(output, [2, 0x10, 0x20, 0x30, 0xfe]);
+}
+
+#[test]
+fn borrowed_non_finalizer_value_remains_supported() {
+    let mut output = [0xfe; 5];
+    let (view, suffix) = BorrowedNonFinalizerBuilder::new()
+        .payload(BorrowedPrefixValue(&[0x10, 0x20, 0x30]))
+        .build_into(&mut output)
+        .unwrap();
+    assert_eq!(view.as_bytes(), &[0x10, 0x20, 0x30, 0xa5]);
+    assert_eq!(suffix, &[0xfe]);
 }
 
 #[test]
