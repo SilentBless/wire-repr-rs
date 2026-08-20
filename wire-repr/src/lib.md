@@ -19,7 +19,8 @@ checksums, and cross-field validation.
   offsets and represented gaps.
 - Validated `bytes(source)`, `bytes_to(source)`, and terminal `remaining_bytes` ranges.
   Immutable views retain their validated endpoints; mutable range access is bounded to
-  that span; builders derive range sources from their inputs.
+  that span; builders derive range sources from copied inputs or explicitly retain an
+  existing destination span without rewriting it.
 - Self-delimiting `variable(PrefixCodec)` fields with both decoded and exact accepted
   `_raw()` bytes. A variable field is not a dynamic-range source.
 - Direct custom `FixedCodec` paths, top-level nominal scalar codecs, total `as`

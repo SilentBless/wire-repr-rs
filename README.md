@@ -296,6 +296,11 @@ Every builder error leaves the **entire supplied output slice** unchanged; succe
 writes preserve suffixes, padding, alignment spans, absolute gaps, and existing ranges
 unless an explicit field covers them.
 
+For a dynamic range that is already populated in the destination, the generated
+`body_existing(length)` form retains that span instead of copying new bytes. Its length
+still participates in geometry, derivation, and finalizer spans, while the builder never
+rewrites the retained range.
+
 The following compact fixture syntax shows explicit fallible derivation, borrowed
 builder-only context, and an infallible finalization policy:
 
