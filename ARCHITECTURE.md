@@ -146,12 +146,15 @@ preserves contradictory or noncanonical source values. Commit does neither conve
 nor planning and remains capacity-only/atomic. Failed adapter conversion is reported by
 concrete generated source-local parse or write error variants.
 
-Adapters cannot coexist with a mapping, projections, `derive`, or `finalize`. Custom
-codecs, declared scalars, fixed bytes, prefix codecs, ranges, absolute layouts, and
-`remaining_bytes` are unsupported sources. Built-in-integer-only adapter support is
-a hard ownership boundary: borrowed custom `FixedCodec` values or plans can require
-self-referential prepared storage. The raw source getter remains the wire integer;
-an adapter does not create a geometry getter or own protocol/RFC policy.
+Adapters cannot coexist with a mapping, `derive`, or `finalize`. Unsigned bit
+projections may coexist and read the same whole packed integer consumed and returned by
+the adapter. Custom codecs, declared scalars, fixed bytes, prefix codecs, ranges,
+absolute layouts, and `remaining_bytes` are unsupported sources. Built-in-integer-only
+adapter support is a hard ownership boundary: borrowed custom `FixedCodec` values or
+plans can require self-referential prepared storage. The raw source getter remains the
+wire integer; an adapter does not create a geometry getter. Checked structural
+underflow, alignment, and encoded-field bounds belong to the adapter; unrelated
+protocol/RFC policy remains consumer-owned.
 `bytes(0)` is invalid, but a dynamic range may be empty.
 
 An absolute endpoint before the current physical endpoint is a range error. An

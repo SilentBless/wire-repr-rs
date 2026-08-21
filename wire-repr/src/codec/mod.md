@@ -58,11 +58,13 @@ prepared plan, preserving atomic caller-output updates. No API retains contradic
 noncanonical source values.
 
 Macro adapters are restricted to direct built-in integer fixed fields that physically
-precede a consumed range. They cannot coexist with mappings, projections, derivation,
-or finalization. This hard ownership boundary avoids custom `FixedCodec` values or
-plans whose borrows would require self-referential prepared storage. The source getter
-is still its raw wire integer; adapters do not add a byte-geometry getter or protocol
-semantics.
+precede a consumed range. They cannot coexist with mappings, derivation, or
+finalization. Unsigned bit projections may coexist and read the same whole packed
+integer consumed and returned by the adapter. This hard ownership boundary avoids
+custom `FixedCodec` values or plans whose borrows would require self-referential prepared
+storage. The source getter is still its raw wire integer; adapters do not add a
+byte-geometry getter. Checked structural underflow, alignment, and encoded-field bounds
+belong to the adapter; unrelated protocol semantics remain consumer-owned.
 
 ## Built-ins
 

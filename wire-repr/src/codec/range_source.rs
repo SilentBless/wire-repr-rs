@@ -14,15 +14,16 @@ use super::FixedCodec;
 /// only writes the prepared plan and remains capacity-only and atomic.
 ///
 /// Supported source values and byte geometries must round-trip coherently. Implementations
-/// must use checked arithmetic and return an explicit error for a value or geometry they
-/// cannot convert. This trait establishes structural validity only; it does not own protocol
-/// rules such as IPv4 IHL or UDP minimum-length validation.
+/// must use checked arithmetic and return an explicit error for structural underflow,
+/// alignment, or encoded-field bounds they cannot convert. Unrelated protocol policy
+/// remains consumer-owned.
 ///
 /// Macro adapters are supported only on direct built-in integer fixed fields that physically
 /// precede at least one range. This is a current hard ownership boundary: custom
 /// [`FixedCodec`] values or plans can require self-referential prepared storage. The
-/// adapter does not create a geometry getter or encode protocol/RFC policy; the
-/// ordinary source getter remains the raw wire integer.
+/// adapter does not create a geometry getter; the ordinary source getter remains the raw
+/// wire integer. Unsigned bit projections may coexist with an adapter and read that whole
+/// integer; the adapter also consumes and returns the whole packed value.
 pub trait RangeSource<C: FixedCodec> {
     /// Error returned when converting between the fixed representation and byte geometry.
     type Error: core::fmt::Debug;

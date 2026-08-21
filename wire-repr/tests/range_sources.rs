@@ -13,6 +13,13 @@ enum RangeError {
     TooLarge,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum Ipv4IhlError {
+    TooSmall,
+    Unaligned,
+    TooLarge,
+}
+
 std::thread_local! {
     static WORD_TO_CALLS: Cell<usize> = const { Cell::new(0) };
     static WORD_FROM_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -83,6 +90,31 @@ impl RangeSource<U8> for SharedWords {
     }
 }
 
+struct Ipv4Ihl;
+
+impl RangeSource<U8> for Ipv4Ihl {
+    type Error = Ipv4IhlError;
+
+    fn to_bytes(value: <U8 as FixedCodec>::Value<'_>) -> Result<usize, Self::Error> {
+        usize::from(value & 0x0f)
+            .checked_mul(4)
+            .and_then(|header_bytes| header_bytes.checked_sub(20))
+            .ok_or(Ipv4IhlError::TooSmall)
+    }
+
+    fn from_bytes(bytes: usize) -> Result<<U8 as FixedCodec>::Value<'static>, Self::Error> {
+        if !bytes.is_multiple_of(4) {
+            return Err(Ipv4IhlError::Unaligned);
+        }
+        let header_bytes = bytes.checked_add(20).ok_or(Ipv4IhlError::TooLarge)?;
+        let ihl = u8::try_from(header_bytes / 4).map_err(|_| Ipv4IhlError::TooLarge)?;
+        if ihl > 0x0f {
+            return Err(Ipv4IhlError::TooLarge);
+        }
+        Ok(0x40 | ihl)
+    }
+}
+
 wire_repr! {
     pub layout WordFrame {
         length @ 1: U8 { range_source: crate::Words; };
@@ -100,6 +132,23 @@ wire_repr! {
         length @ 1: U8 { range_source: crate::SharedWords; };
         first @ 2: bytes(length);
         second @ 3: bytes(length);
+    }
+
+    pub layout Ipv4Header {
+        version_ihl @ 1: U8 { projections {
+            bits version: 4..=7;
+            bits ihl: 0..=3;
+        } range_source: crate::Ipv4Ihl; };
+        dscp_ecn @ 2: U8;
+        total_length @ 3: BeU16;
+        identification @ 4: BeU16;
+        flags_fragment_offset @ 5: BeU16;
+        ttl @ 6: U8;
+        protocol @ 7: U8;
+        header_checksum @ 8: BeU16;
+        source_address @ 9: wire_repr::BeU32;
+        destination_address @ 10: wire_repr::BeU32;
+        options @ 11: bytes(version_ihl);
     }
 }
 
@@ -265,4 +314,126 @@ fn short_prepared_commit_is_capacity_only_and_atomic() {
     ));
     assert_eq!(WORD_FROM_CALLS.with(|calls| calls.get()), 1);
     assert_eq!(output, initial);
+}
+
+#[test]
+fn projected_ipv4_ihl_transforms_only_the_packed_low_nibble() {
+    let input = [
+        0x46, 0x00, 0x00, 0x18, 0x12, 0x34, 0x40, 0x00, 64, 17, 0xab, 0xcd, 192, 0, 2, 1, 198, 51,
+        100, 2, 1, 2, 3, 4,
+    ];
+    let view = Ipv4Header::view(&input).without_trailing().unwrap();
+    assert_eq!(view.version_ihl(), 0x46);
+    assert_eq!(view.version(), 4);
+    assert_eq!(view.ihl(), 6);
+    assert_eq!(view.options(), &[1, 2, 3, 4]);
+
+    let mut unknown_version = input;
+    unknown_version[0] = 0xa6;
+    let view = Ipv4Header::view(&unknown_version)
+        .without_trailing()
+        .unwrap();
+    assert_eq!(view.version_ihl(), 0xa6);
+    assert_eq!(view.version(), 10);
+    assert_eq!(view.ihl(), 6);
+    assert_eq!(view.options(), &[1, 2, 3, 4]);
+
+    assert!(matches!(
+        Ipv4Header::view(&[0x43; 20]).without_trailing(),
+        Err(Ipv4HeaderError::RangeSourceFieldVersionIhl {
+            position: 11,
+            source_position: 1,
+            error: Ipv4IhlError::TooSmall,
+        })
+    ));
+
+    let plan = Ipv4HeaderBuilder::new()
+        .dscp_ecn(0)
+        .total_length(24)
+        .identification(0x1234)
+        .flags_fragment_offset(0x4000)
+        .ttl(64)
+        .protocol(17)
+        .header_checksum(0xabcd)
+        .source_address(0xc000_0201)
+        .destination_address(0xc633_6402)
+        .options(&[1, 2, 3, 4])
+        .prepare()
+        .unwrap();
+    let mut output = [0; 24];
+    let (built, suffix) = plan.commit_into(&mut output).unwrap();
+    assert_eq!(built.version_ihl(), 0x46);
+    assert_eq!(built.version(), 4);
+    assert_eq!(built.ihl(), 6);
+    assert_eq!(built.options(), &[1, 2, 3, 4]);
+    assert!(suffix.is_empty());
+
+    let initial = [0xa5; 24];
+    let mut unchanged = initial;
+    assert!(matches!(
+        Ipv4HeaderBuilder::new()
+            .dscp_ecn(0)
+            .total_length(22)
+            .identification(0)
+            .flags_fragment_offset(0)
+            .ttl(0)
+            .protocol(0)
+            .header_checksum(0)
+            .source_address(0)
+            .destination_address(0)
+            .options(&[0; 2])
+            .build_into(&mut unchanged),
+        Err(Ipv4HeaderWriteError::RangeSourceFieldVersionIhl {
+            position: 11,
+            source_position: 1,
+            value: 2,
+            error: Ipv4IhlError::Unaligned,
+        })
+    ));
+    assert_eq!(unchanged, initial);
+
+    assert!(matches!(
+        Ipv4HeaderBuilder::new()
+            .dscp_ecn(0)
+            .total_length(64)
+            .identification(0)
+            .flags_fragment_offset(0)
+            .ttl(0)
+            .protocol(0)
+            .header_checksum(0)
+            .source_address(0)
+            .destination_address(0)
+            .options(&[0; 44])
+            .prepare(),
+        Err(Ipv4HeaderWriteError::RangeSourceFieldVersionIhl {
+            position: 11,
+            source_position: 1,
+            value: 44,
+            error: Ipv4IhlError::TooLarge,
+        })
+    ));
+
+    let plan = Ipv4HeaderBuilder::new()
+        .dscp_ecn(0)
+        .total_length(24)
+        .identification(0)
+        .flags_fragment_offset(0)
+        .ttl(0)
+        .protocol(0)
+        .header_checksum(0)
+        .source_address(0)
+        .destination_address(0)
+        .options(&[0; 4])
+        .prepare()
+        .unwrap();
+    let initial = [0xa5; 23];
+    let mut unchanged = initial;
+    assert!(matches!(
+        plan.commit_into(&mut unchanged),
+        Err(OutputTooShortError {
+            required: 24,
+            available: 23,
+        })
+    ));
+    assert_eq!(unchanged, initial);
 }

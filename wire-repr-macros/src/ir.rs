@@ -1102,12 +1102,6 @@ fn normalize_layout(
                 span_error("`range_source` cannot be used with a semantic mapping"),
             );
         }
-        if !source.projections.is_empty() {
-            push(
-                errors,
-                span_error("`range_source` cannot be used with bit projections"),
-            );
-        }
         if source.derivation.is_some() {
             push(
                 errors,
@@ -3227,6 +3221,18 @@ mod tests {
                 Some(RangeSource::Transformed { adapter }) if adapter.segments.last().is_some_and(|segment| segment.ident == expected)
             ));
         }
+        let value = model(
+            "layout Projected { length: U8 { projections { bit flag: 0; } range_source: crate::Length; }; payload: bytes(length); }",
+        )
+        .unwrap();
+        let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
+            panic!("expected sequential layout")
+        };
+        assert_eq!(layout.data.fields[0].projections.len(), 1);
+        assert!(matches!(
+            layout.data.fields[0].range_source,
+            Some(RangeSource::Transformed { .. })
+        ));
         for (source, needle) in [
             (
                 "layout H { length: U8 { range_source: crate::Length; }; }",
@@ -3235,10 +3241,6 @@ mod tests {
             (
                 "layout H { length: U8 as crate::Length { range_source: crate::Length; }; payload: bytes(length); }",
                 "semantic mapping",
-            ),
-            (
-                "layout H { length: U8 { projections { bit flag: 0; } range_source: crate::Length; }; payload: bytes(length); }",
-                "bit projections",
             ),
             (
                 "layout H { length: U8 { derive: crate::f(); derive_error: crate::E; range_source: crate::Length; }; payload: bytes(length); }",

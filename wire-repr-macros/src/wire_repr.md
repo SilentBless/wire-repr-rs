@@ -154,10 +154,12 @@ physical codec. This canonicalizes the encoded source from requested geometry; n
 preserves contradictory or noncanonical source values. Commit is capacity-only and
 atomic; it performs no conversion or planning. Failed adapter conversion is reported
 by concrete generated source-local parse or write error variants. The ordinary source
-getter remains the raw wire integer. No geometry getter or protocol/RFC policy is
-generated: rules such as IPv4 IHL or UDP minimum length are consumer validation.
+getter remains the raw wire integer. Projections may coexist with an adapter and read
+that whole raw integer; the adapter likewise consumes and returns the whole packed value.
+No geometry getter is generated. Adapters own checked structural underflow, alignment,
+and encoded-field bounds; unrelated protocol/RFC policy is consumer validation.
 
-An adapter cannot coexist with `as`, projections, `derive`, or `finalize`. Adapter
+An adapter cannot coexist with `as`, `derive`, or `finalize`. Adapter
 sources must be direct built-in integer fixed fields; custom codecs, declared scalars,
 fixed bytes, prefix codecs, ranges, absolute layouts, and `remaining_bytes` are
 unsupported. This is a hard ownership boundary, not vague future grammar: borrowed
