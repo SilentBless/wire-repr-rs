@@ -1,57 +1,71 @@
-use wire_repr::{ExactWidthError, wire_repr};
+use wire_repr::{PreparedLayout, Wire};
 
 const SQLITE_MAGIC: [u8; 16] = *b"SQLite format 3\0";
 
-wire_repr! {
-    /// The fixed 100-byte SQLite database header.
-    pub absolute layout Header {
-        /// The SQLite format marker.
-        magic @ 0: bytes(16);
-        /// The raw database page size.
-        page_size @ 16: BeU16;
-        /// The file format write version.
-        write_version @ 18: U8;
-        /// The file format read version.
-        read_version @ 19: U8;
-        /// Reserved bytes at the end of each page.
-        reserved_space @ 20: U8;
-        /// The maximum embedded payload fraction.
-        max_payload_fraction @ 21: U8;
-        /// The minimum embedded payload fraction.
-        min_payload_fraction @ 22: U8;
-        /// The leaf payload fraction.
-        leaf_payload_fraction @ 23: U8;
-        /// The file change counter.
-        file_change_counter @ 24: BeU32;
-        /// The database size in pages.
-        database_size_pages @ 28: BeU32;
-        /// The first freelist trunk page.
-        first_freelist_trunk_page @ 32: BeU32;
-        /// The total freelist page count.
-        freelist_page_count @ 36: BeU32;
-        /// The schema cookie.
-        schema_cookie @ 40: BeU32;
-        /// The schema format number.
-        schema_format_number @ 44: BeU32;
-        /// The raw suggested cache size.
-        suggested_cache_size @ 48: BeU32;
-        /// The largest root b-tree page number.
-        largest_root_btree_page @ 52: BeU32;
-        /// The database text encoding.
-        text_encoding @ 56: BeU32;
-        /// The user version.
-        user_version @ 60: BeU32;
-        /// The incremental-vacuum mode.
-        incremental_vacuum_mode @ 64: BeU32;
-        /// The application identifier.
-        application_id @ 68: BeU32;
-        /// The space reserved for future SQLite expansion.
-        reserved_expansion @ 72: bytes(20);
-        /// The change counter valid for the SQLite version.
-        version_valid_for @ 92: BeU32;
-        /// The SQLite library version number.
-        sqlite_version_number @ 96: BeU32;
-    }
+/// The fixed 100-byte SQLite database header.
+#[derive(Clone, Debug, Eq, PartialEq, Wire)]
+pub struct Header {
+    /// The SQLite format marker.
+    pub magic: [u8; 16],
+    /// The raw database page size.
+    #[wire(be)]
+    pub page_size: u16,
+    /// The file format write version.
+    pub write_version: u8,
+    /// The file format read version.
+    pub read_version: u8,
+    /// Reserved bytes at the end of each page.
+    pub reserved_space: u8,
+    /// The maximum embedded payload fraction.
+    pub max_payload_fraction: u8,
+    /// The minimum embedded payload fraction.
+    pub min_payload_fraction: u8,
+    /// The leaf payload fraction.
+    pub leaf_payload_fraction: u8,
+    /// The file change counter.
+    #[wire(be)]
+    pub file_change_counter: u32,
+    /// The database size in pages.
+    #[wire(be)]
+    pub database_size_pages: u32,
+    /// The first freelist trunk page.
+    #[wire(be)]
+    pub first_freelist_trunk_page: u32,
+    /// The total freelist page count.
+    #[wire(be)]
+    pub freelist_page_count: u32,
+    /// The schema cookie.
+    #[wire(be)]
+    pub schema_cookie: u32,
+    /// The schema format number.
+    #[wire(be)]
+    pub schema_format_number: u32,
+    /// The raw suggested cache size.
+    #[wire(be)]
+    pub suggested_cache_size: u32,
+    /// The largest root b-tree page number.
+    #[wire(be)]
+    pub largest_root_btree_page: u32,
+    /// The database text encoding.
+    #[wire(be)]
+    pub text_encoding: u32,
+    /// The user version.
+    #[wire(be)]
+    pub user_version: u32,
+    /// The incremental-vacuum mode.
+    #[wire(be)]
+    pub incremental_vacuum_mode: u32,
+    /// The application identifier.
+    #[wire(be)]
+    pub application_id: u32,
+    /// The space reserved for future SQLite expansion.
+    pub reserved_expansion: [u8; 20],
+    /// The change counter valid for the SQLite version.
+    #[wire(be)]
+    pub version_valid_for: u32,
+    /// The SQLite library version number.
+    #[wire(be)]
+    pub sqlite_version_number: u32,
 }
 
 /// SQLite-specific header semantics layered on top of the fixed wire layout.
@@ -61,10 +75,10 @@ enum HeaderSemanticError {
     NonZeroReservedExpansion,
 }
 
-fn validate_sqlite_header(view: &Header<'_>) -> Result<(), HeaderSemanticError> {
-    if view.magic() != SQLITE_MAGIC {
+fn validate_sqlite_header(header: &HeaderView<'_>) -> Result<(), HeaderSemanticError> {
+    if header.magic() != &SQLITE_MAGIC {
         Err(HeaderSemanticError::WrongMagic)
-    } else if view.reserved_expansion().iter().any(|byte| *byte != 0) {
+    } else if header.reserved_expansion().iter().any(|byte| *byte != 0) {
         Err(HeaderSemanticError::NonZeroReservedExpansion)
     } else {
         Ok(())
@@ -85,19 +99,6 @@ fn page_size_from_raw(raw: u16) -> Result<u32, PageSizeError> {
     } else {
         Err(PageSizeError::InvalidRaw(raw))
     }
-}
-
-fn read_be_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-fn read_be_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
 }
 
 fn write_be_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -136,46 +137,74 @@ fn sqlite_header() -> Vec<u8> {
     bytes
 }
 
+fn semantic_header() -> Header {
+    Header {
+        magic: SQLITE_MAGIC,
+        page_size: 4_096,
+        write_version: 1,
+        read_version: 1,
+        reserved_space: 32,
+        max_payload_fraction: 64,
+        min_payload_fraction: 32,
+        leaf_payload_fraction: 32,
+        file_change_counter: 0x0102_0304,
+        database_size_pages: 0x0000_0102,
+        first_freelist_trunk_page: 0x0000_0203,
+        freelist_page_count: 0x0000_0304,
+        schema_cookie: 0x1122_3344,
+        schema_format_number: 4,
+        suggested_cache_size: 0xffff_ff80,
+        largest_root_btree_page: 0x0000_0506,
+        text_encoding: 1,
+        user_version: 0x5566_7788,
+        incremental_vacuum_mode: 1,
+        application_id: 0x0a0b_0c0d,
+        reserved_expansion: [0; 20],
+        version_valid_for: 0x99aa_bbcc,
+        sqlite_version_number: 3_045_000,
+    }
+}
+
 #[test]
-fn real_header_parses_as_an_exact_absolute_view_with_consumer_semantics_and_a_disjoint_suffix() {
+fn real_header_parses_as_an_exact_semantic_value_with_consumer_checks_and_a_disjoint_suffix() {
     let header = sqlite_header();
     let suffix = [0xde, 0xad, 0xbe, 0xef];
     let mut input = header.clone();
     input.extend_from_slice(&suffix);
 
-    let (view, parsed_suffix) = Header::view(&input)
+    let (parsed, parsed_suffix) = Header::view(&input)
         .with_remainder()
         .expect("real header parses");
-    assert_eq!(Header::WIDTH, 100);
-    assert_eq!(view.as_bytes(), header.as_slice());
+    assert_eq!(parsed.as_bytes(), header.as_slice());
     assert_eq!(parsed_suffix, suffix);
-    assert_eq!(view.as_bytes().as_ptr(), input.as_ptr());
+    assert_eq!(parsed.as_bytes().as_ptr(), input.as_ptr());
     assert_eq!(parsed_suffix.as_ptr(), input[100..].as_ptr());
-    assert_eq!(view.magic(), SQLITE_MAGIC.as_slice());
-    assert_eq!(view.reserved_expansion(), [0; 20]);
-    assert_eq!(validate_sqlite_header(&view), Ok(()));
-    assert_eq!(view.page_size(), read_be_u16(&header, 16));
-    assert_eq!(view.write_version(), header[18]);
-    assert_eq!(view.max_payload_fraction(), header[21]);
-    assert_eq!(view.file_change_counter(), read_be_u32(&header, 24));
-    assert_eq!(view.schema_cookie(), read_be_u32(&header, 40));
-    assert_eq!(view.suggested_cache_size(), read_be_u32(&header, 48));
-    assert_eq!(view.application_id(), read_be_u32(&header, 68));
-    assert_eq!(view.version_valid_for(), read_be_u32(&header, 92));
-    assert_eq!(view.sqlite_version_number(), read_be_u32(&header, 96));
+    assert_eq!(parsed.magic(), &SQLITE_MAGIC);
+    assert_eq!(parsed.reserved_expansion(), &[0; 20]);
+    assert_eq!(parsed.page_size(), 4_096);
+    assert_eq!(parsed.write_version(), 1);
+    assert_eq!(parsed.max_payload_fraction(), 64);
+    assert_eq!(parsed.file_change_counter(), 0x0102_0304);
+    assert_eq!(parsed.schema_cookie(), 0x1122_3344);
+    assert_eq!(parsed.suggested_cache_size(), 0xffff_ff80);
+    assert_eq!(parsed.application_id(), 0x0a0b_0c0d);
+    assert_eq!(parsed.version_valid_for(), 0x99aa_bbcc);
+    assert_eq!(parsed.sqlite_version_number(), 3_045_000);
+    assert_eq!(validate_sqlite_header(&parsed), Ok(()));
 
     assert!(matches!(
         Header::view(&input).without_trailing(),
-        Err(HeaderError::TrailingBytes {
+        Err(HeaderDecodeError::TrailingBytes {
             expected: 100,
             actual: 104
         })
     ));
     assert!(matches!(
         Header::view(&header[..99]).without_trailing(),
-        Err(HeaderError::InputTooShort {
-            expected: 100,
-            actual: 99
+        Err(HeaderDecodeError::InputTooShort {
+            field: "sqlite_version_number",
+            required: 4,
+            available: 3
         })
     ));
 }
@@ -185,12 +214,12 @@ fn consumer_semantics_reject_wrong_magic_after_structural_parse() {
     let mut bytes = sqlite_header();
     bytes[0] = b'X';
 
-    let view = Header::view(&bytes)
+    let parsed = Header::view(&bytes)
         .without_trailing()
-        .expect("all exact-layout bytes parse");
-    assert_eq!(view.magic(), &bytes[0..16]);
+        .expect("all fixed-layout bytes parse");
+    assert_eq!(parsed.magic(), b"XQLite format 3\0");
     assert_eq!(
-        validate_sqlite_header(&view),
+        validate_sqlite_header(&parsed),
         Err(HeaderSemanticError::WrongMagic)
     );
 }
@@ -200,12 +229,12 @@ fn consumer_semantics_reject_nonzero_reserved_expansion_after_structural_parse()
     let mut bytes = sqlite_header();
     bytes[80] = 1;
 
-    let view = Header::view(&bytes)
+    let parsed = Header::view(&bytes)
         .without_trailing()
-        .expect("all exact-layout bytes parse");
-    assert_eq!(view.reserved_expansion(), &bytes[72..92]);
+        .expect("all fixed-layout bytes parse");
+    assert_eq!(parsed.reserved_expansion().as_slice(), &bytes[72..92]);
     assert_eq!(
-        validate_sqlite_header(&view),
+        validate_sqlite_header(&parsed),
         Err(HeaderSemanticError::NonZeroReservedExpansion)
     );
 }
@@ -220,158 +249,36 @@ fn sqlite_page_size_semantics_remain_handwritten_consumer_logic() {
 
     let mut structurally_valid = sqlite_header();
     write_be_u16(&mut structurally_valid, 16, 513);
-    let view = Header::view(&structurally_valid)
+    let parsed = Header::view(&structurally_valid)
         .without_trailing()
         .expect("layout parsing does not impose SQLite page-size semantics");
-    assert_eq!(view.page_size(), 513);
+    assert_eq!(parsed.page_size(), 513);
     assert_eq!(
-        page_size_from_raw(view.page_size()),
+        page_size_from_raw(parsed.page_size()),
         Err(PageSizeError::InvalidRaw(513))
     );
 }
 
 #[test]
-fn mutable_views_change_only_declared_field_spans() {
-    let mut bytes = sqlite_header();
-    let before = bytes.clone();
-    let mut view = HeaderViewMut::parse_exact_mut(&mut bytes).expect("real mutable header parses");
-    view.set_page_size(8_192).expect("built-in plan succeeds");
-    view.set_schema_cookie(0xaabb_ccdd)
-        .expect("built-in plan succeeds");
-    view.set_sqlite_version_number(3_046_000)
-        .expect("built-in plan succeeds");
-    assert_eq!(view.page_size(), 8_192);
-    assert_eq!(view.schema_cookie(), 0xaabb_ccdd);
-    assert_eq!(view.sqlite_version_number(), 3_046_000);
+fn prepared_encoding_writes_the_canonical_header_without_touching_the_suffix() {
+    let expected = sqlite_header();
+    let plan = semantic_header().prepare().expect("header prepares");
+    assert_eq!(plan.encoded_len(), 100);
 
-    for index in 0..bytes.len() {
-        let changed =
-            (16..18).contains(&index) || (40..44).contains(&index) || (96..100).contains(&index);
-        if !changed {
-            assert_eq!(
-                bytes[index], before[index],
-                "unexpected write at byte {index}"
-            );
-        }
-    }
-    assert_eq!(bytes[72..92], before[72..92]);
-}
-
-#[test]
-fn builder_writes_a_complete_header_without_touching_the_suffix() {
     let mut output = vec![0x5a; 104];
     let suffix_before = output[100..].to_vec();
-    let mut expected = sqlite_header();
-    let (mut view, suffix) = HeaderBuilder::new()
-        .magic(&SQLITE_MAGIC)
-        .page_size(4_096)
-        .write_version(1)
-        .read_version(1)
-        .reserved_space(32)
-        .max_payload_fraction(64)
-        .min_payload_fraction(32)
-        .leaf_payload_fraction(32)
-        .file_change_counter(0x0102_0304)
-        .database_size_pages(0x0000_0102)
-        .first_freelist_trunk_page(0x0000_0203)
-        .freelist_page_count(0x0000_0304)
-        .schema_cookie(0x1122_3344)
-        .schema_format_number(4)
-        .suggested_cache_size(0xffff_ff80)
-        .largest_root_btree_page(0x0000_0506)
-        .text_encoding(1)
-        .user_version(0x5566_7788)
-        .incremental_vacuum_mode(1)
-        .application_id(0x0a0b_0c0d)
-        .reserved_expansion(&[0; 20])
-        .version_valid_for(0x99aa_bbcc)
-        .sqlite_version_number(3_045_000)
-        .build_into(&mut output)
-        .expect("complete SQLite header builder");
-    assert_eq!(view.as_bytes().len(), 100);
-    assert_eq!(view.as_bytes(), expected.as_slice());
+    let (written, suffix) = plan.commit_into(&mut output).expect("header commits");
+    assert_eq!(written.as_bytes(), expected.as_slice());
     assert_eq!(&*suffix, suffix_before.as_slice());
-    assert_eq!(view.page_size(), 4_096);
-    assert_eq!(view.application_id(), 0x0a0b_0c0d);
-    assert_eq!(view.sqlite_version_number(), 3_045_000);
-    view.set_user_version(7)
-        .expect("built view remains mutable");
-    expected[60..64].copy_from_slice(&7_u32.to_be_bytes());
-    assert_eq!(view.as_bytes(), expected.as_slice());
-    assert_eq!(output[72..92], [0; 20]);
+    assert_eq!(written.as_bytes()[72..92], [0; 20]);
     assert_eq!(output[100..], suffix_before);
-    assert_eq!(read_be_u32(&output, 60), 7);
 }
 
 #[test]
-fn wrong_width_builder_bytes_leave_output_unchanged() {
-    let mut output = [0x3c; 100];
-    let before = output;
-    assert!(matches!(
-        HeaderBuilder::new()
-            .magic(&SQLITE_MAGIC[..15])
-            .page_size(4_096)
-            .write_version(1)
-            .read_version(1)
-            .reserved_space(32)
-            .max_payload_fraction(64)
-            .min_payload_fraction(32)
-            .leaf_payload_fraction(32)
-            .file_change_counter(1)
-            .database_size_pages(2)
-            .first_freelist_trunk_page(3)
-            .freelist_page_count(4)
-            .schema_cookie(5)
-            .schema_format_number(4)
-            .suggested_cache_size(6)
-            .largest_root_btree_page(7)
-            .text_encoding(1)
-            .user_version(8)
-            .incremental_vacuum_mode(0)
-            .application_id(9)
-            .reserved_expansion(&[0; 20])
-            .version_valid_for(10)
-            .sqlite_version_number(3_045_000)
-            .build_into(&mut output),
-        Err(HeaderWriteError::FieldMagic(error))
-            if error == ExactWidthError::new(16, 15)
-    ));
-    assert_eq!(output, before);
-}
-
-#[test]
-fn short_builder_output_is_unchanged() {
-    let mut output = [0x3c; 99];
-    assert!(matches!(
-        HeaderBuilder::new()
-            .magic(&SQLITE_MAGIC)
-            .page_size(4_096)
-            .write_version(1)
-            .read_version(1)
-            .reserved_space(32)
-            .max_payload_fraction(64)
-            .min_payload_fraction(32)
-            .leaf_payload_fraction(32)
-            .file_change_counter(1)
-            .database_size_pages(2)
-            .first_freelist_trunk_page(3)
-            .freelist_page_count(4)
-            .schema_cookie(5)
-            .schema_format_number(4)
-            .suggested_cache_size(6)
-            .largest_root_btree_page(7)
-            .text_encoding(1)
-            .user_version(8)
-            .incremental_vacuum_mode(0)
-            .application_id(9)
-            .reserved_expansion(&[0; 20])
-            .version_valid_for(10)
-            .sqlite_version_number(3_045_000)
-            .build_into(&mut output),
-        Err(HeaderWriteError::OutputTooShort {
-            needed: 100,
-            available: 99
-        })
-    ));
-    assert_eq!(output, [0x3c; 99]);
+fn short_prepared_output_is_unchanged() {
+    let plan = semantic_header().prepare().expect("header prepares");
+    let initial = [0x3c; 99];
+    let mut output = initial;
+    assert!(plan.commit_into(&mut output).is_err());
+    assert_eq!(output, initial);
 }

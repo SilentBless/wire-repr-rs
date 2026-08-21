@@ -11,7 +11,7 @@ use super::EncodePlan;
 /// is total for every exact-width byte pattern. A codec that violates these requirements
 /// is contract-invalid.
 ///
-/// When a layout builder derives a byte-range source through
+/// When a derived encoder computes a byte length through
 /// `Self::Value<'static>: TryFrom<usize>`, the complete conversion and codec round trip
 /// must preserve that source value: converting the decoded planned representation back to
 /// `usize` must produce the original relative length or absolute endpoint.
@@ -187,6 +187,7 @@ mod tests {
         let decoded = <OwnedBytes<4> as FixedCodec>::decode(&source);
 
         source[0] = 9;
+        assert_eq!(source, [9, 2, 3, 4]);
         assert_eq!(decoded, [1, 2, 3, 4]);
     }
 

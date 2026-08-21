@@ -15,26 +15,26 @@ pub trait EncodePlan {
     fn write_into(&self, output: &mut [u8]);
 }
 
-/// A prepared layout encoding that can be committed into an output buffer.
+/// A prepared wire encoding that can be committed into an output buffer.
 ///
 /// Preparation performs every fallible codec operation. Implementations only check
 /// output capacity and copy already-prepared encodings when committed.
 pub trait PreparedLayout {
-    /// The mutable view returned over the committed layout bytes.
-    type ViewMut<'output>;
+    /// The committed output wrapper.
+    type Written<'output>;
 
-    /// Returns the exact number of output bytes required for this layout.
+    /// Returns the exact number of output bytes required for this encoding.
     #[must_use]
     fn encoded_len(&self) -> usize;
 
-    /// Commits this prepared layout into the leading output bytes.
+    /// Commits this prepared encoding into the leading output bytes.
     ///
     /// Extra output bytes are returned as a disjoint suffix. A short output is left
     /// unchanged.
     fn commit_into<'output>(
         self,
         output: &'output mut [u8],
-    ) -> Result<(Self::ViewMut<'output>, &'output mut [u8]), OutputTooShortError>;
+    ) -> Result<(Self::Written<'output>, &'output mut [u8]), OutputTooShortError>;
 }
 
 /// Reports that an output buffer cannot contain a prepared layout.

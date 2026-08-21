@@ -3,7 +3,7 @@ members = ["wire-repr", "wire-repr-macros"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.2"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
@@ -11,10 +11,11 @@ repository = "https://github.com/SilentBless/wire-repr-rs"
 homepage = "https://github.com/SilentBless/wire-repr-rs"
 
 [workspace.dependencies]
+proc-macro-crate = { version = "3.5", default-features = false }
 proc-macro2 = { version = "1", default-features = false, features = ["proc-macro"] }
 quote = { version = "1", default-features = false }
-syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "proc-macro"] }
-wire-repr-macros = { path = "wire-repr-macros", version = "0.5.2" }
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "proc-macro", "derive"] }
+wire-repr-macros = { path = "wire-repr-macros", version = "1.0.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -1,4 +1,4 @@
-use wire_repr::{ExactWidthError, wire_repr};
+use wire_repr::{PreparedLayout, Wire};
 
 const IHDR: [u8; 25] = [
     0, 0, 0, 13, b'I', b'H', b'D', b'R', 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4,
@@ -42,18 +42,20 @@ fn validate_chunk_type(chunk_type: &[u8]) -> Result<(), ChunkTypeError> {
     Ok(())
 }
 
-wire_repr! {
-    /// One dynamically sized PNG chunk.
-    pub layout PngChunk {
-        /// The encoded byte count of `data`.
-        data_length @ 1: BeU32;
-        /// The opaque four-byte PNG chunk type.
-        chunk_type @ 2: bytes(4);
-        /// The opaque chunk payload.
-        data @ 3: bytes(data_length);
-        /// The stored CRC-32/ISO-HDLC value.
-        crc @ 4: BeU32;
-    }
+/// One dynamically sized PNG chunk.
+#[derive(Debug, Eq, PartialEq, Wire)]
+pub struct PngChunk<'wire> {
+    /// The encoded byte count of `data`.
+    #[wire(be)]
+    pub data_length: u32,
+    /// The opaque four-byte PNG chunk type.
+    pub chunk_type: [u8; 4],
+    /// The opaque chunk payload.
+    #[wire(bytes = data_length)]
+    pub data: &'wire [u8],
+    /// The stored CRC-32/ISO-HDLC value.
+    #[wire(be)]
+    pub crc: u32,
 }
 
 fn read_be_u32(bytes: &[u8], offset: usize) -> u32 {
@@ -85,7 +87,7 @@ fn crc_matches(type_and_data: &[u8], stored_crc: u32) -> bool {
 }
 
 #[test]
-fn ihdr_and_iend_parse_exactly_preserving_raw_fields_and_suffix() {
+fn ihdr_and_iend_preserve_exact_fields_and_disjoint_suffix() {
     let suffix = [0xde, 0xad];
     let mut input = IHDR.to_vec();
     input.extend_from_slice(&suffix);
@@ -103,7 +105,7 @@ fn ihdr_and_iend_parse_exactly_preserving_raw_fields_and_suffix() {
     assert_eq!(view.crc(), read_be_u32(&IHDR, 21));
     assert!(matches!(
         PngChunk::view(&input).without_trailing(),
-        Err(PngChunkError::TrailingBytes {
+        Err(PngChunkDecodeError::TrailingBytes {
             expected: 25,
             actual: 27
         })
@@ -143,17 +145,17 @@ fn malformed_domains_parse_structurally_then_consumer_checks_reject_them() {
     let overclaimed_data = [0, 0, 0, 1, b'I', b'E', b'N', b'D'];
     assert!(matches!(
         PngChunk::view(&overclaimed_data).with_remainder(),
-        Err(PngChunkError::InputTooShort {
-            position: 3,
-            expected: 1,
+        Err(PngChunkDecodeError::InputTooShort {
+            field: "data",
+            required: 1,
             available: 0
         })
     ));
     assert!(matches!(
         PngChunk::view(&IHDR[..20]).without_trailing(),
-        Err(PngChunkError::InputTooShort {
-            position: 3,
-            expected: 13,
+        Err(PngChunkDecodeError::InputTooShort {
+            field: "data",
+            required: 13,
             available: 12
         })
     ));
@@ -177,68 +179,63 @@ fn crc_stays_consumer_validation_not_layout_validation() {
 }
 
 #[test]
-fn mutable_chunk_setters_touch_only_their_fields() {
-    let suffix = [0xa5, 0x5a];
-    let mut bytes = IHDR.to_vec();
-    bytes.extend_from_slice(&suffix);
-    let before = bytes.clone();
-    let (mut view, parsed_suffix) = PngChunkViewMut::parse_prefix_mut(&mut bytes).unwrap();
-    view.set_chunk_type(b"tEXt").unwrap();
-    view.set_crc(0x1122_3344).unwrap();
-    assert_eq!(view.chunk_type(), b"tEXt");
-    assert_eq!(view.crc(), 0x1122_3344);
-    for (index, (actual, expected)) in view.as_bytes().iter().zip(before.iter()).enumerate() {
-        let changed = (4..8).contains(&index) || (21..25).contains(&index);
-        if !changed {
-            assert_eq!(actual, expected, "unexpected write at byte {index}");
-        }
+fn prepared_encoding_derives_length_and_is_atomic() {
+    let suffix = [0x5a, 0xa5];
+    let plan = PngChunk {
+        data_length: 99,
+        chunk_type: *b"IHDR",
+        data: &IHDR[8..21],
+        crc: 0x1f15_c489,
     }
-    assert_eq!(&view.as_bytes()[8..21], &before[8..21]);
-    assert_eq!(&*parsed_suffix, suffix);
+    .prepare()
+    .expect("IHDR prepares");
+    assert_eq!(plan.encoded_len(), 25);
+
+    let mut output = [0xcc; 27];
+    output[25..].copy_from_slice(&suffix);
+    let (written, parsed_suffix) = plan.commit_into(&mut output).expect("IHDR commits");
+    assert_eq!(written.as_bytes(), IHDR);
+    assert_eq!(&*parsed_suffix, &suffix);
+
+    let plan = PngChunk {
+        data_length: 0,
+        chunk_type: *b"IHDR",
+        data: &IHDR[8..21],
+        crc: 0x1f15_c489,
+    }
+    .prepare()
+    .unwrap();
+    let initial = [0x3c; 24];
+    let mut short = initial;
+    assert!(plan.commit_into(&mut short).is_err());
+    assert_eq!(short, initial);
 }
 
 #[test]
-fn dynamic_builder_derives_length_and_is_atomic() {
-    let suffix = [0x5a, 0xa5];
-    let mut output = [0xcc; 27];
-    output[25..].copy_from_slice(&suffix);
-    let (mut view, parsed_suffix) = PngChunkBuilder::new()
-        .chunk_type(b"IHDR")
-        .data(&IHDR[8..21])
-        .crc(0x1f15_c489)
-        .build_into(&mut output)
-        .expect("IHDR builds");
-    assert_eq!(view.as_bytes(), IHDR);
-    assert_eq!(&*parsed_suffix, &suffix);
-    view.set_crc(0xaabb_ccdd).unwrap();
-    assert_eq!(view.crc(), 0xaabb_ccdd);
-    assert_eq!(&*parsed_suffix, &suffix);
+fn consecutive_png_chunks_use_a_fail_closed_typed_cursor() {
+    let mut datastream = Vec::from(IHDR);
+    datastream.extend_from_slice(&IEND);
 
-    let initial = [0x3c; 24];
-    let mut short = initial;
-    assert!(matches!(
-        PngChunkBuilder::new()
-            .chunk_type(b"IHDR")
-            .data(&IHDR[8..21])
-            .crc(0x1f15_c489)
-            .build_into(&mut short),
-        Err(PngChunkWriteError::OutputTooShort {
-            expected: 25,
-            actual: 24
-        })
-    ));
-    assert_eq!(short, initial);
+    let mut chunks = PngChunk::cursor(&datastream);
+    let ihdr = chunks.next().unwrap().unwrap();
+    assert_eq!(ihdr.chunk_type(), b"IHDR");
+    assert_eq!(ihdr.data(), &IHDR[8..21]);
+    let iend = chunks.next().unwrap().unwrap();
+    assert_eq!(iend.chunk_type(), b"IEND");
+    assert!(iend.data().is_empty());
+    assert!(chunks.next().unwrap().is_none());
+    assert!(chunks.remaining().is_empty());
 
-    let initial = [0x7e; 25];
-    let mut wrong_width = initial;
+    let truncated = &datastream[..datastream.len() - 1];
+    let mut chunks = PngChunk::cursor(truncated);
+    assert!(chunks.next().unwrap().is_some());
+    let failing = chunks.remaining();
     assert!(matches!(
-        PngChunkBuilder::new()
-            .chunk_type(b"BAD")
-            .data(&IHDR[8..21])
-            .crc(0x1f15_c489)
-            .build_into(&mut wrong_width),
-        Err(PngChunkWriteError::FieldChunkType(error))
-            if error == ExactWidthError::new(4, 3)
+        chunks.next(),
+        Err(wire_repr::ViewCursorError::Item(
+            PngChunkDecodeError::InputTooShort { field: "crc", .. }
+        ))
     ));
-    assert_eq!(wrong_width, initial);
+    assert_eq!(chunks.remaining().as_ptr(), failing.as_ptr());
+    assert_eq!(chunks.remaining().len(), failing.len());
 }

@@ -16,50 +16,28 @@ import sys
 from pathlib import Path
 
 PAIRS = (
-    ("fixed_getter", "generated_fixed_getter", "handwritten_fixed_getter", True, 2),
-    ("projection", "generated_projection", "handwritten_projection", True, 8),
-    ("mutation", "generated_mutation", "handwritten_mutation", True, 4),
-    ("builder", "generated_builder", "handwritten_builder", False, 4),
-    ("prepared_builder", "generated_prepared_builder", "handwritten_prepared_builder", False, 4),
-    ("dynamic_prepared_builder", "generated_dynamic_prepared_builder", "handwritten_dynamic_prepared_builder", False, 4),
-    ("transformed_range_getter", "generated_transformed_range_getter", "handwritten_transformed_range_getter", False, 2),
-    ("transformed_prepared_builder", "generated_transformed_prepared_builder", "handwritten_transformed_prepared_builder", False, 4),
-    ("absolute_prepared_builder", "generated_absolute_prepared_builder", "handwritten_absolute_prepared_builder", False, 4),
-    ("scalar_getter", "generated_scalar_getter", "handwritten_scalar_getter", True, 8),
-    ("scalar_mutation", "generated_scalar_mutation", "handwritten_scalar_mutation", True, 4),
-    ("scalar_builder", "generated_scalar_builder", "handwritten_scalar_builder", True, 4),
-    ("mapped_getter", "generated_mapped_getter", "handwritten_mapped_getter", True, 8),
-    ("mapped_mutation", "generated_mapped_mutation", "handwritten_mapped_mutation", True, 4),
-    ("mapped_builder", "generated_mapped_builder", "handwritten_mapped_builder", True, 4),
-    ("relative_range_getter", "generated_relative_range_getter", "handwritten_relative_range_getter", False, 8),
-    ("relative_range_mutation", "generated_relative_range_mutation", "handwritten_relative_range_mutation", False, 4),
-    ("absolute_range_getter", "generated_absolute_range_getter", "handwritten_absolute_range_getter", False, 8),
-    ("absolute_range_mutation", "generated_absolute_range_mutation", "handwritten_absolute_range_mutation", False, 4),
-    ("absolute_range_builder", "generated_absolute_range_builder", "handwritten_absolute_range_builder", False, 6),
-    ("derived_range_builder", "generated_derived_range_builder", "handwritten_derived_range_builder", False, 2),
-    ("finalizer_builder", "generated_finalizer_builder", "handwritten_finalizer_builder", True, 4),
-    ("terminal_range_getter", "generated_terminal_range_getter", "handwritten_terminal_range_getter", False, 8),
-    ("terminal_range_builder", "generated_terminal_range_builder", "handwritten_terminal_range_builder", False, 4),
-    ("terminal_existing_range_builder", "generated_terminal_existing_range_builder", "handwritten_terminal_existing_range_builder", False, 4),
+    ("fixed_decode", "generated_fixed_decode", "handwritten_fixed_decode", False, 2),
+    ("fixed_encode", "generated_fixed_encode", "handwritten_fixed_encode", False, 2),
+    ("bounded_decode", "generated_bounded_decode", "handwritten_bounded_decode", False, 2),
+    ("enum_decode", "generated_enum_decode", "handwritten_enum_decode", False, 2),
+    ("positioned_encode", "generated_positioned_encode", "handwritten_positioned_encode", False, 2),
+    ("bitfield_decode", "generated_bitfield_decode", "handwritten_bitfield_decode", False, 2),
+    ("fixed_sequence", "generated_fixed_sequence", "handwritten_fixed_sequence", False, 2),
+    ("variable_cursor", "generated_variable_cursor", "handwritten_variable_cursor", False, 2),
 )
 ALLOWED_OVERHEAD = {
-    # The generated prepared probe returns its observable fixed encoded length through
-    # two tuple-construction instructions; LLVM propagates the handwritten constant
-    # into callsites instead. Commit branches, stores, and calls remain identical.
-    "prepared_builder": {"instructions": 2},
-    # Safe exact slicing of private, prevalidated dynamic geometry retains one
-    # bounds-check path across the prepared-plan handoff on the pinned toolchain.
-    "dynamic_prepared_builder": {
-        "instructions": 13,
-        "calls": 1,
-        "branches": 2,
-        "panic_paths": 1,
-    },
-    "relative_range_mutation": {"instructions": 2},
-    "absolute_range_getter": {"instructions": 2},
+    "fixed_decode": {"instructions": 4, "branches": 1},
+    "fixed_encode": {"instructions": 20, "branches": 2},
+    # Safe represented-span slicing retains one checked slice after dynamic framing.
+    "bounded_decode": {"instructions": 17, "calls": 1, "branches": 3, "panic_paths": 1},
+    "enum_decode": {"instructions": 15, "branches": 2},
+    "positioned_encode": {"instructions": 20, "branches": 2},
+    "bitfield_decode": {"instructions": 1},
+    "variable_cursor": {"instructions": 11, "calls": 1, "branches": 2, "panic_paths": 1},
 }
 ALLOWED_EXTRA_CALLEE_MARKERS = {
-    "dynamic_prepared_builder": ("slice_index_fail",),
+    "bounded_decode": ("slice_index_fail",),
+    "variable_cursor": ("slice_index_fail",),
 }
 PANIC_MARKERS = (
     "panic",

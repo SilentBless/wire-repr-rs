@@ -1,7 +1,7 @@
 use core::convert::Infallible;
 use core::num::NonZeroUsize;
 
-use wire_repr::{EncodePlan, PrefixCodec, PrefixExtent};
+use wire_repr::{EncodePlan, PrefixCodec, PrefixExtent, PreparedLayout, Wire};
 
 /// Structural failures while framing a `u32` ULEB128 prefix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,6 +96,19 @@ impl PrefixCodec for U32Leb128 {
     }
 }
 
+/// A WebAssembly section with a ULEB128 payload length.
+#[derive(Debug, Eq, PartialEq, Wire)]
+pub struct WasmSection<'wire> {
+    /// Section identifier.
+    pub id: u8,
+    /// Encoded payload byte count.
+    #[wire(prefix = U32Leb128)]
+    pub payload_length: u32,
+    /// Opaque section payload.
+    #[wire(bytes = payload_length)]
+    pub payload: &'wire [u8],
+}
+
 #[test]
 fn uleb128_preserves_noncanonical_values_and_builds_canonically() {
     for bytes in [
@@ -137,4 +150,28 @@ fn uleb128_preserves_noncanonical_values_and_builds_canonically() {
         U32Leb128::validate_prefix(&[0xff, 0xff, 0xff, 0xff, 0x10]),
         Err(U32Leb128DecodeError::Overflow)
     );
+}
+
+#[test]
+fn wasm_sections_preserve_accepted_framing_and_encode_canonically() {
+    let input = [1, 0x83, 0, 0xaa, 0xbb, 0xcc, 0xdd];
+    let (section, suffix) = WasmSection::view(&input).with_remainder().unwrap();
+    assert_eq!(section.id(), 1);
+    assert_eq!(section.payload_length(), 3);
+    assert_eq!(section.payload(), &[0xaa, 0xbb, 0xcc]);
+    assert_eq!(section.as_bytes(), &input[..6]);
+    assert_eq!(suffix, &[0xdd]);
+
+    let plan = WasmSection {
+        id: section.id(),
+        payload_length: section.payload_length(),
+        payload: section.payload(),
+    }
+    .prepare()
+    .unwrap();
+    assert_eq!(plan.encoded_len(), 5);
+    let mut output = [0xa5; 6];
+    let (written, suffix) = plan.commit_into(&mut output).unwrap();
+    assert_eq!(written.as_bytes(), &[1, 3, 0xaa, 0xbb, 0xcc]);
+    assert_eq!(suffix, &mut [0xa5]);
 }
