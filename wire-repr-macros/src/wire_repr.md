@@ -131,16 +131,43 @@ Ranges are sequential-only opaque borrowed spans:
   zero.
 - `remaining_bytes` owns the supplied view-buffer tail.
 
-The first two require an eligible physically preceding built-in fixed integer or a
-total mapping over one. Parsing uses the raw physical integer and checked `usize`
-conversion; mappings do not change geometry. Self-delimiting, custom, declared-scalar,
-nominal, and range fields cannot be sources. A dynamic range may be empty.
+The first two require a sequential, physically preceding built-in integer field
+actually consumed by at least one range. An adapter requires that field to be direct
+and unmapped. Without an adapter, parsing uses the raw physical integer with checked
+`TryInto<usize>` conversion and preparation uses checked `TryFrom<usize>`
+conversion. A total `as Semantic` mapping stays separate: it affects nominal getters,
+not range geometry, and unannotated mapped sources still use their raw physical integer.
+
+A source may instead declare a `RangeSource` adapter in its property body:
+
+```rust,ignore
+length: BeU16 {
+    range_source: crate::TotalLength;
+};
+payload: bytes_to(length);
+```
+
+`RangeSource::to_bytes(raw source)` runs at the consuming range before its checked
+range/bounds logic. `prepare()` derives geometry, checks that every range sharing a
+source requires the same geometry, calls `from_bytes` once per source, then plans the
+physical codec. This canonicalizes the encoded source from requested geometry; no API
+preserves contradictory or noncanonical source values. Commit is capacity-only and
+atomic; it performs no conversion or planning. Failed adapter conversion is reported
+by concrete generated source-local parse or write error variants. The ordinary source
+getter remains the raw wire integer. No geometry getter or protocol/RFC policy is
+generated: rules such as IPv4 IHL or UDP minimum length are consumer validation.
+
+An adapter cannot coexist with `as`, projections, `derive`, or `finalize`. Adapter
+sources must be direct built-in integer fixed fields; custom codecs, declared scalars,
+fixed bytes, prefix codecs, ranges, absolute layouts, and `remaining_bytes` are
+unsupported. This is a hard ownership boundary, not vague future grammar: borrowed
+custom `FixedCodec::Value` or `FixedCodec::Plan` can require self-referential prepared
+storage. A dynamic range may be empty.
 
 For builders, relative sources derive payload length. Absolute sources derive the
 physical exclusive end, including earlier fixed/self-delimiting widths, padding,
 alignment, and ranges. A derived source has no ordinary builder input or setter.
-Shared sources must derive the same value under the same algebra. `remaining_bytes`
-has no source, may occur once, and must be physically last. It makes
+`remaining_bytes` has no source, may occur once, and must be physically last. It makes
 `with_remainder()` return an empty suffix; it does not discover an external packet
 boundary. Mutable views expose each range as `name_mut()`, an exact validated span that
 may be changed but cannot resize or reframe.

@@ -23,6 +23,7 @@ mod keyword {
     syn::custom_keyword!(context);
     syn::custom_keyword!(value);
     syn::custom_keyword!(len);
+    syn::custom_keyword!(range_source);
 }
 
 /// Parsed invocation before semantic normalization.
@@ -115,6 +116,8 @@ pub(crate) struct Field {
     pub(crate) projections: Vec<Projection>,
     pub(crate) derivation: Option<Derivation>,
     pub(crate) finalization: Option<Finalization>,
+    /// Optional adapter for converting this fixed field to range geometry.
+    pub(crate) range_source: Option<Path>,
 }
 
 /// Builder-only fixed-field derivation declaration.
@@ -417,6 +420,7 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
             projections: Vec::new(),
             derivation: None,
             finalization: None,
+            range_source: None,
         });
     }
     let content;
@@ -425,6 +429,7 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
     let mut derivation = None;
     let mut derive_error = None;
     let mut finalization = None;
+    let mut range_source = None;
     while !content.is_empty() {
         if content.peek(keyword::projections) {
             if !projections.is_empty() {
@@ -513,12 +518,23 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
             content.parse::<Token![:]>()?;
             derive_error = Some(content.parse::<Path>()?);
             content.parse::<Token![;]>()?;
+        } else if content.peek(keyword::range_source) {
+            if range_source.is_some() {
+                return Err(Error::new(
+                    content.span(),
+                    "duplicate `range_source` clause",
+                ));
+            }
+            content.parse::<keyword::range_source>()?;
+            content.parse::<Token![:]>()?;
+            range_source = Some(content.parse::<Path>()?);
+            content.parse::<Token![;]>()?;
         } else if !projections.is_empty() {
             return Err(Error::new(content.span(), "expected `projections` clause"));
         } else {
             return Err(Error::new(
                 content.span(),
-                "expected `projections`, `derive`, `derive_error`, or `finalize`",
+                "expected `projections`, `derive`, `derive_error`, `finalize`, or `range_source`",
             ));
         }
     }
@@ -542,6 +558,7 @@ fn parse_field(input: ParseStream<'_>, kind: LayoutKind) -> Result<Field> {
         projections,
         derivation,
         finalization,
+        range_source,
     })
 }
 
@@ -1036,6 +1053,31 @@ mod tests {
                 .to_string()
                 .contains("name @ offset")
         );
+    }
+
+    #[test]
+    fn parses_range_source_clause_and_rejects_duplicate_or_malformed_paths() {
+        let parsed: Invocation = parse_str(
+            "layout H { length: BeU16 { range_source: crate::UdpLength; }; payload: bytes_to(length); }",
+        )
+        .unwrap();
+        let Item::Layout(layout) = &parsed.items[0] else {
+            panic!("expected layout")
+        };
+        assert!(matches!(
+            &layout.fields[0].range_source,
+            Some(path) if path.segments.last().is_some_and(|segment| segment.ident == "UdpLength")
+        ));
+        for (source, needle) in [
+            (
+                "layout H { length: U8 { range_source: crate::A; range_source: crate::B; }; }",
+                "duplicate `range_source` clause",
+            ),
+            ("layout H { length: U8 { range_source: ; }; }", "expected"),
+        ] {
+            let error = parse_error(source);
+            assert!(error.to_string().contains(needle), "{error}");
+        }
     }
 
     #[test]

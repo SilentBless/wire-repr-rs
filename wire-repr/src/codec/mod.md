@@ -41,6 +41,29 @@ Keep framing between fields, range-source algebra, derived endpoints, and protoc
 validation outside a codec. A self-delimiting codec discovers its own field width; it
 is not a source for a later dynamic byte range.
 
+## Range-source adapters
+
+[`RangeSource`] performs checked bidirectional structural conversion between a decoded
+fixed source representation and byte geometry. `to_bytes` supplies either a relative
+length or an exclusive representation-relative endpoint while parsing; `from_bytes`
+canonicalizes the encoded source from builder-requested geometry during preparation.
+Supported values and geometries must round-trip coherently, with checked arithmetic
+and an explicit conversion error. The trait does not decide protocol policy.
+
+For a `range_source: Adapter` macro field, parsing calls `to_bytes` at each consuming
+range before normal checked range/bounds validation. Preparation derives geometry,
+requires shared consumers to agree by geometry, converts once per source with
+`from_bytes`, then plans the physical codec. Commit only checks capacity and writes the
+prepared plan, preserving atomic caller-output updates. No API retains contradictory or
+noncanonical source values.
+
+Macro adapters are restricted to direct built-in integer fixed fields that physically
+precede a consumed range. They cannot coexist with mappings, projections, derivation,
+or finalization. This hard ownership boundary avoids custom `FixedCodec` values or
+plans whose borrows would require self-referential prepared storage. The source getter
+is still its raw wire integer; adapters do not add a byte-geometry getter or protocol
+semantics.
+
 ## Built-ins
 
 This module provides [`U8`] and [`I8`], big- and little-endian unsigned

@@ -9,7 +9,7 @@ mod mutation;
 use super::{
     codec_tokens, effective_fixed_codec_tokens, mapping_raw_type_tokens, projection_getters,
 };
-use crate::ir::{ByteRangeEnd, Field, FieldKind, PhysicalItem, SequentialLayout};
+use crate::ir::{ByteRangeEnd, Field, FieldKind, PhysicalItem, RangeSource, SequentialLayout};
 
 pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let data = &layout.data;
@@ -45,6 +45,8 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         let name = field.name.to_string();
         Some(quote! { Self::#variant(error) => write!(formatter, "field {} failed validation: {error:?}", #name), })
     });
+    let range_source_variants = transformed_range_source_variants(layout);
+    let range_source_display_arms = transformed_range_source_display_arms(layout);
     let zero_width: Vec<TokenStream> = layout
         .physical_order
         .iter()
@@ -154,6 +156,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                 #[doc = "The one-based physical position of its source field."]
                 source_position: usize,
             },
+            #(#range_source_variants)*
             #[doc = "Reports an absolute range endpoint before the range start."]
             RangeEndBeforeStart {
                 #[doc = "The one-based physical position of the range."]
@@ -197,6 +200,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                         formatter,
                         "range at position {position} has a source value from position {source_position} that does not fit usize",
                     ),
+                    #(#range_source_display_arms)*
                     Self::RangeEndBeforeStart { position, source_position, end, start } => write!(
                         formatter,
                         "range at position {position} has endpoint {end} from position {source_position} before its start {start}",
@@ -338,16 +342,20 @@ fn render_field_validation(
             let source_start = parse_field_start(layout, *length_source);
             let source_position = source.placement;
             let boundary = &field.boundary;
+            let source_conversion = range_source_parse_conversion(
+                source,
+                &source_codec,
+                error_name,
+                position,
+                source_position,
+                quote!(source_value),
+                quote!(expected),
+            );
             quote! {
                 let source_value = <#source_codec as ::wire_repr::FixedCodec>::decode(
                     &input_bytes[(#source_start)..((#source_start) + <#source_codec as ::wire_repr::FixedCodec>::WIDTH)],
                 );
-                let Ok(expected) = ::core::convert::TryInto::<usize>::try_into(source_value) else {
-                    return Err(#error_name::InvalidRangeSource {
-                        position: #position,
-                        source_position: #source_position,
-                    });
-                };
+                #source_conversion
                 let range_start = input_bytes.len() - remaining.len();
                 let available = remaining.len();
                 let Some(range_end) = range_start.checked_add(expected) else {
@@ -387,16 +395,20 @@ fn render_field_validation(
             let source_start = parse_field_start(layout, source_index);
             let source_position = source.placement;
             let boundary = &field.boundary;
+            let source_conversion = range_source_parse_conversion(
+                source,
+                &source_codec,
+                error_name,
+                position,
+                source_position,
+                quote!(source_value),
+                quote!(range_end),
+            );
             quote! {
                 let source_value = <#source_codec as ::wire_repr::FixedCodec>::decode(
                     &input_bytes[(#source_start)..((#source_start) + <#source_codec as ::wire_repr::FixedCodec>::WIDTH)],
                 );
-                let Ok(range_end) = ::core::convert::TryInto::<usize>::try_into(source_value) else {
-                    return Err(#error_name::InvalidRangeSource {
-                        position: #position,
-                        source_position: #source_position,
-                    });
-                };
+                #source_conversion
                 let range_start = input_bytes.len() - remaining.len();
                 if range_end < range_start {
                     return Err(#error_name::RangeEndBeforeStart {
@@ -426,6 +438,81 @@ fn render_field_validation(
                 let #boundary = range_end;
             }
         }
+    }
+}
+
+fn transformed_range_source_fields(layout: &SequentialLayout) -> impl Iterator<Item = &Field> {
+    layout
+        .data
+        .fields
+        .iter()
+        .filter(|field| matches!(field.range_source, Some(RangeSource::Transformed { .. })))
+}
+
+fn range_source_variant(field: &Field) -> syn::Ident {
+    quote::format_ident!("RangeSource{}", field.error_variant)
+}
+
+fn transformed_range_source_variants(layout: &SequentialLayout) -> Vec<TokenStream> {
+    transformed_range_source_fields(layout)
+        .map(|field| {
+            let variant = range_source_variant(field);
+            let codec = codec_tokens(field.codec().expect("transformed source codec"));
+            let adapter = match field.range_source.as_ref().expect("range source") {
+                RangeSource::Transformed { adapter } => adapter,
+                RangeSource::Direct => unreachable!("filtered transformed source"),
+            };
+            let name = field.name.to_string();
+            quote! {
+                #[doc = concat!("Reports range-source conversion failure for field `", #name, "`.")]
+                #variant {
+                    #[doc = "The one-based physical position of the consuming range."]
+                    position: usize,
+                    #[doc = "The one-based physical position of the source field."]
+                    source_position: usize,
+                    #[doc = "The range-source adapter error."]
+                    error: <#adapter as ::wire_repr::RangeSource<#codec>>::Error,
+                },
+            }
+        })
+        .collect()
+}
+
+fn transformed_range_source_display_arms(layout: &SequentialLayout) -> Vec<TokenStream> {
+    transformed_range_source_fields(layout)
+        .map(|field| {
+            let variant = range_source_variant(field);
+            let name = field.name.to_string();
+            quote! { Self::#variant { position, source_position, error } => write!(formatter, "range at position {position} failed conversion from source field {} at position {source_position}: {error:?}", #name), }
+        })
+        .collect()
+}
+
+fn range_source_parse_conversion(
+    source: &Field,
+    source_codec: &TokenStream,
+    error_name: &syn::Ident,
+    position: usize,
+    source_position: usize,
+    source_value: TokenStream,
+    output: TokenStream,
+) -> TokenStream {
+    match source.range_source.as_ref() {
+        Some(RangeSource::Transformed { adapter }) => {
+            let variant = range_source_variant(source);
+            quote! {
+                let #output = <#adapter as ::wire_repr::RangeSource<#source_codec>>::to_bytes(#source_value)
+                    .map_err(|error| #error_name::#variant { position: #position, source_position: #source_position, error })?;
+            }
+        }
+        Some(RangeSource::Direct) | None => quote! {
+            let Ok(#output) = ::core::convert::TryInto::<usize>::try_into(#source_value) else {
+                return Err(#error_name::InvalidRangeSource {
+                    position: #position,
+                    source_position: #source_position,
+                });
+            };
+        },
     }
 }
 

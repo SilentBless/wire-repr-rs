@@ -144,7 +144,7 @@ pub(super) fn render_layout(
 fn eligible_codec(field: &Field) -> Option<&Codec> {
     let codec = field.codec()?;
     (!codec.is_prefix()
-        && !field.is_derived_range_source
+        && !field.is_derived_range_source()
         && field.derivation.is_none()
         && field.finalization.is_none())
     .then_some(codec)

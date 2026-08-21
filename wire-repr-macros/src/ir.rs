@@ -128,8 +128,8 @@ pub(crate) struct Field {
     pub(crate) raw_getter: Ident,
     /// Stored end-boundary name used when this is a prefix field.
     pub(crate) boundary: Ident,
-    /// Whether any byte range is derived from this field's raw value.
-    pub(crate) is_derived_range_source: bool,
+    /// Range geometry derived from this field, when any range references it.
+    pub(crate) range_source: Option<RangeSource>,
     /// Builder-only semantic derivation, normalized after all field kinds are known.
     pub(crate) derivation: Option<Derivation>,
     /// Builder-only post-write finalization, normalized after field geometry is known.
@@ -160,6 +160,10 @@ impl Field {
                 end: ByteRangeEnd::BufEnd
             }
         )
+    }
+
+    pub(crate) const fn is_derived_range_source(&self) -> bool {
+        self.range_source.is_some()
     }
 }
 
@@ -247,6 +251,14 @@ pub(crate) enum ByteRangeEnd {
     Relative { source: usize, source_span: Span },
     Absolute { source: usize, source_span: Span },
     BufEnd,
+}
+
+/// How a range source's fixed value becomes byte geometry.
+pub(crate) enum RangeSource {
+    /// The builtin fixed integer value directly denotes the range geometry.
+    Direct,
+    /// An adapter converts the builtin fixed integer value to range geometry.
+    Transformed { adapter: Path },
 }
 
 /// A semantic fixed mapping and its physical raw representation.
@@ -646,12 +658,15 @@ fn normalize_layout(
     let mut pending_finalizations = Vec::with_capacity(source.fields.len());
     let mut fields = Vec::new();
     let mut normalized_field_indices = Vec::new();
+    let mut pending_range_sources = Vec::with_capacity(source.fields.len());
     let mut field_names = HashMap::new();
     let mut getter_names = HashMap::new();
     let mut variants = HashMap::new();
     let mut placements = HashMap::new();
     for (declaration_index, field) in source.fields.into_iter().enumerate() {
         normalized_field_indices.push(None);
+        let range_source = field.range_source;
+        pending_range_sources.push(range_source);
         pending_finalizations.push(field.finalization.map(|finalization| {
             PendingFinalization {
                 function: finalization.function,
@@ -999,7 +1014,7 @@ fn normalize_layout(
             range_existing_name,
             raw_getter,
             boundary,
-            is_derived_range_source: false,
+            range_source: None,
             derivation: field.derivation.map(|derivation| Derivation {
                 function: derivation.function,
                 error: derivation.error,
@@ -1060,6 +1075,52 @@ fn normalize_layout(
             } => None,
         })
         .collect();
+    for (declaration_index, adapter) in pending_range_sources.iter().enumerate() {
+        let Some(adapter) = adapter else {
+            continue;
+        };
+        let span_error = |message| Error::new_spanned(adapter, message);
+        let Some(Some(source_index)) = normalized_field_indices.get(declaration_index) else {
+            continue;
+        };
+        let source = &fields[*source_index];
+        if kind == syntax::LayoutKind::Absolute {
+            push(
+                errors,
+                span_error("`range_source` is unsupported in absolute layouts"),
+            );
+        }
+        if !matches!(source.codec(), Some(Codec::Builtin(_))) {
+            push(
+                errors,
+                span_error("`range_source` requires a direct builtin integer fixed codec"),
+            );
+        }
+        if source.mapping.is_some() {
+            push(
+                errors,
+                span_error("`range_source` cannot be used with a semantic mapping"),
+            );
+        }
+        if !source.projections.is_empty() {
+            push(
+                errors,
+                span_error("`range_source` cannot be used with bit projections"),
+            );
+        }
+        if source.derivation.is_some() {
+            push(
+                errors,
+                span_error("`range_source` cannot be used with `derive`"),
+            );
+        }
+        if pending_finalizations[declaration_index].is_some() {
+            push(
+                errors,
+                span_error("`range_source` cannot be used with `finalize`"),
+            );
+        }
+    }
     let mut source_algebra = HashMap::new();
     for (range_index, source_declaration, source_span) in pending_ranges {
         let Some(Some(source_index)) = normalized_field_indices.get(source_declaration) else {
@@ -1096,8 +1157,7 @@ fn normalize_layout(
             } => "absolute",
             _ => continue,
         };
-        let key = source_index;
-        if let Some(previous) = source_algebra.insert(key, algebra)
+        if let Some(previous) = source_algebra.insert(source_index, algebra)
             && previous != algebra
         {
             push(
@@ -1114,8 +1174,37 @@ fn normalize_layout(
         {
             *source = source_index;
         }
-        fields[source_index].is_derived_range_source = true;
+        if fields[source_index].range_source.is_none() {
+            let range_source = match pending_range_sources[source_declaration].take() {
+                Some(adapter) => RangeSource::Transformed { adapter },
+                None => RangeSource::Direct,
+            };
+            if matches!(range_source, RangeSource::Transformed { .. }) {
+                let variant = generated_ident(
+                    &format!("RangeSource{}", fields[source_index].error_variant),
+                    fields[source_index].name.span(),
+                    "range source error variant",
+                    errors,
+                )?;
+                register_name(
+                    &mut variants,
+                    &variant,
+                    errors,
+                    "generated range source error variant collision",
+                );
+            }
+            fields[source_index].range_source = Some(range_source);
+        }
         fields[source_index].raw_setter_name = None;
+    }
+    for adapter in pending_range_sources.iter().flatten() {
+        push(
+            errors,
+            Error::new_spanned(
+                adapter,
+                "`range_source` requires a `bytes(source)` or `bytes_to(source)` range",
+            ),
+        );
     }
 
     // Derivations are semantic builder inputs. Resolve their declared dependencies only
@@ -1186,7 +1275,7 @@ fn normalize_layout(
         }
     }
     for field in &fields {
-        if !field.is_derived_range_source {
+        if !field.is_derived_range_source() {
             continue;
         }
         if field.derivation.is_some() {
@@ -1612,7 +1701,7 @@ fn normalize_finalizers(
         if field.mapping.is_some()
             || !field.projections.is_empty()
             || field.derivation.is_some()
-            || field.is_derived_range_source
+            || field.is_derived_range_source()
             || !matches!(field.codec(), Some(Codec::Builtin(_)))
         {
             push(
@@ -1661,7 +1750,7 @@ fn normalize_finalizers(
                         );
                         continue;
                     }
-                    if fields[*source].is_derived_range_source {
+                    if fields[*source].is_derived_range_source() {
                         push(
                             errors,
                             Error::new(
@@ -1891,7 +1980,7 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
     let mut setters = HashMap::new();
     for field in fields.iter().filter(|field| {
         matches!(field.codec(), Some(codec) if !codec.is_prefix())
-            && !field.is_derived_range_source
+            && !field.is_derived_range_source()
             && field.derivation.is_none()
             && field.finalization.is_none()
     }) {
@@ -1970,7 +2059,9 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
     }
     let mut fluent = HashMap::new();
     for field in fields.iter().filter(|field| {
-        !field.is_derived_range_source && field.derivation.is_none() && field.finalization.is_none()
+        !field.is_derived_range_source()
+            && field.derivation.is_none()
+            && field.finalization.is_none()
     }) {
         let name = normalized_name(&field.name);
         if matches!(name.as_str(), "new" | "prepare" | "build_into") {
@@ -1993,7 +2084,9 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
         }
     }
     for field in fields.iter().filter(|field| {
-        !field.is_derived_range_source && field.derivation.is_none() && field.finalization.is_none()
+        !field.is_derived_range_source()
+            && field.derivation.is_none()
+            && field.finalization.is_none()
     }) {
         if let Some(existing) = &field.range_existing_name {
             let name = normalized_name(existing);
@@ -2011,7 +2104,7 @@ fn validate_dynamic_layout_namespace(fields: &[Field], errors: &mut Option<Error
     for field in fields
         .iter()
         .filter(|field| {
-            !field.is_derived_range_source
+            !field.is_derived_range_source()
                 && field.derivation.is_none()
                 && field.finalization.is_none()
         })
@@ -3056,8 +3149,14 @@ mod tests {
         let Item::Layout(Layout::Sequential(layout)) = &value.items[0] else {
             panic!("expected sequential layout")
         };
-        assert!(layout.data.fields[1].is_derived_range_source);
-        assert!(layout.data.fields[2].is_derived_range_source);
+        assert!(matches!(
+            layout.data.fields[1].range_source,
+            Some(RangeSource::Direct)
+        ));
+        assert!(matches!(
+            layout.data.fields[2].range_source,
+            Some(RangeSource::Direct)
+        ));
         assert!(matches!(
             layout.data.fields[0].kind,
             FieldKind::ByteRange {
@@ -3111,6 +3210,63 @@ mod tests {
             "layout H { payload: region(length); length: U8; }",
             "expected curly braces",
         );
+    }
+
+    #[test]
+    fn normalizes_transformed_range_sources_and_rejects_invalid_owners() {
+        let value = model(
+            "layout Relative { length: BeU16 { range_source: crate::Length; }; payload: bytes(length); } layout Absolute { end: BeU16 { range_source: crate::Endpoint; }; payload: bytes_to(end); }",
+        )
+        .unwrap();
+        for (item, expected) in value.items.iter().zip(["Length", "Endpoint"]) {
+            let Item::Layout(Layout::Sequential(layout)) = item else {
+                panic!("expected sequential layout")
+            };
+            assert!(matches!(
+                &layout.data.fields[0].range_source,
+                Some(RangeSource::Transformed { adapter }) if adapter.segments.last().is_some_and(|segment| segment.ident == expected)
+            ));
+        }
+        for (source, needle) in [
+            (
+                "layout H { length: U8 { range_source: crate::Length; }; }",
+                "requires a `bytes(source)`",
+            ),
+            (
+                "layout H { length: U8 as crate::Length { range_source: crate::Length; }; payload: bytes(length); }",
+                "semantic mapping",
+            ),
+            (
+                "layout H { length: U8 { projections { bit flag: 0; } range_source: crate::Length; }; payload: bytes(length); }",
+                "bit projections",
+            ),
+            (
+                "layout H { length: U8 { derive: crate::f(); derive_error: crate::E; range_source: crate::Length; }; payload: bytes(length); }",
+                "with `derive`",
+            ),
+            (
+                "layout H { length: U8 { finalize: crate::f(value(length)); range_source: crate::Length; }; payload: bytes(length); }",
+                "with `finalize`",
+            ),
+            (
+                "layout H { length: crate::Length { range_source: crate::Length; }; payload: bytes(length); }",
+                "direct builtin integer",
+            ),
+            (
+                "absolute layout H { length @ 0: U8 { range_source: crate::Length; }; }",
+                "unsupported in absolute",
+            ),
+            (
+                "layout H { length @ 1: U8 { range_source: crate::Length; }; relative @ 2: bytes(length); absolute @ 3: bytes_to(length); }",
+                "cannot mix relative and absolute",
+            ),
+            (
+                "layout H { payload @ 1: bytes(length); length @ 2: U8 { range_source: crate::Length; }; }",
+                "must physically precede",
+            ),
+        ] {
+            error(source, needle);
+        }
     }
 
     #[test]

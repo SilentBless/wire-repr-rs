@@ -6,7 +6,7 @@ use quote::{format_ident, quote};
 use super::super::{codec_tokens, effective_fixed_codec_tokens, mapping_raw_type_tokens};
 use crate::ir::{
     Builtin, ByteRangeEnd, DeriveOperand, Field, FieldKind, FinalizeBoundary, FinalizeOperand,
-    PhysicalItem, SequentialLayout,
+    PhysicalItem, RangeSource, SequentialLayout,
 };
 
 pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
@@ -21,7 +21,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let inputs: Vec<_> = data
         .fields
         .iter()
-        .filter(|field| !field.is_derived_range_source && field.derivation.is_none() && field.finalization.is_none())
+        .filter(|field| !field.is_derived_range_source() && field.derivation.is_none() && field.finalization.is_none())
         .map(|field| {
             let name = &field.name;
             if field.is_byte_range() {
@@ -72,7 +72,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         .fields
         .iter()
         .filter(|field| {
-            !field.is_derived_range_source
+            !field.is_derived_range_source()
                 && field.derivation.is_none()
                 && field.finalization.is_none()
         })
@@ -84,7 +84,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         .fields
         .iter()
         .filter(|field| {
-            !field.is_derived_range_source
+            !field.is_derived_range_source()
                 && field.derivation.is_none()
                 && field.finalization.is_none()
         })
@@ -105,7 +105,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             }
         })
     });
-    let missing = data.fields.iter().filter(|field| !field.is_derived_range_source && field.derivation.is_none() && field.finalization.is_none()).map(|field| {
+    let missing = data.fields.iter().filter(|field| !field.is_derived_range_source() && field.derivation.is_none() && field.finalization.is_none()).map(|field| {
         let name = &field.name;
         let text = field_name(field);
         quote! {
@@ -127,7 +127,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         }
     });
     let ordinary_preflight = data.fields.iter().enumerate().filter_map(|(index, field)| {
-        if field.is_derived_range_source
+        if field.is_derived_range_source()
             || field.derivation.is_some()
             || field.finalization.is_some()
         {
@@ -183,6 +183,9 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
         .iter()
         .filter_map(encode_debug)
         .chain(data.fields.iter().filter_map(derive_debug));
+    let range_source_variants = transformed_range_source_variants(layout);
+    let range_source_debugs = transformed_range_source_debugs(layout);
+    let range_source_displays = transformed_range_source_displays(layout);
     let context_fluent = data.contexts.iter().map(|context| {
         let name = &context.name;
         let setter = &context.setter_name;
@@ -193,7 +196,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
     let fluent = data
         .fields
         .iter()
-        .filter(|field| !field.is_derived_range_source && field.derivation.is_none() && field.finalization.is_none())
+        .filter(|field| !field.is_derived_range_source() && field.derivation.is_none() && field.finalization.is_none())
         .flat_map(|field| {
             let name = &field.name;
             let docs = &field.docs;
@@ -320,6 +323,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
             InvalidCodecWidth { #[doc = "The one-based physical position of the invalid field."] position: usize },
             #[doc = "Reports a range-derived source value that cannot be represented by its physical source type."]
             InvalidRangeSource { #[doc = "The one-based physical position of the range."] position: usize, #[doc = "The one-based physical position of its source field."] source_position: usize, #[doc = "The required source value."] value: usize },
+            #(#range_source_variants)*
             #[doc = "Reports ranges sharing a source but requiring unequal source values."]
             ConflictingRangeSources { #[doc = "The one-based physical position of the source field."] source_position: usize, #[doc = "The first range physical position."] first_range_position: usize, #[doc = "The conflicting range physical position."] conflicting_range_position: usize, #[doc = "The first required source value."] expected: usize, #[doc = "The conflicting required source value."] actual: usize },
             #[doc = "Reports a successful fixed codec plan with an invalid encoded length."]
@@ -340,6 +344,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                     #(#debugs)*
                     Self::InvalidCodecWidth { position } => formatter.debug_struct("InvalidCodecWidth").field("position", position).finish(),
                     Self::InvalidRangeSource { position, source_position, value } => formatter.debug_struct("InvalidRangeSource").field("position", position).field("source_position", source_position).field("value", value).finish(),
+                    #(#range_source_debugs)*
                     Self::ConflictingRangeSources { source_position, first_range_position, conflicting_range_position, expected, actual } => formatter.debug_struct("ConflictingRangeSources").field("source_position", source_position).field("first_range_position", first_range_position).field("conflicting_range_position", conflicting_range_position).field("expected", expected).field("actual", actual).finish(),
                     Self::InvalidPlanLength { field, expected, actual } => formatter.debug_struct("InvalidPlanLength").field("field", field).field("expected", expected).field("actual", actual).finish(),
                     Self::InvalidPrefixPlanLength { field } => formatter.debug_struct("InvalidPrefixPlanLength").field("field", field).finish(),
@@ -357,6 +362,7 @@ pub(super) fn render_layout(layout: &SequentialLayout) -> TokenStream {
                     #(#displays)*
                     Self::InvalidCodecWidth { position } => write!(formatter, "fixed codec at position {position} has zero width"),
                     Self::InvalidRangeSource { position, source_position, value } => write!(formatter, "range at position {position} requires source value {value}, not representable by source at position {source_position}"),
+                    #(#range_source_displays)*
                     Self::ConflictingRangeSources { source_position, first_range_position, conflicting_range_position, expected, actual } => write!(formatter, "ranges at positions {first_range_position} and {conflicting_range_position} disagree for source {source_position}: {expected} versus {actual}"),
                     Self::InvalidPlanLength { field, expected, actual } => write!(formatter, "field {field} plan length: expected {expected} bytes, got {actual}"),
                     Self::InvalidPrefixPlanLength { field } => write!(formatter, "prefix field {field} plan has zero length"),
@@ -425,7 +431,7 @@ fn retained_type(field: &Field) -> Option<TokenStream> {
     } else {
         effective_fixed_codec_tokens(field)?
     };
-    Some(if field.is_derived_range_source {
+    Some(if field.is_derived_range_source() {
         quote!(<#codec as ::wire_repr::FixedCodec>::Value<'static>)
     } else if field.codec().is_some_and(|codec| codec.is_prefix()) {
         quote!(<#codec as ::wire_repr::PrefixCodec>::Value<'value>)
@@ -456,7 +462,7 @@ fn ordinary_retained_bindings(layout: &SequentialLayout) -> Vec<TokenStream> {
         .into_iter()
         .filter_map(|index| {
             let field = &layout.data.fields[index];
-            if field.derivation.is_some() || field.is_derived_range_source {
+            if field.derivation.is_some() || field.is_derived_range_source() {
                 return None;
             }
             let name = &field.name;
@@ -508,7 +514,7 @@ fn plan_fields(layout: &SequentialLayout, range_input: &syn::Ident) -> Vec<Token
             } else {
                 effective_fixed_codec_tokens(field).expect("fixed codec")
             };
-            let ty = if field.is_derived_range_source {
+            let ty = if field.is_derived_range_source() {
                 quote!(<#codec as ::wire_repr::FixedCodec>::Plan<'static>)
             } else if field.codec().is_some_and(|codec| codec.is_prefix()) {
                 quote!(<#codec as ::wire_repr::PrefixCodec>::Plan<'value>)
@@ -631,7 +637,7 @@ fn derived_source_preflight(
     let mut source_plans = Vec::new();
 
     for (source, field) in layout.data.fields.iter().enumerate() {
-        if !field.is_derived_range_source {
+        if !field.is_derived_range_source() {
             continue;
         }
         let Some(codec) = field.codec() else {
@@ -701,24 +707,36 @@ fn derived_source_preflight(
             quote!(let #retained = #source_value;)
         });
         let plan = plan_ident(source);
-        let variant = &field.error_variant;
         let text = field_name(field);
         let plan_expression = quote!(<#codec as ::wire_repr::FixedCodec>::plan(#source_value));
         let Some(length_check) = fixed_plan_length_check(field, &plan, &text, error) else {
             continue;
         };
+        let conversion = match field.range_source.as_ref() {
+            Some(RangeSource::Transformed { adapter }) => {
+                let variant = range_source_variant(field);
+                quote! {
+                    let #source_value: <#codec as ::wire_repr::FixedCodec>::Value<'static> = <#adapter as ::wire_repr::RangeSource<#codec>>::from_bytes(#required_value)
+                        .map_err(|error| #error::#variant { position: #first_position, source_position: #source_position, value: #required_value, error })?;
+                }
+            }
+            Some(RangeSource::Direct) | None => quote! {
+                let #source_value: <#codec as ::wire_repr::FixedCodec>::Value<'static> = match ::core::convert::TryFrom::<usize>::try_from(#required_value) {
+                    Ok(value) => value,
+                    Err(_) => return Err(#error::InvalidRangeSource {
+                        position: #first_position,
+                        source_position: #source_position,
+                        value: #required_value,
+                    }),
+                };
+            },
+        };
+        let field_variant = &field.error_variant;
         source_plans.push(quote! {
-            let #source_value: <#codec as ::wire_repr::FixedCodec>::Value<'static> = match ::core::convert::TryFrom::<usize>::try_from(#required_value) {
-                Ok(value) => value,
-                Err(_) => return Err(#error::InvalidRangeSource {
-                    position: #first_position,
-                    source_position: #source_position,
-                    value: #required_value,
-                }),
-            };
+            #conversion
             #source_binding
             #retained_binding
-            let #plan = #plan_expression.map_err(#error::#variant)?;
+            let #plan = #plan_expression.map_err(#error::#field_variant)?;
             #length_check
         });
     }
@@ -728,6 +746,63 @@ fn derived_source_preflight(
         .into_iter()
         .chain(conflicts.into_iter().map(|(_, check)| check))
         .chain(source_plans)
+        .collect()
+}
+
+fn range_source_variant(field: &Field) -> syn::Ident {
+    format_ident!("RangeSource{}", field.error_variant)
+}
+
+fn transformed_range_source_fields(layout: &SequentialLayout) -> impl Iterator<Item = &Field> {
+    layout
+        .data
+        .fields
+        .iter()
+        .filter(|field| matches!(field.range_source, Some(RangeSource::Transformed { .. })))
+}
+
+fn transformed_range_source_variants(layout: &SequentialLayout) -> Vec<TokenStream> {
+    transformed_range_source_fields(layout)
+        .map(|field| {
+            let variant = range_source_variant(field);
+            let codec = codec_tokens(field.codec().expect("transformed source codec"));
+            let adapter = match field.range_source.as_ref().expect("range source") {
+                RangeSource::Transformed { adapter } => adapter,
+                RangeSource::Direct => unreachable!("filtered transformed source"),
+            };
+            let name = field_name(field);
+            quote! {
+                #[doc = concat!("Reports range-source conversion failure for field `", #name, "`.")]
+                #variant {
+                    #[doc = "The one-based physical position of the first consuming range."]
+                    position: usize,
+                    #[doc = "The one-based physical position of the source field."]
+                    source_position: usize,
+                    #[doc = "The required byte geometry."]
+                    value: usize,
+                    #[doc = "The range-source adapter error."]
+                    error: <#adapter as ::wire_repr::RangeSource<#codec>>::Error,
+                },
+            }
+        })
+        .collect()
+}
+
+fn transformed_range_source_debugs(layout: &SequentialLayout) -> Vec<TokenStream> {
+    transformed_range_source_fields(layout)
+        .map(|field| {
+            let variant = range_source_variant(field);
+            quote! { Self::#variant { position, source_position, value, error } => formatter.debug_struct(stringify!(#variant)).field("position", position).field("source_position", source_position).field("value", value).field("error", error).finish(), }
+        })
+        .collect()
+}
+
+fn transformed_range_source_displays(layout: &SequentialLayout) -> Vec<TokenStream> {
+    transformed_range_source_fields(layout)
+        .map(|field| {
+            let variant = range_source_variant(field);
+            quote! { Self::#variant { position, source_position, value, error } => write!(formatter, "range at position {position} failed conversion of byte geometry {value} for source at position {source_position}: {error:?}"), }
+        })
         .collect()
 }
 

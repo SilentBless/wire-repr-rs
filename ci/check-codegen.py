@@ -22,6 +22,8 @@ PAIRS = (
     ("builder", "generated_builder", "handwritten_builder", False, 4),
     ("prepared_builder", "generated_prepared_builder", "handwritten_prepared_builder", False, 4),
     ("dynamic_prepared_builder", "generated_dynamic_prepared_builder", "handwritten_dynamic_prepared_builder", False, 4),
+    ("transformed_range_getter", "generated_transformed_range_getter", "handwritten_transformed_range_getter", False, 2),
+    ("transformed_prepared_builder", "generated_transformed_prepared_builder", "handwritten_transformed_prepared_builder", False, 4),
     ("absolute_prepared_builder", "generated_absolute_prepared_builder", "handwritten_absolute_prepared_builder", False, 4),
     ("scalar_getter", "generated_scalar_getter", "handwritten_scalar_getter", True, 8),
     ("scalar_mutation", "generated_scalar_mutation", "handwritten_scalar_mutation", True, 4),

@@ -4,6 +4,7 @@ pub(crate) mod fixed;
 mod integers;
 mod plan;
 mod prefix;
+mod range_source;
 
 pub use fixed::{Bytes, ExactWidthError, FixedCodec};
 pub use integers::{
@@ -12,3 +13,4 @@ pub use integers::{
 };
 pub use plan::{EncodePlan, OutputTooShortError, PreparedLayout};
 pub use prefix::{PrefixCodec, PrefixExtent};
+pub use range_source::RangeSource;

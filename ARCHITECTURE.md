@@ -132,11 +132,26 @@ Only sequential layouts may contain byte ranges:
   representation byte zero.
 - `remaining_bytes` consumes the supplied view-buffer tail.
 
-The first two forms require an eligible physically preceding source: a built-in
-fixed integer or a total mapping over one. Parsing uses the physical raw integer
-and checked conversion to `usize`; a mapped value never changes geometry.
-Self-delimiting, custom/direct, declared-scalar, nominal, and byte-range fields are
-not sources.
+The first two forms require an eligible physically preceding built-in fixed integer
+actually consumed by at least one range. An unannotated source uses its raw physical
+integer with checked `TryInto<usize>` parsing and `TryFrom<usize>` preparation; a
+total `as Semantic` mapping remains distinct, affects nominal getters only, and does
+not change that geometry. A source annotated with `range_source: Adapter` instead
+uses `RangeSource<Codec>` for checked bidirectional structural conversion. Parsing
+calls `to_bytes(raw source)` at the consuming range before the existing checked
+bounds/range logic. `prepare()` derives required byte geometry, requires shared
+sources to agree on that geometry, calls `from_bytes` once per source, then plans its
+physical codec. This canonicalizes the encoded source from requested geometry; no API
+preserves contradictory or noncanonical source values. Commit does neither conversion
+nor planning and remains capacity-only/atomic. Failed adapter conversion is reported by
+concrete generated source-local parse or write error variants.
+
+Adapters cannot coexist with a mapping, projections, `derive`, or `finalize`. Custom
+codecs, declared scalars, fixed bytes, prefix codecs, ranges, absolute layouts, and
+`remaining_bytes` are unsupported sources. Built-in-integer-only adapter support is
+a hard ownership boundary: borrowed custom `FixedCodec` values or plans can require
+self-referential prepared storage. The raw source getter remains the wire integer;
+an adapter does not create a geometry getter or own protocol/RFC policy.
 `bytes(0)` is invalid, but a dynamic range may be empty.
 
 An absolute endpoint before the current physical endpoint is a range error. An
@@ -174,10 +189,11 @@ A builder has a strict two-phase contract.
 
 **Preflight** completes all fallible work before any caller-output mutation:
 required inputs and contexts, codec planning, plan-length validation, derivations,
-range source conversion, shared-source agreement, dynamic geometry, checked
+range geometry conversion, shared-source agreement, dynamic geometry, checked
 arithmetic, and output capacity. Missing inputs and planning follow declaration
-order. Preflight derives each shared source once and rejects conflicting range
-values before planning/writing dependent output.
+order. For every source, preflight derives geometry from the consuming ranges,
+requires all shared consumers to agree on it, converts it to the source's encoded
+value once, and plans the physical codec before writing dependent output.
 
 **Commit** writes physical entries in physical order. It returns the mutable
 representation plus a disjoint untouched suffix. Padding, alignment, absolute
@@ -199,7 +215,9 @@ builder span participates in the represented extent.
 `FixedCodec::WIDTH` is nonzero and its successful plan has exactly that width.
 `PrefixCodec::validate_prefix` reports a nonzero extent within its supplied bytes; a
 successful self-delimiting plan is nonempty. `EncodePlan::encoded_len` and `write_into`
-refer to the same representation.
+refer to the same representation. A `RangeSource` must coherently round-trip each
+supported fixed source value and byte geometry, use checked arithmetic, and report an
+explicit conversion error; it establishes structural validity, not protocol policy.
 
 A successful plan must encode the planned semantic value. Any violation is
 reported before output mutation where the generated operation can observe it.

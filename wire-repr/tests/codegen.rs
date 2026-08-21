@@ -1,7 +1,38 @@
 //! Release-codegen regression probes for generated layouts.
 
 use core::hint::black_box;
-use wire_repr::wire_repr;
+use wire_repr::{FixedCodec, RangeSource, U8, wire_repr};
+
+/// A structural conversion error used only by the release-codegen gate.
+#[derive(Debug)]
+pub enum CodegenWordsError {
+    /// The source-to-byte multiplication overflowed.
+    Arithmetic,
+    /// The byte geometry cannot be represented as a whole number of words.
+    Unaligned,
+    /// The word count cannot be represented by the source byte.
+    TooLarge,
+}
+
+/// A four-byte-word range source used only by the release-codegen gate.
+pub struct CodegenWords;
+
+impl RangeSource<U8> for CodegenWords {
+    type Error = CodegenWordsError;
+
+    fn to_bytes(value: <U8 as FixedCodec>::Value<'_>) -> Result<usize, Self::Error> {
+        usize::from(value)
+            .checked_mul(4)
+            .ok_or(CodegenWordsError::Arithmetic)
+    }
+
+    fn from_bytes(bytes: usize) -> Result<<U8 as FixedCodec>::Value<'static>, Self::Error> {
+        if !bytes.is_multiple_of(4) {
+            return Err(CodegenWordsError::Unaligned);
+        }
+        u8::try_from(bytes / 4).map_err(|_| CodegenWordsError::TooLarge)
+    }
+}
 
 /// A total nominal mapping used only by the release-codegen gate.
 #[repr(transparent)]
@@ -100,6 +131,14 @@ wire_repr! {
         payload @ 3: bytes(length);
         padding(1) @ 4;
         align(4) @ 5;
+    }
+
+    /// A word-counted dynamic layout used only by the release-codegen gate.
+    pub layout CodegenTransformedRange {
+        /// The payload length measured in four-byte words.
+        length: U8 { range_source: crate::CodegenWords; };
+        /// The payload whose byte length is derived from `length`.
+        payload: bytes(length);
     }
 
     /// A post-write-finalized layout used only by the release-codegen gate.
@@ -255,6 +294,64 @@ pub fn handwritten_dynamic_prepared_builder(
     output[0] = tag;
     output[1] = length;
     output[2..2 + payload.len()].copy_from_slice(payload);
+    (true, encoded_len)
+}
+
+/// Generated transformed-range parser and payload getter probe.
+#[inline(never)]
+pub fn generated_transformed_range_getter(bytes: &[u8]) -> Option<u8> {
+    CodegenTransformedRange::view(bytes)
+        .without_trailing()
+        .ok()?
+        .payload()
+        .first()
+        .copied()
+}
+
+/// Equivalent handwritten transformed-range parser and payload getter probe.
+#[inline(never)]
+pub fn handwritten_transformed_range_getter(bytes: &[u8]) -> Option<u8> {
+    let (&words, payload) = bytes.split_first()?;
+    let expected = usize::from(words).checked_mul(4)?;
+    if payload.len() != expected {
+        return None;
+    }
+    payload.first().copied()
+}
+
+/// Generated transformed-range prepared-layout commit probe.
+#[inline(never)]
+pub fn generated_transformed_prepared_builder(output: &mut [u8], payload: &[u8]) -> (bool, usize) {
+    let Ok(plan) = CodegenTransformedRangeBuilder::new()
+        .payload(payload)
+        .prepare()
+    else {
+        return (false, 0);
+    };
+    let encoded_len = plan.encoded_len();
+    (plan.commit_into(output).is_ok(), encoded_len)
+}
+
+/// Equivalent handwritten transformed-range prepared-layout commit probe.
+#[inline(never)]
+pub fn handwritten_transformed_prepared_builder(
+    output: &mut [u8],
+    payload: &[u8],
+) -> (bool, usize) {
+    if !payload.len().is_multiple_of(4) {
+        return (false, 0);
+    }
+    let Ok(words) = u8::try_from(payload.len() / 4) else {
+        return (false, 0);
+    };
+    let Some(encoded_len) = payload.len().checked_add(1) else {
+        return (false, 0);
+    };
+    if output.len() < encoded_len {
+        return (false, encoded_len);
+    }
+    output[0] = words;
+    output[1..encoded_len].copy_from_slice(payload);
     (true, encoded_len)
 }
 
@@ -843,6 +940,75 @@ fn generated_probes_match_handwritten_safe_rust() {
         handwritten_dynamic_prepared_short
     );
     assert_eq!(generated_dynamic_prepared_short, [0xa5; 7]);
+
+    let transformed_payload = [0x10, 0x20, 0x30, 0x40];
+    let transformed_input = [1, 0x10, 0x20, 0x30, 0x40];
+    assert_eq!(
+        black_box(generated_transformed_range_getter(black_box(
+            &transformed_input
+        ))),
+        black_box(handwritten_transformed_range_getter(black_box(
+            &transformed_input
+        )))
+    );
+    for invalid in [
+        &[][..],
+        &[1, 0x10, 0x20, 0x30][..],
+        &[2, 0x10, 0x20, 0x30, 0x40][..],
+    ] {
+        assert_eq!(
+            generated_transformed_range_getter(invalid),
+            handwritten_transformed_range_getter(invalid)
+        );
+    }
+
+    let mut generated_transformed_prepared = [0xa5; 6];
+    let mut handwritten_transformed_prepared = [0xa5; 6];
+    assert_eq!(
+        black_box(generated_transformed_prepared_builder(
+            black_box(&mut generated_transformed_prepared),
+            black_box(&transformed_payload),
+        )),
+        black_box(handwritten_transformed_prepared_builder(
+            black_box(&mut handwritten_transformed_prepared),
+            black_box(&transformed_payload),
+        ))
+    );
+    assert_eq!(
+        generated_transformed_prepared,
+        handwritten_transformed_prepared
+    );
+    assert_eq!(
+        generated_transformed_prepared,
+        [1, 0x10, 0x20, 0x30, 0x40, 0xa5]
+    );
+
+    let mut generated_transformed_short = [0xa5; 4];
+    let mut handwritten_transformed_short = [0xa5; 4];
+    assert_eq!(
+        black_box(generated_transformed_prepared_builder(
+            black_box(&mut generated_transformed_short),
+            black_box(&transformed_payload),
+        )),
+        black_box(handwritten_transformed_prepared_builder(
+            black_box(&mut handwritten_transformed_short),
+            black_box(&transformed_payload),
+        ))
+    );
+    assert_eq!(generated_transformed_short, handwritten_transformed_short);
+    assert_eq!(generated_transformed_short, [0xa5; 4]);
+
+    let mut generated_transformed_unaligned = [0xa5; 6];
+    let mut handwritten_transformed_unaligned = [0xa5; 6];
+    assert_eq!(
+        generated_transformed_prepared_builder(&mut generated_transformed_unaligned, &[0; 3]),
+        handwritten_transformed_prepared_builder(&mut handwritten_transformed_unaligned, &[0; 3])
+    );
+    assert_eq!(
+        generated_transformed_unaligned,
+        handwritten_transformed_unaligned
+    );
+    assert_eq!(generated_transformed_unaligned, [0xa5; 6]);
 
     let mut generated_absolute_prepared_output = [0xa5; 6];
     let mut handwritten_absolute_prepared_output = [0xa5; 6];
