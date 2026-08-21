@@ -53,12 +53,13 @@ let bytes = [
     0xff, 0xff, 0x00, 0x1d, 0x1d, 0xac, 0x2b, 0x7c,
 ];
 
-let header = BitcoinHeader::view(&bytes).without_trailing()?;
+let header = BitcoinHeader::view(&bytes)
+    .without_trailing()
+    .expect("genesis header is structurally valid");
 assert_eq!(header.version(), 1);
 assert_eq!(header.timestamp(), 1_231_006_505);
 assert_eq!(header.nonce(), 2_083_236_893);
 assert_eq!(header.as_bytes(), &bytes);
-# Ok::<(), BitcoinHeaderDecodeError>(())
 ```
 
 The view borrows the original bytes. It does not allocate, copy the header, or pretend
@@ -106,16 +107,17 @@ enum Message {
     Halt = 2,
 }
 
-let message = Message::view(&[1, 0x12, 0x34]).without_trailing()?;
+let message = Message::view(&[1, 0x12, 0x34])
+    .without_trailing()
+    .expect("known message is structurally valid");
 assert_eq!(message.ping().unwrap().sequence(), 0x1234);
-# Ok::<(), MessageDecodeError>(())
 ```
 
 For negotiated numeric IDs, an enum may name one concrete consumer-owned opcode table
 with `opcodes = Type` and per-variant `opcode = Path`. Supply it explicitly at the
 boundary:
 
-```text
+```rust
 Packet::view(bytes).opcodes(&opcodes).without_trailing()
 packet.opcodes(&opcodes).prepare()
 ```
@@ -139,10 +141,11 @@ struct Flags {
     mode: u8,
 }
 
-let flags = Flags::view(&[0, 0b0000_1011]).without_trailing()?;
+let flags = Flags::view(&[0, 0b0000_1011])
+    .without_trailing()
+    .expect("flags are structurally valid");
 assert!(flags.enabled());
 assert_eq!(flags.mode(), 5);
-# Ok::<(), FlagsDecodeError>(())
 ```
 
 Bit numbers are semantic least-significant-bit positions after byte-order decoding.
@@ -154,8 +157,8 @@ Unprojected bits are accepted on read and written as zero by the explicit
 Statically fixed records expose an ordinary infallible, exact-size iterator after one
 framing check:
 
-```text
-let records = Header::views(bytes)?;
+```rust
+let records = Header::views(bytes).expect("records have fixed-width framing");
 for record in records {
     use_record(record);
 }
@@ -163,9 +166,9 @@ for record in records {
 
 Potentially variable-width records expose a fail-closed cursor:
 
-```text
+```rust
 let mut records = Chunk::cursor(bytes);
-while let Some(record) = records.next()? {
+while let Some(record) = records.next().expect("next record is structurally valid") {
     use_record(record);
 }
 ```
@@ -188,15 +191,22 @@ materialized during reading; use generated getters.
 Encoding consumes the ordinary semantic value:
 
 ```rust
-# use wire_repr::{PreparedLayout, Wire};
-# #[derive(Wire)]
-# struct Header { kind: u8 }
-let plan = Header { kind: 7 }.prepare()?;
+use wire_repr::{PreparedLayout, Wire};
+
+#[derive(Wire)]
+struct Header {
+    kind: u8,
+}
+
+let plan = Header { kind: 7 }
+    .prepare()
+    .expect("header preparation succeeds");
 let mut output = [0xa5; 2];
-let (written, suffix) = plan.commit_into(&mut output)?;
+let (written, suffix) = plan
+    .commit_into(&mut output)
+    .expect("output has enough capacity");
 assert_eq!(written.as_bytes(), &[7]);
 assert_eq!(suffix, &mut [0xa5]);
-# Ok::<(), Box<dyn core::error::Error>>(())
 ```
 
 Preparation completes fallible codec planning, conversions, geometry, canonical length
