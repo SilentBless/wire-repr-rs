@@ -9,7 +9,7 @@ these rules.
 The repository root is a virtual workspace. It owns shared metadata, licensing,
 toolchain policy, and documentation; it owns no Rust source or tests.
 
-The current release line is 0.5.
+The current release line is 0.6.
 
 The workspace has exactly two crates:
 

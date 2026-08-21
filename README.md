@@ -50,7 +50,7 @@ Complete executable format fixtures: [PNG chunks](wire-repr/tests/consumer_forma
 
 ```toml
 [dependencies]
-wire-repr = { version = "0.5", default-features = false }
+wire-repr = { version = "0.6", default-features = false }
 ```
 
 Rust 1.91 is the minimum supported version. The crate has no default features and no
@@ -322,7 +322,7 @@ multiple prefixes, errors, and borrowed decoded values.
 Bitcoin CompactSize is another honest prefix-codec use for one count/value. It is **not**
 a dynamic-range source, and a repeated transaction sequence remains consumer-owned:
 keep the cursor, bound each item, and parse it separately. Arbitrary conditional fields,
-repeated sequences, and nested schemas are not layout features in 0.5.
+repeated sequences, and nested schemas are not layout features in 0.6.
 
 Versioned formats may parse a stable prefix and let consumer code select a separate
 nominal body layout, or use a dynamic choice with an explicit resolver context. In either
@@ -615,7 +615,7 @@ The published API reference is on [docs.rs](https://docs.rs/wire-repr).
 - [`wire-repr`](wire-repr/) is the public runtime facade and macro re-export.
 - [`wire-repr-macros`](wire-repr-macros/) is the host-side schema compiler.
 
-Both packages are version `0.5.2`, use edition 2024, and support Rust 1.91. The target
+Both packages are version `0.6.0`, use edition 2024, and support Rust 1.91. The target
 runtime has empty default features, no dependencies, and `unsafe_code = "deny"`.
 
 ## 📄 License

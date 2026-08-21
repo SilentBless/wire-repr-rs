@@ -1,6 +1,6 @@
 # Byte-backed representations without a runtime schema
 
-`wire-repr` 0.5 compiles binary layout declarations into safe borrowed immutable
+`wire-repr` 0.6 compiles binary layout declarations into safe borrowed immutable
 views, restricted mutable views, and builders over ordinary byte slices. It is safe
 Rust, `no_std`, `no_alloc`, has empty default features, and targets Rust 1.91 / edition
 2024. It does not use `unsafe`, allocation, alignment or ABI reinterpretation, a
