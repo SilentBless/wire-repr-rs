@@ -553,7 +553,7 @@ The published API reference is on [docs.rs](https://docs.rs/wire-repr).
 - [`wire-repr`](wire-repr/) is the public runtime facade and macro re-export.
 - [`wire-repr-macros`](wire-repr-macros/) is the host-side schema compiler.
 
-Both packages are version `0.5.1`, use edition 2024, and support Rust 1.91. The target
+Both packages are version `0.5.2`, use edition 2024, and support Rust 1.91. The target
 runtime has empty default features, no dependencies, and `unsafe_code = "deny"`.
 
 ## 📄 License
