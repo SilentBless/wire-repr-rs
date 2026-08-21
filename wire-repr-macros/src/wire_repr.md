@@ -11,7 +11,7 @@ use wire_repr::wire_repr;
 
 A declaration owns physical representation only. Application code still owns magic
 values, reserved-byte policy, checksums as protocol rules, and cross-field meaning.
-This reference describes the 0.5.0 declaration language.
+This reference describes the 0.5.1 declaration language.
 
 ## Basic syntax
 
