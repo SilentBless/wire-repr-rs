@@ -1,6 +1,6 @@
 //! Enum derive rendering.
 
-use super::super::model::{Variant, WireEnum};
+use super::super::model::{EnumTag, UnknownPolicy, Variant, VariantSelector, WireEnum};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -10,6 +10,7 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
         name,
         wire_lifetime,
         tag,
+        unknown,
         opcodes,
         variants,
     } = model;
@@ -18,14 +19,31 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
     let view_variant = format_ident!("__{name}ViewVariant");
     let decode_error = format_ident!("{name}DecodeError");
     let encode_error = format_ident!("{name}EncodeError");
-    let tag_codec = format_ident!("{}", tag.codec);
-    let tag_type = format_ident!("{}", tag.ty);
+    let (tag_codec, tag_type, byte_tag_width) = match &tag {
+        EnumTag::Integer(tag) => {
+            let codec = format_ident!("{}", tag.codec);
+            let ty = format_ident!("{}", tag.ty);
+            (quote!(#runtime::#codec), quote!(#ty), None)
+        }
+        EnumTag::Bytes { width } => (
+            quote!(#runtime::__private::OwnedBytes<#width>),
+            quote!([u8; #width]),
+            Some(*width),
+        ),
+    };
+    let preserves_unknown = matches!(unknown, UnknownPolicy::Preserve);
+    let unknown_variant = variants
+        .iter()
+        .find(|variant| matches!(variant.selector, VariantSelector::Unknown));
     let opcode_table = opcodes.as_ref().map(|input| &input.table);
     let opcode_error = opcodes.as_ref().map(|input| &input.error);
     let uses_opcodes = opcodes.is_some();
-    let has_body = variants.iter().any(|variant| variant.body.is_some());
-    let view_variant_decl_generics = has_body.then(|| quote!(<'__wire_repr_wire>));
-    let view_variant_type = if has_body {
+    let has_body = variants.iter().any(|variant| {
+        variant.body.is_some() && !matches!(variant.selector, VariantSelector::Unknown)
+    });
+    let view_variant_has_lifetime = has_body || (preserves_unknown && byte_tag_width.is_some());
+    let view_variant_decl_generics = view_variant_has_lifetime.then(|| quote!(<'__wire_repr_wire>));
+    let view_variant_type = if view_variant_has_lifetime {
         quote!(#view_variant<'__wire_repr_wire>)
     } else {
         quote!(#view_variant)
@@ -33,11 +51,15 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
     let body_view_paths: Vec<_> = variants
         .iter()
         .map(|variant| {
-            variant
-                .body
-                .as_ref()
-                .map(super::generated_view_path)
-                .transpose()
+            if matches!(variant.selector, VariantSelector::Unknown) {
+                Ok(None)
+            } else {
+                variant
+                    .body
+                    .as_ref()
+                    .map(super::generated_view_path)
+                    .transpose()
+            }
         })
         .collect::<syn::Result<_>>()?;
     let (
@@ -91,7 +113,7 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
         view_error_type,
         association_error_type,
         decode_error_impl_type,
-    ) = if has_body {
+    ) = if has_body || byte_tag_width.is_some() {
         (
             quote!(<'__wire_repr_wire>),
             quote!(#decode_error<'__wire_repr_wire>),
@@ -112,27 +134,39 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
 
     let plan_variants = variants.iter().map(|variant| {
         let variant_name = &variant.name;
-        match &variant.body {
-            Some(body) => quote! {
+        if matches!(variant.selector, VariantSelector::Unknown) {
+            quote! {
                 #[doc = concat!("Prepared `", stringify!(#variant_name), "` representation.")]
                 #variant_name {
                     /// Prepared encoded tag.
-                    tag: <#runtime::#tag_codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>,
-                    /// Prepared variant body.
-                    body: <#body as #runtime::WireEncode>::Plan<'__wire_repr_value>,
+                    tag: <#tag_codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>,
                     /// Exact total encoded length.
                     encoded_len: usize,
                 },
-            },
-            None => quote! {
-                #[doc = concat!("Prepared `", stringify!(#variant_name), "` representation.")]
-                #variant_name {
-                    /// Prepared encoded tag.
-                    tag: <#runtime::#tag_codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>,
-                    /// Exact total encoded length.
-                    encoded_len: usize,
+            }
+        } else {
+            match &variant.body {
+                Some(body) => quote! {
+                    #[doc = concat!("Prepared `", stringify!(#variant_name), "` representation.")]
+                    #variant_name {
+                        /// Prepared encoded tag.
+                        tag: <#tag_codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>,
+                        /// Prepared variant body.
+                        body: <#body as #runtime::WireEncode>::Plan<'__wire_repr_value>,
+                        /// Exact total encoded length.
+                        encoded_len: usize,
+                    },
                 },
-            },
+                None => quote! {
+                    #[doc = concat!("Prepared `", stringify!(#variant_name), "` representation.")]
+                    #variant_name {
+                        /// Prepared encoded tag.
+                        tag: <#tag_codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>,
+                        /// Exact total encoded length.
+                        encoded_len: usize,
+                    },
+                },
+            }
         }
     });
     let plan_lengths = variants.iter().map(|variant| {
@@ -141,140 +175,199 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
     });
     let view_variants = variants.iter().enumerate().map(|(index, variant)| {
         let variant_name = &variant.name;
-        match &variant.body {
-            Some(_) => {
-                let body_view = body_view_paths[index]
-                    .as_ref()
-                    .expect("body variants have generated view paths");
-                quote!(#variant_name(#body_view<'__wire_repr_wire>),)
+        if matches!(variant.selector, VariantSelector::Unknown) {
+            if byte_tag_width.is_some() {
+                quote!(#variant_name(&'__wire_repr_wire #tag_type),)
+            } else {
+                quote!(#variant_name(#tag_type),)
             }
-            None => quote!(#variant_name,),
+        } else {
+            match &variant.body {
+                Some(_) => {
+                    let body_view = body_view_paths[index]
+                        .as_ref()
+                        .expect("body variants have generated view paths");
+                    quote!(#variant_name(#body_view<'__wire_repr_wire>),)
+                }
+                None => quote!(#variant_name,),
+            }
         }
     });
     let view_getters = variants.iter().enumerate().map(|(index, variant)| {
         let variant_name = &variant.name;
         let method = snake_case(variant_name);
-        match &variant.body {
-            Some(_) => {
-                let body_view = body_view_paths[index]
-                    .as_ref()
-                    .expect("body variants have generated view paths");
-                quote! {
-                #[doc = concat!("Returns the `", stringify!(#variant_name), "` body view when selected.")]
+        if matches!(variant.selector, VariantSelector::Unknown) {
+            let return_type = if byte_tag_width.is_some() {
+                quote!(&'__wire_repr_wire #tag_type)
+            } else {
+                quote!(#tag_type)
+            };
+            quote! {
+                #[doc = concat!("Returns the raw tag captured by `", stringify!(#variant_name), "`.")]
                 #[must_use]
-                #vis fn #method(&self) -> Option<#body_view<'__wire_repr_wire>> {
+                #vis fn #method(&self) -> Option<#return_type> {
                     match self.variant {
-                        #view_variant::#variant_name(body) => Some(body),
+                        #view_variant::#variant_name(tag) => Some(tag),
                         _ => None,
                     }
                 }
             }
-            },
-            None => {
-                let method = format_ident!("is_{}", method);
-                quote! {
-                    #[doc = concat!("Returns whether the `", stringify!(#variant_name), "` variant is selected.")]
-                    #[must_use]
-                    #vis fn #method(&self) -> bool {
-                        matches!(self.variant, #view_variant::#variant_name)
+        } else {
+            match &variant.body {
+                Some(_) => {
+                    let body_view = body_view_paths[index]
+                        .as_ref()
+                        .expect("body variants have generated view paths");
+                    quote! {
+                        #[doc = concat!("Returns the `", stringify!(#variant_name), "` body view when selected.")]
+                        #[must_use]
+                        #vis fn #method(&self) -> Option<#body_view<'__wire_repr_wire>> {
+                            match self.variant {
+                                #view_variant::#variant_name(body) => Some(body),
+                                _ => None,
+                            }
+                        }
+                    }
+                }
+                None => {
+                    let method = format_ident!("is_{}", method);
+                    quote! {
+                        #[doc = concat!("Returns whether the `", stringify!(#variant_name), "` variant is selected.")]
+                        #[must_use]
+                        #vis fn #method(&self) -> bool {
+                            matches!(self.variant, #view_variant::#variant_name)
+                        }
                     }
                 }
             }
         }
     });
     let decode_variants = variants.iter().enumerate().filter_map(|(index, variant)| {
-        variant.body.as_ref().map(|_| {
-            let variant_name = &variant.name;
-            let body_view = body_view_paths[index]
-                .as_ref()
-                .expect("body variants have generated view paths");
-            let error = quote!(<#body_view<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::DecodeError);
-            quote! {
-                #[doc = concat!("Nested decode error for variant `", stringify!(#variant_name), "`.")]
-                #variant_name(#error),
-            }
-        })
+        if matches!(variant.selector, VariantSelector::Unknown) {
+            None
+        } else {
+            variant.body.as_ref().map(|_| {
+                let variant_name = &variant.name;
+                let body_view = body_view_paths[index]
+                    .as_ref()
+                    .expect("body variants have generated view paths");
+                let error = quote!(<#body_view<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::DecodeError);
+                quote! {
+                    #[doc = concat!("Nested decode error for variant `", stringify!(#variant_name), "`.")]
+                    #variant_name(#error),
+                }
+            })
+        }
     });
     let encode_variants = variants.iter().filter_map(|variant| {
-        variant.body.as_ref().map(|body| {
-            let variant_name = &variant.name;
-            quote! {
-                #[doc = concat!("Nested preparation error for variant `", stringify!(#variant_name), "`.")]
-                #variant_name(<#body as #runtime::WireEncode>::EncodeError),
-            }
-        })
+        if matches!(variant.selector, VariantSelector::Unknown) {
+            None
+        } else {
+            variant.body.as_ref().map(|body| {
+                let variant_name = &variant.name;
+                quote! {
+                    #[doc = concat!("Nested preparation error for variant `", stringify!(#variant_name), "`.")]
+                    #variant_name(<#body as #runtime::WireEncode>::EncodeError),
+                }
+            })
+        }
     });
     let decode_display_arms = variants.iter().filter_map(|variant| {
-        variant.body.as_ref().map(|_| {
-            let variant_name = &variant.name;
-            quote!(Self::#variant_name(error) => write!(formatter, "wire decode failed in variant `{}`: {error}", stringify!(#variant_name)),)
-        })
+        if matches!(variant.selector, VariantSelector::Unknown) {
+            None
+        } else {
+            variant.body.as_ref().map(|_| {
+                let variant_name = &variant.name;
+                quote!(Self::#variant_name(error) => write!(formatter, "wire decode failed in variant `{}`: {error}", stringify!(#variant_name)),)
+            })
+        }
     });
     let encode_display_arms = variants.iter().filter_map(|variant| {
-        variant.body.as_ref().map(|_| {
-            let variant_name = &variant.name;
-            quote!(Self::#variant_name(error) => write!(formatter, "wire preparation failed for variant `{}`: {error}", stringify!(#variant_name)),)
-        })
+        if matches!(variant.selector, VariantSelector::Unknown) {
+            None
+        } else {
+            variant.body.as_ref().map(|_| {
+                let variant_name = &variant.name;
+                quote!(Self::#variant_name(error) => write!(formatter, "wire preparation failed for variant `{}`: {error}", stringify!(#variant_name)),)
+            })
+        }
     });
-    let decode_arms = variants.iter().enumerate().map(|(index, variant)| {
-        decode_arm(
-            variant,
-            body_view_paths[index].as_ref(),
-            &view_variant,
-            &decode_error,
-            &tag_type,
-            uses_opcodes,
-            runtime,
-        )
-    });
+    let decode_arms = variants
+        .iter()
+        .enumerate()
+        .filter(|(_, variant)| !matches!(variant.selector, VariantSelector::Unknown))
+        .map(|(index, variant)| {
+            decode_arm(
+                variant,
+                body_view_paths[index].as_ref(),
+                &view_variant,
+                &decode_error,
+                &tag_type,
+                uses_opcodes,
+                runtime,
+            )
+        });
     let prepare_arms = variants.iter().map(|variant| {
         let variant_name = &variant.name;
-        let prepare_tag = if uses_opcodes {
-            let opcode = variant.opcode.as_ref().expect("dynamic opcode selector");
+        if matches!(variant.selector, VariantSelector::Unknown) {
             quote! {
-                let raw_tag = opcodes
-                    .encode(#opcode)
-                    .map_err(#encode_error::OpcodeMapping)?
-                    .ok_or(#encode_error::OpcodeUnavailable {
-                        opcode: stringify!(#opcode),
-                    })?;
-                let tag = match <#runtime::#tag_codec as #runtime::FixedCodec>::plan(raw_tag) {
-                    Ok(plan) => plan,
-                    Err(error) => match error {},
-                };
-            }
-        } else {
-            let tag_value = variant.tag.expect("static tag");
-            quote! {
-                let tag = match <#runtime::#tag_codec as #runtime::FixedCodec>::plan(
-                    #tag_value as #tag_type,
-                ) {
-                    Ok(plan) => plan,
-                    Err(error) => match error {},
-                };
-            }
-        };
-        match &variant.body {
-            Some(body) => quote! {
-                Self::#variant_name(body) => {
-                    #prepare_tag
-                    let body = <#body as #runtime::WireEncode>::prepare(body)
-                        .map_err(#encode_error::#variant_name)?;
-                    let encoded_len = <#runtime::#tag_codec as #runtime::FixedCodec>::WIDTH
-                        .checked_add(#runtime::PreparedLayout::encoded_len(&body))
-                        .ok_or(#encode_error::LengthOverflow)?;
-                    Ok(#plan::#variant_name { tag, body, encoded_len })
-                }
-            },
-            None => quote! {
-                Self::#variant_name => {
-                    #prepare_tag
+                Self::#variant_name(raw_tag) => {
+                    let tag = match <#tag_codec as #runtime::FixedCodec>::plan(raw_tag) {
+                        Ok(plan) => plan,
+                        Err(error) => match error {},
+                    };
                     Ok(#plan::#variant_name {
                         tag,
-                        encoded_len: <#runtime::#tag_codec as #runtime::FixedCodec>::WIDTH,
+                        encoded_len: <#tag_codec as #runtime::FixedCodec>::WIDTH,
                     })
                 }
-            },
+            }
+        } else {
+            let prepare_tag = if uses_opcodes {
+                let opcode = variant.opcode.as_ref().expect("dynamic opcode selector");
+                quote! {
+                    let raw_tag = opcodes
+                        .encode(#opcode)
+                        .map_err(#encode_error::OpcodeMapping)?
+                        .ok_or(#encode_error::OpcodeUnavailable {
+                            opcode: stringify!(#opcode),
+                        })?;
+                    let tag = match <#tag_codec as #runtime::FixedCodec>::plan(raw_tag) {
+                        Ok(plan) => plan,
+                        Err(error) => match error {},
+                    };
+                }
+            } else {
+                let tag_value = selector_value(&variant.selector, &tag_type);
+                quote! {
+                    let tag = match <#tag_codec as #runtime::FixedCodec>::plan(#tag_value) {
+                        Ok(plan) => plan,
+                        Err(error) => match error {},
+                    };
+                }
+            };
+            match &variant.body {
+                Some(body) => quote! {
+                    Self::#variant_name(body) => {
+                        #prepare_tag
+                        let body = <#body as #runtime::WireEncode>::prepare(body)
+                            .map_err(#encode_error::#variant_name)?;
+                        let encoded_len = <#tag_codec as #runtime::FixedCodec>::WIDTH
+                            .checked_add(#runtime::PreparedLayout::encoded_len(&body))
+                            .ok_or(#encode_error::LengthOverflow)?;
+                        Ok(#plan::#variant_name { tag, body, encoded_len })
+                    }
+                },
+                None => quote! {
+                    Self::#variant_name => {
+                        #prepare_tag
+                        Ok(#plan::#variant_name {
+                            tag,
+                            encoded_len: <#tag_codec as #runtime::FixedCodec>::WIDTH,
+                        })
+                    }
+                },
+            }
         }
     });
     let opcode_decode_variant = opcode_error.map(|error| {
@@ -304,27 +397,105 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
 
     let commit_arms = variants.iter().map(|variant| {
         let variant_name = &variant.name;
-        match &variant.body {
-            Some(_) => quote! {
-                Self::#variant_name { tag, body, .. } => {
-                    let (bytes, suffix) = output.split_at_mut(encoded_len);
-                    let (tag_output, body_output) = bytes.split_at_mut(
-                        <#runtime::#tag_codec as #runtime::FixedCodec>::WIDTH,
-                    );
-                    #runtime::EncodePlan::write_into(&tag, tag_output);
-                    #runtime::PreparedLayout::commit_into(body, body_output)?;
-                    Ok((#runtime::Written::new(bytes), suffix))
-                }
-            },
-            None => quote! {
+        if matches!(variant.selector, VariantSelector::Unknown) {
+            quote! {
                 Self::#variant_name { tag, .. } => {
                     let (bytes, suffix) = output.split_at_mut(encoded_len);
                     #runtime::EncodePlan::write_into(&tag, bytes);
                     Ok((#runtime::Written::new(bytes), suffix))
                 }
+            }
+        } else {
+            match &variant.body {
+                Some(_) => quote! {
+                    Self::#variant_name { tag, body, .. } => {
+                        let (bytes, suffix) = output.split_at_mut(encoded_len);
+                        let (tag_output, body_output) = bytes.split_at_mut(
+                            <#tag_codec as #runtime::FixedCodec>::WIDTH,
+                        );
+                        #runtime::EncodePlan::write_into(&tag, tag_output);
+                        #runtime::PreparedLayout::commit_into(body, body_output)?;
+                        Ok((#runtime::Written::new(bytes), suffix))
+                    }
+                },
+                None => quote! {
+                    Self::#variant_name { tag, .. } => {
+                        let (bytes, suffix) = output.split_at_mut(encoded_len);
+                        #runtime::EncodePlan::write_into(&tag, bytes);
+                        Ok((#runtime::Written::new(bytes), suffix))
+                    }
+                },
+            }
+        }
+    });
+
+    let static_tag_prelude = if let Some(width) = byte_tag_width {
+        quote! {
+            let available = input.len();
+            let Some((tag, remaining)) = input.split_first_chunk::<#width>() else {
+                return Err(#decode_error::InputTooShort {
+                    required: #width,
+                    available,
+                });
+            };
+            let tag_bytes = &input[..#width];
+        }
+    } else {
+        quote! {
+            let width = <#tag_codec as #runtime::FixedCodec>::WIDTH;
+            let available = input.len();
+            let Some((tag_bytes, remaining)) = input.split_at_checked(width) else {
+                return Err(#decode_error::InputTooShort {
+                    required: width,
+                    available,
+                });
+            };
+            let tag = <#tag_codec as #runtime::FixedCodec>::decode(tag_bytes);
+        }
+    };
+    let unknown_fallback = if let Some(variant) = unknown_variant {
+        let variant_name = &variant.name;
+        quote! {
+            Ok((
+                Self {
+                    bytes: tag_bytes,
+                    variant: #view_variant::#variant_name(tag),
+                },
+                remaining,
+            ))
+        }
+    } else {
+        let error_tag = if byte_tag_width.is_some() {
+            quote!(*tag)
+        } else {
+            quote!(tag)
+        };
+        quote!(Err(#decode_error::UnknownTag { tag: #error_tag }))
+    };
+    let decode_lifetime_variant = byte_tag_width.is_some().then(|| {
+        quote! {
+            #[doc(hidden)]
+            __WireLifetime(
+                ::core::convert::Infallible,
+                ::core::marker::PhantomData<&'__wire_repr_wire ()>,
+            ),
+        }
+    });
+    let decode_lifetime_display_arm = byte_tag_width
+        .is_some()
+        .then(|| quote!(Self::__WireLifetime(never, _) => match *never {},));
+    let unknown_decode_variant = matches!(unknown, UnknownPolicy::Reject).then(|| {
+        quote! {
+            /// The encoded tag does not identify a declared variant.
+            UnknownTag {
+                /// The decoded raw tag.
+                tag: #tag_type,
             },
         }
     });
+    let unknown_decode_display_arm = matches!(unknown, UnknownPolicy::Reject).then(
+        || quote!(Self::UnknownTag { tag } => write!(formatter, "unknown wire tag {tag:?}"),),
+    );
 
     let view_impl = if let Some(opcode_table) = opcode_table {
         quote! {
@@ -335,7 +506,7 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
                     input: &'__wire_repr_wire [u8],
                     opcodes: &#opcode_table,
                 ) -> Result<(Self, &'__wire_repr_wire [u8]), Self::DecodeError> {
-                    let width = <#runtime::#tag_codec as #runtime::FixedCodec>::WIDTH;
+                    let width = <#tag_codec as #runtime::FixedCodec>::WIDTH;
                     let available = input.len();
                     let Some((tag_bytes, remaining)) = input.split_at_checked(width) else {
                         return Err(#decode_error::InputTooShort {
@@ -343,7 +514,7 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
                             available,
                         });
                     };
-                    let tag = <#runtime::#tag_codec as #runtime::FixedCodec>::decode(tag_bytes);
+                    let tag = <#tag_codec as #runtime::FixedCodec>::decode(tag_bytes);
                     let opcode = opcodes
                         .decode(tag)
                         .map_err(#decode_error::OpcodeMapping)?;
@@ -377,19 +548,11 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
                 fn parse_view(
                     input: &'__wire_repr_wire [u8],
                 ) -> Result<(Self, &'__wire_repr_wire [u8]), Self::DecodeError> {
-                    let width = <#runtime::#tag_codec as #runtime::FixedCodec>::WIDTH;
-                    let available = input.len();
-                    let Some((tag_bytes, remaining)) = input.split_at_checked(width) else {
-                        return Err(#decode_error::InputTooShort {
-                            required: width,
-                            available,
-                        });
-                    };
-                    let tag = <#runtime::#tag_codec as #runtime::FixedCodec>::decode(tag_bytes);
+                    #static_tag_prelude
 
                     match tag {
                         #(#decode_arms)*
-                        _ => Err(#decode_error::UnknownTag { tag }),
+                        _ => #unknown_fallback,
                     }
                 }
 
@@ -513,11 +676,8 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
                 /// The available byte count.
                 available: usize,
             },
-            /// The encoded tag does not identify a declared variant.
-            UnknownTag {
-                /// The decoded raw tag.
-                tag: #tag_type,
-            },
+            #unknown_decode_variant
+            #decode_lifetime_variant
             #opcode_decode_variant
             #(#decode_variants)*
             /// Input had bytes after the complete representation.
@@ -538,7 +698,8 @@ pub(super) fn render(model: WireEnum, runtime: &TokenStream) -> syn::Result<Toke
                         let available_verb = if *available == 1 { "remains" } else { "remain" };
                         write!(formatter, "tag needs {required} {required_unit}, but only {available} {available_unit} {available_verb}")
                     }
-                    Self::UnknownTag { tag } => write!(formatter, "unknown wire tag {tag}"),
+                    #unknown_decode_display_arm
+                    #decode_lifetime_display_arm
                     #opcode_decode_display_arm
                     #(#decode_display_arms)*
                     Self::TrailingBytes { expected, actual } => {
@@ -656,7 +817,7 @@ fn decode_arm(
     body_view: Option<&TokenStream>,
     view_variant: &proc_macro2::Ident,
     decode_error: &proc_macro2::Ident,
-    tag_type: &proc_macro2::Ident,
+    tag_type: &TokenStream,
     uses_opcodes: bool,
     runtime: &TokenStream,
 ) -> TokenStream {
@@ -665,8 +826,16 @@ fn decode_arm(
         let opcode = variant.opcode.as_ref().expect("dynamic opcode selector");
         quote!(value if value == #opcode)
     } else {
-        let tag = variant.tag.expect("static tag");
-        quote!(value if value == (#tag as #tag_type))
+        match &variant.selector {
+            VariantSelector::Integer(value) => quote!(value if value == (#value as #tag_type)),
+            VariantSelector::Bytes(bytes) => {
+                let literal = proc_macro2::Literal::byte_string(bytes);
+                quote!(value if value == #literal)
+            }
+            VariantSelector::Unknown | VariantSelector::Dynamic => {
+                unreachable!("known static variants have concrete selectors")
+            }
+        }
     };
 
     match &variant.body {
@@ -696,6 +865,19 @@ fn decode_arm(
                 remaining,
             )),
         },
+    }
+}
+
+fn selector_value(selector: &VariantSelector, tag_type: &TokenStream) -> TokenStream {
+    match selector {
+        VariantSelector::Integer(value) => quote!(#value as #tag_type),
+        VariantSelector::Bytes(bytes) => {
+            let literal = proc_macro2::Literal::byte_string(bytes);
+            quote!(*#literal)
+        }
+        VariantSelector::Unknown | VariantSelector::Dynamic => {
+            unreachable!("static selector required")
+        }
     }
 }
 

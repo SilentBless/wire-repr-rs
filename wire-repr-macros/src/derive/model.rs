@@ -40,7 +40,8 @@ pub(super) struct WireEnum {
     pub(super) vis: Visibility,
     pub(super) name: Ident,
     pub(super) wire_lifetime: Option<Lifetime>,
-    pub(super) tag: TagCodec,
+    pub(super) tag: EnumTag,
+    pub(super) unknown: UnknownPolicy,
     pub(super) opcodes: Option<OpcodeInput>,
     pub(super) variants: Vec<Variant>,
 }
@@ -70,9 +71,35 @@ pub(super) enum FieldKind {
 
 pub(super) struct Variant {
     pub(super) name: Ident,
-    pub(super) tag: Option<u128>,
+    pub(super) selector: VariantSelector,
     pub(super) opcode: Option<Path>,
     pub(super) body: Option<Type>,
+}
+
+pub(super) enum VariantSelector {
+    Integer(u128),
+    Bytes(Vec<u8>),
+    Unknown,
+    Dynamic,
+}
+
+pub(super) enum EnumTag {
+    Integer(TagCodec),
+    Bytes { width: usize },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum UnknownPolicy {
+    Reject,
+    Preserve,
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum SelectorKey {
+    Integer(u128),
+    Bytes(Vec<u8>),
+    Unknown,
+    Opcode(String),
 }
 
 pub(super) struct OpcodeInput {
@@ -188,12 +215,12 @@ impl WireType {
         let tag = attributes.tag.ok_or_else(|| {
             syn::Error::new_spanned(&name, "Wire enums require #[wire(tag = CODEC)]")
         })?;
-        if !attributes.rejects_unknown {
-            return Err(syn::Error::new_spanned(
+        let unknown = attributes.unknown.ok_or_else(|| {
+            syn::Error::new_spanned(
                 &name,
-                "Wire enums require an explicit unknown policy; add #[wire(unknown = reject)]",
-            ));
-        }
+                "Wire enums require an explicit unknown policy; add #[wire(unknown = reject)] or #[wire(unknown = preserve)]",
+            )
+        })?;
         if variants.is_empty() {
             return Err(syn::Error::new_spanned(
                 name,
@@ -217,17 +244,49 @@ impl WireType {
             }
             (None, None) => None,
         };
+        if matches!(tag, EnumTag::Bytes { .. }) && opcodes.is_some() {
+            return Err(syn::Error::new_spanned(
+                &name,
+                "dynamic opcode enums cannot use fixed byte tag selectors",
+            ));
+        }
+        if matches!(unknown, UnknownPolicy::Preserve) && opcodes.is_some() {
+            return Err(syn::Error::new_spanned(
+                &name,
+                "dynamic opcode enums currently require `unknown = reject`",
+            ));
+        }
+
         let mut selectors = BTreeSet::new();
         let variants = variants
             .into_iter()
             .map(|variant| Variant::parse(variant, &tag, opcodes.is_some(), &mut selectors))
-            .collect::<syn::Result<_>>()?;
+            .collect::<syn::Result<Vec<_>>>()?;
+        let has_unknown = variants
+            .iter()
+            .any(|variant| matches!(variant.selector, VariantSelector::Unknown));
+        match (unknown, has_unknown) {
+            (UnknownPolicy::Reject, true) => {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "`unknown = reject` cannot declare a #[wire(unknown)] variant",
+                ));
+            }
+            (UnknownPolicy::Preserve, false) => {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "`unknown = preserve` requires exactly one #[wire(unknown)] variant",
+                ));
+            }
+            _ => {}
+        }
 
         Ok(Self::Enum(WireEnum {
             vis,
             name,
             wire_lifetime,
             tag,
+            unknown,
             opcodes,
             variants,
         }))
@@ -319,110 +378,252 @@ impl Field {
 impl Variant {
     fn parse(
         variant: syn::Variant,
-        tag_codec: &TagCodec,
+        tag: &EnumTag,
         dynamic_opcodes: bool,
-        selectors: &mut BTreeSet<String>,
+        selectors: &mut BTreeSet<SelectorKey>,
     ) -> syn::Result<Self> {
-        let opcode = parse_variant_opcode(&variant.attrs)?;
-        let name = variant.ident;
-        let tag = if dynamic_opcodes {
-            if variant.discriminant.is_some() {
+        let syn::Variant {
+            attrs,
+            ident: name,
+            fields,
+            discriminant,
+            ..
+        } = variant;
+        let attributes = parse_variant_attributes(&attrs)?;
+        let body = parse_variant_body(fields)?;
+
+        let (selector, opcode) = if dynamic_opcodes {
+            if discriminant.is_some() {
                 return Err(syn::Error::new_spanned(
                     &name,
                     "dynamic opcode variants use #[wire(opcode = Opcode::Variant)], not Rust discriminants",
                 ));
             }
-            let opcode = opcode.as_ref().ok_or_else(|| {
+            if attributes.byte_tag.is_some() || attributes.unknown {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "dynamic opcode variants cannot use byte tag selectors or #[wire(unknown)]",
+                ));
+            }
+            let opcode = attributes.opcode.ok_or_else(|| {
                 syn::Error::new_spanned(
                     &name,
                     "dynamic opcode variants require #[wire(opcode = Opcode::Variant)]",
                 )
             })?;
             let key = opcode.to_token_stream().to_string();
-            if !selectors.insert(key) {
+            if !selectors.insert(SelectorKey::Opcode(key)) {
                 return Err(syn::Error::new_spanned(
-                    opcode,
+                    &opcode,
                     "opcode selector duplicates an earlier variant",
                 ));
             }
-            None
+            (VariantSelector::Dynamic, Some(opcode))
+        } else if attributes.unknown {
+            if discriminant.is_some()
+                || attributes.byte_tag.is_some()
+                || attributes.opcode.is_some()
+            {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "#[wire(unknown)] cannot also declare a discriminant, tag, or opcode selector",
+                ));
+            }
+            validate_unknown_variant(&name, body.as_ref(), tag)?;
+            if !selectors.insert(SelectorKey::Unknown) {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "only one #[wire(unknown)] variant is allowed",
+                ));
+            }
+            (VariantSelector::Unknown, None)
         } else {
-            if let Some(opcode) = opcode {
+            if let Some(opcode) = attributes.opcode {
                 return Err(syn::Error::new_spanned(
                     opcode,
                     "#[wire(opcode = ...)] requires an enum with `opcodes = OpcodeTable`",
                 ));
             }
-            let (_, discriminant) = variant.discriminant.ok_or_else(|| {
-                syn::Error::new_spanned(
-                    &name,
-                    "Wire enum variants require an explicit integer literal discriminant",
-                )
-            })?;
-            let Expr::Lit(expression) = discriminant else {
-                return Err(syn::Error::new_spanned(
-                    discriminant,
-                    "Wire enum discriminants must be integer literals",
-                ));
-            };
-            let Lit::Int(literal) = expression.lit else {
-                return Err(syn::Error::new_spanned(
-                    expression,
-                    "Wire enum discriminants must be integer literals",
-                ));
-            };
-            let tag = literal.base10_parse::<u128>().map_err(|_| {
-                syn::Error::new_spanned(
-                    &literal,
-                    "Wire enum discriminants must be non-negative integer literals",
-                )
-            })?;
-            if tag > tag_codec.max {
-                return Err(syn::Error::new_spanned(
-                    literal,
-                    "Wire enum discriminant is not representable by its tag codec",
-                ));
-            }
-            if !selectors.insert(tag.to_string()) {
-                return Err(syn::Error::new_spanned(
-                    literal,
-                    "Wire enum discriminant duplicates an earlier tag",
-                ));
-            }
-            Some(tag)
-        };
-
-        let body = match variant.fields {
-            Fields::Unit => None,
-            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                let field = fields.unnamed.into_iter().next().expect("one field");
-                reject_wire_attributes(
-                    &field.attrs,
-                    "Wire enum variant bodies do not support field-level #[wire(...)] attributes",
-                )?;
-                Some(field.ty)
-            }
-            Fields::Unnamed(fields) => {
-                return Err(syn::Error::new_spanned(
-                    fields,
-                    "Wire enum tuple variants require exactly one field",
-                ));
-            }
-            Fields::Named(fields) => {
-                return Err(syn::Error::new_spanned(
-                    fields,
-                    "Wire enum named variants are not supported",
-                ));
+            match tag {
+                EnumTag::Bytes { width } => {
+                    if let Some((_, discriminant)) = discriminant {
+                        return Err(syn::Error::new_spanned(
+                            discriminant,
+                            "fixed byte tag enums use #[wire(tag = b\"...\")] selectors, not Rust discriminants",
+                        ));
+                    }
+                    let literal = attributes.byte_tag.ok_or_else(|| {
+                        syn::Error::new_spanned(
+                            &name,
+                            "fixed byte tag variants require #[wire(tag = b\"...\")] or #[wire(unknown)]",
+                        )
+                    })?;
+                    let bytes = literal.value();
+                    if bytes.len() != *width {
+                        return Err(syn::Error::new_spanned(
+                            literal,
+                            "byte tag selector width does not match the enum tag representation",
+                        ));
+                    }
+                    if !selectors.insert(SelectorKey::Bytes(bytes.clone())) {
+                        return Err(syn::Error::new_spanned(
+                            literal,
+                            "byte tag selector duplicates an earlier variant",
+                        ));
+                    }
+                    (VariantSelector::Bytes(bytes), None)
+                }
+                EnumTag::Integer(codec) => {
+                    if let Some(literal) = attributes.byte_tag {
+                        return Err(syn::Error::new_spanned(
+                            literal,
+                            "#[wire(tag = b\"...\")] is valid only for fixed byte tag enums",
+                        ));
+                    }
+                    let (_, discriminant) = discriminant.ok_or_else(|| {
+                        syn::Error::new_spanned(
+                            &name,
+                            "Wire enum variants require an explicit integer literal discriminant",
+                        )
+                    })?;
+                    let Expr::Lit(expression) = discriminant else {
+                        return Err(syn::Error::new_spanned(
+                            discriminant,
+                            "Wire enum discriminants must be integer literals",
+                        ));
+                    };
+                    let Lit::Int(literal) = expression.lit else {
+                        return Err(syn::Error::new_spanned(
+                            expression,
+                            "Wire enum discriminants must be integer literals",
+                        ));
+                    };
+                    let value = literal.base10_parse::<u128>().map_err(|_| {
+                        syn::Error::new_spanned(
+                            &literal,
+                            "Wire enum discriminants must be non-negative integer literals",
+                        )
+                    })?;
+                    if value > codec.max {
+                        return Err(syn::Error::new_spanned(
+                            literal,
+                            "Wire enum discriminant is not representable by its tag codec",
+                        ));
+                    }
+                    if !selectors.insert(SelectorKey::Integer(value)) {
+                        return Err(syn::Error::new_spanned(
+                            literal,
+                            "Wire enum discriminant duplicates an earlier tag",
+                        ));
+                    }
+                    (VariantSelector::Integer(value), None)
+                }
             }
         };
 
         Ok(Self {
             name,
-            tag,
+            selector,
             opcode,
             body,
         })
     }
+}
+
+fn parse_variant_body(fields: Fields) -> syn::Result<Option<Type>> {
+    match fields {
+        Fields::Unit => Ok(None),
+        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+            let field = fields.unnamed.into_iter().next().expect("one field");
+            reject_wire_attributes(
+                &field.attrs,
+                "Wire enum variant bodies do not support field-level #[wire(...)] attributes",
+            )?;
+            Ok(Some(field.ty))
+        }
+        Fields::Unnamed(fields) => Err(syn::Error::new_spanned(
+            fields,
+            "Wire enum tuple variants require exactly one field",
+        )),
+        Fields::Named(fields) => Err(syn::Error::new_spanned(
+            fields,
+            "Wire enum named variants are not supported",
+        )),
+    }
+}
+
+fn validate_unknown_variant(name: &Ident, body: Option<&Type>, tag: &EnumTag) -> syn::Result<()> {
+    let valid = match (tag, body) {
+        (EnumTag::Bytes { width }, Some(Type::Array(array))) => {
+            is_plain_u8(array.elem.as_ref()) && fixed_array_len(array).ok() == Some(*width)
+        }
+        (EnumTag::Integer(codec), Some(Type::Path(path))) => {
+            path.qself.is_none()
+                && path.path.segments.len() == 1
+                && path.path.segments[0].ident == codec.ty
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(syn::Error::new_spanned(
+            name,
+            "#[wire(unknown)] requires one raw-tag field matching the enum tag representation",
+        ))
+    }
+}
+
+struct VariantAttributes {
+    opcode: Option<Path>,
+    byte_tag: Option<syn::LitByteStr>,
+    unknown: bool,
+}
+
+fn parse_variant_attributes(attributes: &[Attribute]) -> syn::Result<VariantAttributes> {
+    let mut result = VariantAttributes {
+        opcode: None,
+        byte_tag: None,
+        unknown: false,
+    };
+    for attribute in attributes
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("wire"))
+    {
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("opcode") {
+                if result.opcode.is_some() {
+                    return Err(meta.error("duplicate variant opcode selector"));
+                }
+                result.opcode = Some(meta.value()?.parse()?);
+                Ok(())
+            } else if meta.path.is_ident("tag") {
+                if result.byte_tag.is_some() {
+                    return Err(meta.error("duplicate variant byte tag selector"));
+                }
+                let literal: Lit = meta.value()?.parse()?;
+                let Lit::ByteStr(literal) = literal else {
+                    return Err(syn::Error::new_spanned(
+                        literal,
+                        "variant byte tag selectors must be byte string literals",
+                    ));
+                };
+                result.byte_tag = Some(literal);
+                Ok(())
+            } else if meta.path.is_ident("unknown") && meta.input.is_empty() {
+                if result.unknown {
+                    return Err(meta.error("duplicate #[wire(unknown)] selector"));
+                }
+                result.unknown = true;
+                Ok(())
+            } else {
+                Err(meta.error(
+                    "unsupported Wire enum variant option; expected `tag = b\"...\"`, `unknown`, or `opcode = Path`",
+                ))
+            }
+        })?;
+    }
+    Ok(result)
 }
 
 enum WireAttribute {
@@ -683,8 +884,8 @@ fn reject_wire_attributes(attributes: &[Attribute], message: &str) -> syn::Resul
 }
 
 struct EnumAttributes {
-    tag: Option<TagCodec>,
-    rejects_unknown: bool,
+    tag: Option<EnumTag>,
+    unknown: Option<UnknownPolicy>,
     opcodes: Option<Path>,
     opcode_error: Option<Path>,
 }
@@ -1003,32 +1204,10 @@ fn validate_opcode_fields(fields: &[Field], opcodes: Option<&Path>) -> syn::Resu
     Ok(())
 }
 
-fn parse_variant_opcode(attributes: &[Attribute]) -> syn::Result<Option<Path>> {
-    let mut opcode = None;
-    for attribute in attributes
-        .iter()
-        .filter(|attribute| attribute.path().is_ident("wire"))
-    {
-        attribute.parse_nested_meta(|meta| {
-            if !meta.path.is_ident("opcode") {
-                return Err(
-                    meta.error("unsupported Wire enum variant option; expected `opcode = Path`")
-                );
-            }
-            if opcode.is_some() {
-                return Err(meta.error("duplicate variant opcode selector"));
-            }
-            opcode = Some(meta.value()?.parse()?);
-            Ok(())
-        })?;
-    }
-    Ok(opcode)
-}
-
 fn parse_enum_attributes(attributes: &[Attribute]) -> syn::Result<EnumAttributes> {
     let mut result = EnumAttributes {
         tag: None,
-        rejects_unknown: false,
+        unknown: None,
         opcodes: None,
         opcode_error: None,
     };
@@ -1041,22 +1220,25 @@ fn parse_enum_attributes(attributes: &[Attribute]) -> syn::Result<EnumAttributes
                 if result.tag.is_some() {
                     return Err(meta.error("duplicate enum tag codec"));
                 }
-                let path: Path = meta.value()?.parse()?;
-                result.tag = Some(parse_tag_codec(path)?);
+                let representation: Type = meta.value()?.parse()?;
+                result.tag = Some(parse_enum_tag(representation)?);
                 return Ok(());
             }
             if meta.path.is_ident("unknown") {
-                if result.rejects_unknown {
+                if result.unknown.is_some() {
                     return Err(meta.error("duplicate enum unknown policy"));
                 }
                 let policy: Ident = meta.value()?.parse()?;
-                if policy != "reject" {
+                result.unknown = Some(if policy == "reject" {
+                    UnknownPolicy::Reject
+                } else if policy == "preserve" {
+                    UnknownPolicy::Preserve
+                } else {
                     return Err(syn::Error::new_spanned(
                         policy,
-                        "unsupported unknown policy; use `unknown = reject`",
+                        "unsupported unknown policy; use `unknown = reject` or `unknown = preserve`",
                     ));
-                }
-                result.rejects_unknown = true;
+                });
                 return Ok(());
             }
             if meta.path.is_ident("opcodes") {
@@ -1079,6 +1261,52 @@ fn parse_enum_attributes(attributes: &[Attribute]) -> syn::Result<EnumAttributes
         })?;
     }
     Ok(result)
+}
+
+fn parse_enum_tag(representation: Type) -> syn::Result<EnumTag> {
+    match representation {
+        Type::Path(path) if path.qself.is_none() => {
+            parse_tag_codec(path.path).map(EnumTag::Integer)
+        }
+        Type::Array(array) => parse_fixed_byte_tag(array),
+        representation => Err(syn::Error::new_spanned(
+            representation,
+            "Wire enum tags must use a built-in unsigned fixed integer codec or [u8; N]",
+        )),
+    }
+}
+
+fn parse_fixed_byte_tag(array: syn::TypeArray) -> syn::Result<EnumTag> {
+    if !is_plain_u8(array.elem.as_ref()) {
+        return Err(syn::Error::new_spanned(
+            array,
+            "fixed byte enum tags must use [u8; N]",
+        ));
+    }
+    let width = fixed_array_len(&array)?;
+    if width == 0 {
+        return Err(syn::Error::new_spanned(
+            array,
+            "fixed byte enum tag width must be nonzero",
+        ));
+    }
+    Ok(EnumTag::Bytes { width })
+}
+
+fn fixed_array_len(array: &syn::TypeArray) -> syn::Result<usize> {
+    let Expr::Lit(expression) = &array.len else {
+        return Err(syn::Error::new_spanned(
+            &array.len,
+            "fixed byte array length must be an integer literal",
+        ));
+    };
+    let Lit::Int(literal) = &expression.lit else {
+        return Err(syn::Error::new_spanned(
+            expression,
+            "fixed byte array length must be an integer literal",
+        ));
+    };
+    literal.base10_parse()
 }
 
 fn parse_tag_codec(path: Path) -> syn::Result<TagCodec> {
@@ -1233,7 +1461,9 @@ fn is_borrowed_byte_slice(ty: &Type, wire_lifetime: Option<&Lifetime>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Codec, FieldKind, FieldPosition, WireType};
+    use super::{
+        Codec, EnumTag, FieldKind, FieldPosition, UnknownPolicy, VariantSelector, WireType,
+    };
 
     fn parse(source: &str) -> syn::Result<WireType> {
         WireType::parse(syn::parse_str(source).unwrap())
@@ -1279,16 +1509,72 @@ mod tests {
 
     #[test]
     fn accepts_valid_enum_source_model() {
-        assert!(matches!(
+        let WireType::Enum(model) =
             parse("#[wire(tag = BeU16, unknown = reject)] enum Op { Ping = 1, Data(Body) = 2 }")
-                .unwrap(),
-            WireType::Enum(_)
+                .unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            model.variants[0].selector,
+            VariantSelector::Integer(1)
         ));
+        assert!(matches!(model.tag, EnumTag::Integer(_)));
+        assert!(matches!(model.unknown, UnknownPolicy::Reject));
         let Err(error) = parse("#[wire(tag = U8)] enum Op { Ping = 1 }") else {
             panic!("missing unknown policy must be rejected");
         };
         assert!(error.to_string().contains("explicit unknown policy"));
         assert!(parse("#[wire(tag = U8, unknown = preserve)] enum Op { Ping = 1 }").is_err());
+        assert!(parse("#[wire(tag = U8, unknown = preserve)] #[repr(u8)] enum OpenOp { Ping = 1, #[wire(unknown)] Other(u8) }").is_ok());
+    }
+
+    #[test]
+    fn accepts_fixed_byte_enum_selectors_and_unknown_capture() {
+        let WireType::Enum(model) = parse(
+            "#[wire(tag = [u8; 2], unknown = preserve)] enum Op { #[wire(tag = b\"OK\")] Ok, #[wire(tag = b\"NO\")] No(Body), #[wire(unknown)] Other([u8; 2]) }",
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(model.tag, EnumTag::Bytes { width: 2 }));
+        assert!(matches!(model.unknown, UnknownPolicy::Preserve));
+        assert!(
+            matches!(model.variants[0].selector, VariantSelector::Bytes(ref value) if value == b"OK")
+        );
+        assert!(
+            matches!(model.variants[1].selector, VariantSelector::Bytes(ref value) if value == b"NO")
+        );
+        assert!(matches!(
+            model.variants[2].selector,
+            VariantSelector::Unknown
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_fixed_byte_enum_selectors() {
+        for source in [
+            "#[wire(tag = [u8; 2], unknown = reject)] enum Op { #[wire(tag = b\"A\")] A }",
+            "#[wire(tag = [u8; 2], unknown = reject)] enum Op { #[wire(tag = b\"OK\")] A, #[wire(tag = b\"OK\")] B }",
+            "#[wire(tag = [u8; 2], unknown = reject)] enum Op { A = 1 }",
+            "#[wire(tag = [u8; 2])] enum Op { #[wire(tag = b\"OK\")] A }",
+            "#[wire(tag = [u8; 2], unknown = preserve)] enum Op { #[wire(tag = b\"OK\")] A }",
+            "#[wire(tag = [u8; 2], unknown = reject)] enum Op { #[wire(tag = b\"OK\")] A, #[wire(unknown)] Other([u8; 2]) }",
+            "#[wire(tag = [u8; 2], unknown = reject)] enum Op { A }",
+            "#[wire(tag = [u8; 2], unknown = reject)] enum Op { #[wire(unknown)] A([u8; 2]), #[wire(unknown)] B([u8; 2]) }",
+            "#[wire(tag = [u8; 2], unknown = reject)] enum Op { #[wire(unknown)] Other }",
+            "#[wire(tag = [u8; 2], unknown = reject)] enum Op { #[wire(unknown)] Other([u8; 1]) }",
+            "#[wire(tag = [u8; 2], unknown = reject)] enum Op { #[wire(tag = b\"OK\", unknown)] Other([u8; 2]) }",
+            "#[wire(tag = [u8; 0], unknown = reject)] enum Op { #[wire(tag = b\"\")] Empty }",
+            "#[wire(tag = [u16; 2], unknown = reject)] enum Op { #[wire(tag = b\"OK\")] A }",
+            "#[wire(tag = [u8; WIDTH], unknown = reject)] enum Op { #[wire(tag = b\"OK\")] A }",
+            "#[wire(tag = U8, unknown = reject)] enum Op { #[wire(tag = b\"A\")] A = 1 }",
+            "#[wire(tag = U8, unknown = reject)] enum Op { #[wire(unknown)] Other([u8; 1]) }",
+            "#[wire(tag = [u8; 2], opcodes = OpcodeTable, opcode_error = OpcodeError, unknown = reject)] enum Op { #[wire(opcode = Opcode::Ok)] Ok }",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
     }
 
     #[test]
@@ -1388,7 +1674,6 @@ mod tests {
             panic!()
         };
         assert!(model.opcodes.is_some());
-        assert!(model.variants.iter().all(|variant| variant.tag.is_none()));
         assert!(
             model
                 .variants

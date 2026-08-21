@@ -113,6 +113,30 @@ let message = Message::view(&[1, 0x12, 0x34])
 assert_eq!(message.ping().unwrap().sequence(), 0x1234);
 ```
 
+Fixed byte selectors use their byte array as the tag representation. An open enum can
+preserve unknown tags losslessly — useful for formats such as PNG, where extensions are
+valid wire values:
+
+```rust
+use wire_repr::Wire;
+
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(tag = [u8; 4], unknown = preserve)]
+enum ChunkType {
+    #[wire(tag = b"IHDR")]
+    Ihdr,
+    #[wire(tag = b"IEND")]
+    Iend,
+    #[wire(unknown)]
+    Other([u8; 4]),
+}
+
+let chunk_type = ChunkType::view(b"vpAg")
+    .without_trailing()
+    .expect("unknown chunk type remains representable");
+assert_eq!(chunk_type.other(), Some(b"vpAg"));
+```
+
 For negotiated numeric IDs, an enum may name one concrete consumer-owned opcode table
 with `opcodes = Type` and per-variant `opcode = Path`. Supply it explicitly at the
 boundary:

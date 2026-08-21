@@ -14,7 +14,7 @@ homepage = "https://github.com/SilentBless/wire-repr-rs"
 proc-macro-crate = { version = "3.5", default-features = false }
 proc-macro2 = { version = "1", default-features = false, features = ["proc-macro"] }
 quote = { version = "1", default-features = false }
-syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "proc-macro", "derive"] }
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "proc-macro", "derive", "visit"] }
 wire-repr-macros = { path = "wire-repr-macros", version = "1.0.0" }
 
 [workspace.lints.rust]

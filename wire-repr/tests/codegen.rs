@@ -34,6 +34,16 @@ enum CodegenChoice {
     Data(ChoiceBody) = 2,
 }
 
+#[allow(dead_code)]
+#[derive(Wire)]
+#[wire(tag = [u8; 4], unknown = reject)]
+enum CodegenByteChoice {
+    #[wire(tag = b"HALT")]
+    Halt,
+    #[wire(tag = b"DATA")]
+    Data(ChoiceBody),
+}
+
 #[derive(Wire)]
 #[wire(bitfield = u16, be, reserved = zero)]
 struct CodegenFlags {
@@ -130,6 +140,26 @@ pub fn handwritten_enum_decode(bytes: &[u8]) -> u16 {
     match bytes {
         [1] => 0,
         [2, high, low] => u16::from_be_bytes([*high, *low]),
+        _ => u16::MAX,
+    }
+}
+
+/// Dispatches a fixed byte-tagged enum through generated derive code.
+#[inline(never)]
+pub fn generated_byte_enum_decode(bytes: &[u8]) -> u16 {
+    match CodegenByteChoice::view(bytes).without_trailing() {
+        Ok(choice) if choice.is_halt() => 0,
+        Ok(choice) => choice.data().map_or(u16::MAX, |body| body.value()),
+        Err(_) => u16::MAX,
+    }
+}
+
+/// Dispatches the same fixed byte-tagged representation directly.
+#[inline(never)]
+pub fn handwritten_byte_enum_decode(bytes: &[u8]) -> u16 {
+    match bytes {
+        b"HALT" => 0,
+        [b'D', b'A', b'T', b'A', high, low] => u16::from_be_bytes([*high, *low]),
         _ => u16::MAX,
     }
 }
@@ -250,6 +280,18 @@ fn generated_probes_match_handwritten_safe_rust() {
         assert_eq!(
             generated_enum_decode(black_box(bytes)),
             handwritten_enum_decode(black_box(bytes))
+        );
+    }
+
+    for bytes in [
+        &[][..],
+        b"HALT" as &[u8],
+        b"DATA\x12\x34" as &[u8],
+        b"NOPE" as &[u8],
+    ] {
+        assert_eq!(
+            generated_byte_enum_decode(black_box(bytes)),
+            handwritten_byte_enum_decode(black_box(bytes))
         );
     }
 

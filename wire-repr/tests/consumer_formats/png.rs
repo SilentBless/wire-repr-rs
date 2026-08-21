@@ -25,6 +25,24 @@ pub enum ChunkTypeError {
     },
 }
 
+/// Nominal PNG chunk type with lossless preservation of unknown names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Wire)]
+#[wire(tag = [u8; 4], unknown = preserve)]
+pub enum ChunkType {
+    /// Image header.
+    #[wire(tag = b"IHDR")]
+    Ihdr,
+    /// Image data.
+    #[wire(tag = b"IDAT")]
+    Idat,
+    /// Image trailer.
+    #[wire(tag = b"IEND")]
+    Iend,
+    /// Any structurally representable chunk type not known here.
+    #[wire(unknown)]
+    Other([u8; 4]),
+}
+
 fn validate_png_length(length: u32) -> Result<(), PngLengthError> {
     if length > 0x7fff_ffff {
         Err(PngLengthError::TooLarge)
@@ -48,8 +66,8 @@ pub struct PngChunk<'wire> {
     /// The encoded byte count of `data`.
     #[wire(be)]
     pub data_length: u32,
-    /// The opaque four-byte PNG chunk type.
-    pub chunk_type: [u8; 4],
+    /// The nominal four-byte PNG chunk type.
+    pub chunk_type: ChunkType,
     /// The opaque chunk payload.
     #[wire(bytes = data_length)]
     pub data: &'wire [u8],
@@ -100,7 +118,8 @@ fn ihdr_and_iend_preserve_exact_fields_and_disjoint_suffix() {
     assert_eq!(parsed_suffix, suffix);
     assert_eq!(parsed_suffix.as_ptr(), input[25..].as_ptr());
     assert_eq!(view.data_length(), read_be_u32(&IHDR, 0));
-    assert_eq!(view.chunk_type(), &IHDR[4..8]);
+    assert!(view.chunk_type().is_ihdr());
+    assert_eq!(view.chunk_type().as_bytes(), &IHDR[4..8]);
     assert_eq!(view.data(), &IHDR[8..21]);
     assert_eq!(view.crc(), read_be_u32(&IHDR, 21));
     assert!(matches!(
@@ -115,9 +134,19 @@ fn ihdr_and_iend_preserve_exact_fields_and_disjoint_suffix() {
         .without_trailing()
         .expect("zero-length IEND parses");
     assert_eq!(iend.data_length(), 0);
-    assert_eq!(iend.chunk_type(), b"IEND");
+    assert!(iend.chunk_type().is_iend());
+    assert_eq!(iend.chunk_type().as_bytes(), b"IEND");
     assert_eq!(iend.data(), []);
     assert_eq!(iend.crc(), 0xae42_6082);
+
+    for (chunk_type, expected) in [(ChunkType::Idat, b"IDAT"), (ChunkType::Iend, b"IEND")] {
+        let mut output = [0; 4];
+        let (written, suffix) = chunk_type
+            .build_into(&mut output)
+            .expect("known chunk type commits");
+        assert_eq!(written.as_bytes(), expected);
+        assert!(suffix.is_empty());
+    }
 }
 
 #[test]
@@ -133,9 +162,9 @@ fn malformed_domains_parse_structurally_then_consumer_checks_reject_them() {
     let chunk = PngChunk::view(&malformed)
         .without_trailing()
         .expect("raw type is structurally opaque");
-    assert_eq!(chunk.chunk_type(), b"1END");
+    assert_eq!(chunk.chunk_type().other(), Some(b"1END"));
     assert_eq!(
-        validate_chunk_type(chunk.chunk_type()),
+        validate_chunk_type(chunk.chunk_type().as_bytes()),
         Err(ChunkTypeError::NonAsciiLetter {
             index: 0,
             byte: b'1'
@@ -183,7 +212,7 @@ fn prepared_encoding_derives_length_and_is_atomic() {
     let suffix = [0x5a, 0xa5];
     let plan = PngChunk {
         data_length: 99,
-        chunk_type: *b"IHDR",
+        chunk_type: ChunkType::Ihdr,
         data: &IHDR[8..21],
         crc: 0x1f15_c489,
     }
@@ -199,7 +228,7 @@ fn prepared_encoding_derives_length_and_is_atomic() {
 
     let plan = PngChunk {
         data_length: 0,
-        chunk_type: *b"IHDR",
+        chunk_type: ChunkType::Ihdr,
         data: &IHDR[8..21],
         crc: 0x1f15_c489,
     }
@@ -212,16 +241,42 @@ fn prepared_encoding_derives_length_and_is_atomic() {
 }
 
 #[test]
+fn unknown_chunk_types_round_trip_losslessly() {
+    let mut private = IEND;
+    private[4..8].copy_from_slice(b"vpAg");
+    let view = PngChunk::view(&private)
+        .without_trailing()
+        .expect("unknown chunk type remains structurally representable");
+    assert_eq!(view.chunk_type().other(), Some(b"vpAg"));
+
+    let plan = PngChunk {
+        data_length: 0,
+        chunk_type: ChunkType::Other(*b"vpAg"),
+        data: &[],
+        crc: 0xae42_6082,
+    }
+    .prepare()
+    .expect("unknown chunk type prepares");
+    let mut output = [0; 12];
+    let (written, suffix) = plan
+        .commit_into(&mut output)
+        .expect("unknown chunk commits");
+    assert_eq!(&written.as_bytes()[4..8], b"vpAg");
+    assert!(suffix.is_empty());
+}
+
+#[test]
 fn consecutive_png_chunks_use_a_fail_closed_typed_cursor() {
     let mut datastream = Vec::from(IHDR);
     datastream.extend_from_slice(&IEND);
 
     let mut chunks = PngChunk::cursor(&datastream);
     let ihdr = chunks.next().unwrap().unwrap();
-    assert_eq!(ihdr.chunk_type(), b"IHDR");
+    assert!(ihdr.chunk_type().is_ihdr());
     assert_eq!(ihdr.data(), &IHDR[8..21]);
     let iend = chunks.next().unwrap().unwrap();
-    assert_eq!(iend.chunk_type(), b"IEND");
+    assert!(iend.chunk_type().is_iend());
+    assert_eq!(iend.chunk_type().as_bytes(), b"IEND");
     assert!(iend.data().is_empty());
     assert!(chunks.next().unwrap().is_none());
     assert!(chunks.remaining().is_empty());

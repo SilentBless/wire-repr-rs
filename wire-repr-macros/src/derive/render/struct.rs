@@ -3,6 +3,7 @@
 use super::super::model::{Codec, FieldKind, FieldPosition, WireStruct};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use syn::visit::Visit;
 
 pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<TokenStream> {
     if model.opcodes.is_none()
@@ -69,10 +70,10 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             })
         })
         .collect();
-    let nested_wire_lifetime = wire_lifetime.as_ref().filter(|_| {
-        fields
-            .iter()
-            .any(|field| matches!(field.kind, FieldKind::Nested))
+    let nested_wire_lifetime = wire_lifetime.as_ref().filter(|lifetime| {
+        fields.iter().any(|field| {
+            matches!(field.kind, FieldKind::Nested) && type_uses_lifetime(&field.ty, lifetime)
+        })
     });
     let has_nested = fields
         .iter()
@@ -939,6 +940,26 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         #encode_impl
 
     })
+}
+
+fn type_uses_lifetime(ty: &syn::Type, lifetime: &syn::Lifetime) -> bool {
+    struct Finder<'a> {
+        target: &'a syn::Lifetime,
+        found: bool,
+    }
+
+    impl<'ast> Visit<'ast> for Finder<'_> {
+        fn visit_lifetime(&mut self, lifetime: &'ast syn::Lifetime) {
+            self.found |= lifetime.ident == self.target.ident;
+        }
+    }
+
+    let mut finder = Finder {
+        target: lifetime,
+        found: false,
+    };
+    finder.visit_type(ty);
+    finder.found
 }
 
 fn render_fixed_view(model: WireStruct, runtime: &TokenStream) -> syn::Result<TokenStream> {

@@ -60,6 +60,26 @@ assert_eq!(command.ping().unwrap().id(), 0x1234);
 # Ok::<(), CommandDecodeError>(())
 ```
 
+Fixed byte tags preserve byte identity without integer or UTF-8 reinterpretation:
+
+```rust
+use wire_repr::Wire;
+
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(tag = [u8; 4], unknown = preserve)]
+enum ChunkType {
+    #[wire(tag = b"IEND")]
+    Iend,
+    #[wire(unknown)]
+    Other([u8; 4]),
+}
+
+let chunk_type = ChunkType::view(b"vpAg")
+    .without_trailing()
+    .expect("unknown tag is preserved");
+assert_eq!(chunk_type.other(), Some(b"vpAg"));
+```
+
 Unknown tags are rejected by the explicit policy. Dynamic numeric IDs can instead use a
 consumer-owned opcode table supplied with `.opcodes(&table)` during validation and
 preparation.

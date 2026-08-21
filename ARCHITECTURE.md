@@ -79,15 +79,18 @@ reserved protocol values, checksums, cryptographic hashes, or application state.
 
 ## 4. Tagged enums and opcodes
 
-A static enum declares a fixed tag codec, explicit unknown policy, and explicit integer
-discriminants. Variants are unit-like or carry one nested wire value. The tag is encoded
-before the selected body. Rust `repr` satisfies Rust's discriminant rules but does not
-select wire width or byte order; the wire codec does.
+A static enum declares a typed tag representation and an explicit unknown policy. Integer
+tag codecs use explicit discriminants. Fixed byte tags use exact `b"..."` selectors whose
+width matches `[u8; N]`; they are never reinterpreted as integers or text. Known variants
+are unit-like or carry one nested wire value, and the tag precedes the selected body. Rust
+`repr` satisfies Rust's discriminant rules but does not select integer wire width or byte
+order.
 
 Generated enum views retain exact bytes and private dispatch state. Unit variants expose
-predicates; body variants expose `Option<BodyView<'wire>>`. Unknown tags are rejected
-when `unknown = reject` is selected. Unknown-body preservation is not inferred because a
-body boundary cannot be invented safely.
+predicates; body variants expose `Option<BodyView<'wire>>`. `unknown = reject` returns the
+lossless raw tag in the decode error. `unknown = preserve` requires one explicit
+`#[wire(unknown)]` raw-tag variant and can round-trip it byte-for-byte. It preserves the tag
+only: an unknown body boundary is never inferred.
 
 Negotiated IDs use one concrete consumer-owned opcode table named by the enum. The table
 provides raw-to-semantic and semantic-to-raw inherent methods. It is supplied explicitly

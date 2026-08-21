@@ -20,6 +20,7 @@ PAIRS = (
     ("fixed_encode", "generated_fixed_encode", "handwritten_fixed_encode", False, 2),
     ("bounded_decode", "generated_bounded_decode", "handwritten_bounded_decode", False, 2),
     ("enum_decode", "generated_enum_decode", "handwritten_enum_decode", False, 2),
+    ("byte_enum_decode", "generated_byte_enum_decode", "handwritten_byte_enum_decode", False, 2),
     ("positioned_encode", "generated_positioned_encode", "handwritten_positioned_encode", False, 2),
     ("bitfield_decode", "generated_bitfield_decode", "handwritten_bitfield_decode", False, 2),
     ("fixed_sequence", "generated_fixed_sequence", "handwritten_fixed_sequence", False, 2),
