@@ -33,6 +33,8 @@ policy.
   total `as` mappings, and unsigned LSB0 projections.
 - **Variable encodings:** `variable(PrefixCodec)` preserves accepted raw prefix bytes
   while exposing a decoded value.
+- **Tagged choices:** static or resolver-selected tagged bodies with explicit unknown
+  framing and prepared-body writers.
 - **Safe change paths:** immutable views, framing-safe mutable views, and builders
   with all-or-nothing output commits.
 - **Computed writers:** derived fields, borrowed builder context, and infallible
@@ -319,14 +321,74 @@ multiple prefixes, errors, and borrowed decoded values.
 
 Bitcoin CompactSize is another honest prefix-codec use for one count/value. It is **not**
 a dynamic-range source, and a repeated transaction sequence remains consumer-owned:
-keep the cursor, bound each item, and parse it separately. Tagged unions, arbitrary
-conditional/version-selected fields, repeated sequences, and nested schemas are not
-layout features in 0.5.
+keep the cursor, bound each item, and parse it separately. Arbitrary conditional fields,
+repeated sequences, and nested schemas are not layout features in 0.5.
 
-Versioned formats use the same ownership boundary: parse a stable prefix containing the
-version, then let consumer code select a separate nominal `V1Body` or `V2Body` layout for
-the bounded remainder. The macro does not hide that dispatch inside a generated union or
-silently merge version-specific policy into structural parsing.
+Versioned formats may parse a stable prefix and let consumer code select a separate
+nominal body layout, or use a dynamic choice with an explicit resolver context. In either
+case, the physical selection is separate from version-specific domain policy.
+
+## 🔀 Tagged choices
+
+A choice owns one physical tag plus one selected body. It is useful when the wire really
+contains a tagged representation; it does not turn domain rules into parser policy.
+Case bodies name layouts from the same `wire_repr!` invocation, and a case may be
+bodyless:
+
+```rust
+wire_repr! {
+    pub layout PingBody { value: BeU16; }
+
+    pub choice Message {
+        tagged by kind: U8;
+        Ping = 1: PingBody;
+        Halt = 2;
+    }
+}
+```
+
+`Message::view(bytes)` has the normal `with_remainder()` and `without_trailing()`
+terminals. A selected body parses after `kind`; `Halt` represents its tag alone. The
+view exposes `kind()`, `case()`, `variant()`, and exact `as_bytes()`.
+
+For a version- or context-dependent mapping, declare the resolver context before the
+tag and omit case literals. The context implements
+[`Discriminant<Raw, Case>`](wire-repr/src/codec/choice.rs): `resolve` returns
+`Ok(Some(case))`, `Ok(None)` for an unknown raw tag, or `Err(error)`; `encode` supplies
+the tag during builder preparation and can canonicalize it. Supply the context to the
+view request for parsing and to the builder for preparation.
+
+```rust,ignore
+wire_repr! {
+    pub layout PingBody { value: BeU16; }
+
+    pub choice Message {
+        context tags: crate::MessageTags;
+        tagged by kind: U8 using tags;
+        Ping: PingBody;
+        Halt;
+    }
+}
+
+impl wire_repr::Discriminant<u8, MessageCase> for MessageTags {
+    type Error = TagError;
+    // resolve and encode select the version-specific wire tag.
+    # fn resolve(&self, _: u8) -> Result<Option<MessageCase>, Self::Error> { unimplemented!() }
+    # fn encode(&self, _: MessageCase) -> Result<u8, Self::Error> { unimplemented!() }
+}
+```
+
+Unknown tags reject by default. Select framing explicitly on the request when the
+format supplies it: `.unknown_body(UnknownBody::Exact(n))` retains exactly `n` body
+bytes, while `UnknownBody::Remainder` retains the supplied remainder. No inferred body
+length or resynchronization exists. Retained `MessageUnknown` data preserves raw tag and
+body bytes, so a consumer that wishes to forward an unknown value rebuilds it explicitly
+from those retained bytes.
+
+`MessageBuilder::ping` accepts an already prepared `PingBodyPlan`, then `prepare()`
+resolves/plans the tag and total output before `commit_into`. Short output is atomic;
+the complete destination remains unchanged. See
+[`tagged_choices.rs`](wire-repr/tests/tagged_choices.rs) for the generated surface.
 
 ## ✍️ Mutable views and builders
 
@@ -541,9 +603,9 @@ explicit exact/prefix framing, retained validated dynamic boundaries, framing-sa
 mutation, and builder preflight before commit.
 
 **Intentionally outside the crate:** domain and protocol validation; repeated sequences;
-tagged unions and arbitrary conditional fields; nested runtime schemas or reflection;
-I/O, buffering, transport state, and allocation policy; cryptography and checksum
-policy.
+arbitrary conditional fields or predicates; multi-field discriminants, mutable variant
+switching, and inferred unknown framing; nested runtime schemas or reflection; I/O,
+buffering, transport state, and allocation policy; cryptography and checksum policy.
 
 The normative ownership and safety rules are in [ARCHITECTURE.md](ARCHITECTURE.md).
 The published API reference is on [docs.rs](https://docs.rs/wire-repr).

@@ -158,6 +158,19 @@ wire_repr! {
         /// Every caller-bounded byte after the header.
         payload: remaining_bytes;
     }
+
+    /// A fixed tagged-choice body used only by the release-codegen gate.
+    pub layout CodegenChoiceBody {
+        /// The selected body value.
+        value: BeU16;
+    }
+
+    /// A statically tagged choice used only by the release-codegen gate.
+    pub choice CodegenChoice {
+        tagged by kind: U8;
+        Ping = 1: CodegenChoiceBody;
+        Halt = 2;
+    }
 }
 
 /// Generated fixed getter probe.
@@ -452,6 +465,27 @@ pub fn generated_mapped_getter(bytes: &[u8]) -> Option<u32> {
 pub fn handwritten_mapped_getter(bytes: &[u8]) -> Option<u32> {
     let bytes: &[u8; 4] = bytes.try_into().ok()?;
     Some(u32::from_be_bytes(*bytes))
+}
+
+/// Generated tagged-choice dispatch and body getter probe.
+#[inline(never)]
+pub fn generated_choice_getter(bytes: &[u8]) -> Option<u16> {
+    let view = CodegenChoice::view(bytes).without_trailing().ok()?;
+    match view.variant() {
+        CodegenChoiceVariant::Ping(body) => Some(body.value()),
+        CodegenChoiceVariant::Halt | CodegenChoiceVariant::Unknown(_) => None,
+    }
+}
+
+/// Equivalent handwritten tagged-choice dispatch and body getter probe.
+#[inline(never)]
+pub fn handwritten_choice_getter(bytes: &[u8]) -> Option<u16> {
+    let (&tag, body) = bytes.split_first()?;
+    if tag != 1 {
+        return None;
+    }
+    let body: &[u8; 2] = body.try_into().ok()?;
+    Some(u16::from_be_bytes(*body))
 }
 
 /// Generated total-mapped same-width mutation probe.
@@ -780,6 +814,23 @@ fn generated_probes_match_handwritten_safe_rust() {
         black_box(generated_mapped_getter(black_box(&mapped_input))),
         black_box(handwritten_mapped_getter(black_box(&mapped_input)))
     );
+    let choice_input = [1, 0x12, 0x35];
+    assert_eq!(
+        black_box(generated_choice_getter(black_box(&choice_input))),
+        black_box(handwritten_choice_getter(black_box(&choice_input)))
+    );
+    for invalid in [
+        &[][..],
+        &[1][..],
+        &[1, 0x12][..],
+        &[2][..],
+        &[3, 0x12, 0x35][..],
+    ] {
+        assert_eq!(
+            generated_choice_getter(invalid),
+            handwritten_choice_getter(invalid)
+        );
+    }
 
     let mut generated_bytes = input;
     let mut handwritten_bytes = input;

@@ -29,6 +29,8 @@ checksums, and cross-field validation.
   mappings with semantic/raw accessors, and unsigned decoded-integer LSB0 projections.
 - Builder-only borrowed contexts, explicit fallible `derive` / `derive_error`, and
   infallible consumer-supplied finalizers over represented bytes, values, and context.
+- Generic tagged choices with one unsigned fixed-integer tag, static or runtime
+  discriminant selection, bodyless cases, and explicit unknown-body framing.
 
 `Layout::view(bytes)` is a framing request. Use exactly one terminal operation:
 `without_trailing()` validates that all input is one representation, while
@@ -105,7 +107,53 @@ forms, and derive/finalize contracts are rejected at compile time. See the
 [README](https://github.com/SilentBless/wire-repr-rs#readme) for compact real-format
 examples.
 
-`wire-repr` deliberately excludes repeated sequences, tagged unions, arbitrary
-conditional/version-selected fields, nested runtime schemas, reflection, I/O, and
-domain validation. A Bitcoin CompactSize or Wasm LEB128 value can be a prefix field,
-but consumer code still owns the cursor and boundaries for repeated items.
+## Tagged choices
+
+A `choice` is a physical tagged representation, not a domain-policy switch. It owns one
+unsigned built-in fixed-integer tag and one selected body. Static cases use literals;
+case bodies name layouts declared in the same `wire_repr!` invocation, while bodyless
+cases represent only their tag:
+
+```rust
+use wire_repr::wire_repr;
+
+wire_repr! {
+    pub layout PingBody { value: BeU16; }
+    pub choice Message {
+        tagged by kind: U8;
+        Ping = 1: PingBody;
+        Halt = 2;
+    }
+}
+
+let message = Message::view(&[2]).without_trailing()?;
+assert_eq!(message.kind(), 2);
+assert_eq!(message.case(), MessageCase::Halt);
+# Ok::<(), MessageError>(())
+```
+
+Dynamic choices declare `context tags: Type;` before `tagged by kind: U8 using tags;`.
+Their cases omit literals and `Type` implements [`Discriminant`]<Raw, MessageCase>.
+Its `resolve` returns `Ok(Some(case))`, `Ok(None)` for an unrecognized raw tag, or
+`Err(error)`; `encode` selects the output tag during builder preparation and may
+canonicalize it. Supply the context to the view request for parsing and to the builder
+for preparation.
+
+Unknown tags reject by default. The generated request accepts an explicit
+[`UnknownBody`] policy: `Exact(n)` retains exactly that body length and leaves a suffix;
+`Remainder` retains the supplied remainder. Choices never infer unknown framing or
+resynchronize. Accepted unknown views retain raw tag and exact body bytes in the
+generated `MessageUnknown`, allowing consumer code to explicitly rebuild a forwarded
+unknown value.
+
+Choice builders take already prepared selected body plans (for example,
+`MessageBuilder::ping(PingBodyBuilder::new().value(7).prepare()?)`). Their `prepare`
+performs discriminant resolution/encoding, tag planning, and length checks before commit;
+commit prechecks capacity, and a short commit is atomic. Choices do not provide mutable
+variant switching.
+
+`wire-repr` deliberately excludes repeated sequences, arbitrary conditional fields or
+predicates, multi-field discriminants, mutable variant switching, inferred unknown
+framing, nested runtime schemas, reflection, I/O, and domain validation. A Bitcoin
+CompactSize or Wasm LEB128 value can be a prefix field, but consumer code still owns the
+cursor and boundaries for repeated items.

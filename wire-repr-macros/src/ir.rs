@@ -18,6 +18,58 @@ pub(crate) enum Item {
     Layout(Layout),
     /// A transparent nominal fixed integer scalar.
     Scalar(Scalar),
+    /// A tagged choice declaration.
+    Choice(Box<Choice>),
+}
+
+/// A format-neutral tagged choice ready for rendering.
+pub(crate) struct Choice {
+    pub(crate) docs: Vec<Attribute>,
+    pub(crate) visibility: Visibility,
+    pub(crate) choice_name: Ident,
+    pub(crate) view_request_name: Ident,
+    pub(crate) variant_name: Ident,
+    pub(crate) built_name: Ident,
+    pub(crate) case_name: Ident,
+    pub(crate) error_name: Ident,
+    pub(crate) builder_name: Ident,
+    pub(crate) plan_name: Ident,
+    pub(crate) write_error_name: Ident,
+    pub(crate) unknown_name: Ident,
+    pub(crate) tag: ChoiceTag,
+    pub(crate) resolver: Option<ChoiceContext>,
+    pub(crate) cases: Vec<ChoiceCase>,
+}
+
+pub(crate) struct ChoiceTag {
+    pub(crate) name: Ident,
+    pub(crate) raw_type: IntegerType,
+    pub(crate) codec: Builtin,
+}
+
+pub(crate) struct ChoiceContext {
+    pub(crate) docs: Vec<Attribute>,
+    pub(crate) name: Ident,
+    pub(crate) referent: syn::Type,
+}
+
+pub(crate) struct ChoiceCase {
+    pub(crate) docs: Vec<Attribute>,
+    pub(crate) variant_name: Ident,
+    pub(crate) constructor_name: Ident,
+    pub(crate) value: Option<u128>,
+    pub(crate) body: Option<ChoiceBody>,
+}
+
+pub(crate) struct ChoiceBody {
+    pub(crate) layout_name: Ident,
+    pub(crate) error_name: Ident,
+    pub(crate) plan_name: Ident,
+}
+
+#[derive(Clone)]
+struct ChoiceBodyOwner {
+    layout_name: Ident,
 }
 
 /// A normalized scalar whose storage has already been resolved to a builtin integer codec.
@@ -376,10 +428,24 @@ pub(crate) fn normalize(parsed: syntax::Invocation) -> Result<Invocation> {
             syntax::Item::Scalar(scalar) => {
                 Some((normalized_name(&scalar.name), scalar.name.span()))
             }
-            syntax::Item::Layout(_) => None,
+            syntax::Item::Layout(_) | syntax::Item::Choice(_) => None,
+        })
+        .collect();
+    let layout_owners: HashMap<_, _> = parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syntax::Item::Layout(layout) => Some((
+                normalized_name(&layout.name),
+                ChoiceBodyOwner {
+                    layout_name: layout.name.clone(),
+                },
+            )),
+            syntax::Item::Scalar(_) | syntax::Item::Choice(_) => None,
         })
         .collect();
     let mut items = Vec::new();
+
     for source in parsed.items {
         match source {
             syntax::Item::Layout(source) => {
@@ -403,12 +469,407 @@ pub(crate) fn normalize(parsed: syntax::Invocation) -> Result<Invocation> {
                     items.push(Item::Scalar(scalar));
                 }
             }
+            syntax::Item::Choice(source) => {
+                if let Some(choice) =
+                    normalize_choice(source, &layout_owners, &mut generated_names, &mut errors)
+                {
+                    items.push(Item::Choice(Box::new(choice)));
+                }
+            }
         }
     }
     match errors {
         Some(error) => Err(error),
         None => Ok(Invocation { items }),
     }
+}
+
+fn normalize_choice(
+    source: syntax::Choice,
+    layout_owners: &HashMap<String, ChoiceBodyOwner>,
+    generated_names: &mut HashMap<String, Span>,
+    errors: &mut Option<Error>,
+) -> Option<Choice> {
+    let stem = source.name.to_string();
+    let choice_name = source.name.clone();
+    let generated = |suffix: &str, role: &str, errors: &mut Option<Error>| {
+        generated_ident(&(stem.clone() + suffix), source.name.span(), role, errors)
+    };
+    let view_request_name = generated("ViewRequest", "choice view request", errors)?;
+    let variant_name = generated("Variant", "choice variant enum", errors)?;
+    let built_name = generated("Built", "choice built view", errors)?;
+    let case_name = generated("Case", "choice case enum", errors)?;
+    let error_name = generated("Error", "choice error", errors)?;
+    let builder_name = generated("Builder", "choice builder", errors)?;
+    let plan_name = generated("Plan", "choice plan", errors)?;
+    let write_error_name = generated("WriteError", "choice write error", errors)?;
+    let unknown_name = generated("Unknown", "choice unknown type", errors)?;
+    let selection_name = generated_ident(
+        &format!("__{stem}Selection"),
+        source.name.span(),
+        "choice selection state",
+        errors,
+    )?;
+    let prepared_name = generated_ident(
+        &format!("__{stem}Prepared"),
+        source.name.span(),
+        "choice prepared state",
+        errors,
+    )?;
+    for name in [
+        &choice_name,
+        &view_request_name,
+        &variant_name,
+        &built_name,
+        &case_name,
+        &error_name,
+        &builder_name,
+        &plan_name,
+        &write_error_name,
+        &unknown_name,
+        &selection_name,
+        &prepared_name,
+    ] {
+        register_name(
+            generated_names,
+            name,
+            errors,
+            "generated top-level name collision",
+        );
+    }
+    let codec = match source.tag.codec {
+        syntax::Codec::Bare(name) => match builtin(&name) {
+            Some(
+                codec @ (Builtin::U8
+                | Builtin::BeU16
+                | Builtin::LeU16
+                | Builtin::BeU24
+                | Builtin::LeU24
+                | Builtin::BeU32
+                | Builtin::LeU32
+                | Builtin::BeU64
+                | Builtin::LeU64
+                | Builtin::BeU128
+                | Builtin::LeU128),
+            ) => codec,
+            _ => {
+                push(
+                    errors,
+                    Error::new(
+                        name.span(),
+                        "choice tag codec must be a direct unsigned builtin fixed integer codec",
+                    ),
+                );
+                return None;
+            }
+        },
+        _ => {
+            push(
+                errors,
+                Error::new(
+                    source.tag.name.span(),
+                    "choice tag codec must be a direct unsigned builtin fixed integer codec",
+                ),
+            );
+            return None;
+        }
+    };
+    let raw_type = scalar_raw_type(codec);
+    let tag_getter = normalized_name(&source.tag.name);
+    if matches!(
+        tag_getter.as_str(),
+        "view" | "new" | "as_bytes" | "case" | "variant"
+    ) {
+        push(
+            errors,
+            Error::new(
+                source.tag.name.span(),
+                "choice tag getter conflicts with a generated view, unknown, or built method",
+            ),
+        );
+    }
+    let resolver_name = source.tag.resolver.as_ref().map(normalized_name);
+    let mut context_names = HashMap::new();
+    let mut resolver = None;
+    for context in source.contexts {
+        let normalized = normalized_name(&context.name);
+        if context_names
+            .insert(normalized.clone(), context.name.span())
+            .is_some()
+        {
+            push(
+                errors,
+                Error::new(context.name.span(), "duplicate choice context identifier"),
+            );
+        }
+        if resolver_name.as_ref() == Some(&normalized) {
+            if matches!(
+                normalized.as_str(),
+                "unknown_body"
+                    | "accept_unknown_exact"
+                    | "accept_unknown_remainder"
+                    | "with_remainder"
+                    | "without_trailing"
+                    | "unknown"
+                    | "prepare"
+                    | "build_into"
+            ) {
+                push(
+                    errors,
+                    Error::new(
+                        context.name.span(),
+                        "choice resolver context method conflicts with a generated request or builder method",
+                    ),
+                );
+            }
+            resolver = Some(ChoiceContext {
+                docs: context.docs,
+                name: context.name,
+                referent: context.referent,
+            });
+        } else {
+            push(
+                errors,
+                Error::new(
+                    context.name.span(),
+                    if resolver_name.is_some() {
+                        "choice context must be used by `tagged by ... using`"
+                    } else {
+                        "choice context requires `tagged by ... using context`"
+                    },
+                ),
+            );
+        }
+    }
+    if let Some(name) = source.tag.resolver.as_ref()
+        && resolver.is_none()
+    {
+        push(
+            errors,
+            Error::new(name.span(), "unknown choice resolver context"),
+        );
+    }
+    let dynamic = resolver_name.is_some();
+    let mut names = HashMap::new();
+    let mut constructor_names = HashMap::new();
+    let mut values = HashMap::new();
+    let mut cases = Vec::new();
+    for case in source.cases {
+        let case_name = normalized_name(&case.name);
+        if names.insert(case_name.clone(), case.name.span()).is_some() {
+            push(
+                errors,
+                Error::new(case.name.span(), "duplicate choice case name"),
+            );
+        }
+        if case_name == "Unknown" {
+            push(
+                errors,
+                Error::new(
+                    case.name.span(),
+                    "choice case `Unknown` conflicts with generated unknown variants",
+                ),
+            );
+        }
+        let constructor_text = choice_constructor_name(&case.name);
+        if constructor_names
+            .insert(constructor_text.clone(), case.name.span())
+            .is_some()
+        {
+            push(
+                errors,
+                Error::new(
+                    case.name.span(),
+                    "choice fluent constructor normalization collision",
+                ),
+            );
+        }
+        if matches!(
+            constructor_text.as_str(),
+            "unknown" | "prepare" | "build_into"
+        ) {
+            push(
+                errors,
+                Error::new(
+                    case.name.span(),
+                    "choice fluent constructor conflicts with a generated builder method",
+                ),
+            );
+        }
+        if resolver_name.as_ref() == Some(&constructor_text) {
+            push(
+                errors,
+                Error::new(
+                    case.name.span(),
+                    "choice fluent constructor conflicts with the dynamic resolver setter",
+                ),
+            );
+        }
+        let value = match case.value.as_ref() {
+            Some(literal) if dynamic => {
+                push(
+                    errors,
+                    Error::new(
+                        literal.span(),
+                        "dynamic choice cases must not declare tag literals",
+                    ),
+                );
+                None
+            }
+            Some(literal) => match choice_literal(literal, codec) {
+                Ok(value) => {
+                    if values.insert(value, literal.span()).is_some() {
+                        push(
+                            errors,
+                            Error::new(literal.span(), "duplicate static choice tag value"),
+                        );
+                    };
+                    Some(value)
+                }
+                Err(error) => {
+                    push(errors, error);
+                    None
+                }
+            },
+            None if dynamic => None,
+            None => {
+                push(
+                    errors,
+                    Error::new(
+                        case.name.span(),
+                        "static choice cases require `= unsigned integer literal`",
+                    ),
+                );
+                None
+            }
+        };
+        let body =
+            case.body
+                .as_ref()
+                .and_then(|body| match layout_owners.get(&normalized_name(body)) {
+                    Some(owner) => {
+                        let layout_stem = normalized_name(&owner.layout_name);
+                        Some(ChoiceBody {
+                            layout_name: owner.layout_name.clone(),
+                            error_name: generated_ident(
+                                &(layout_stem.clone() + "Error"),
+                                body.span(),
+                                "choice body layout error",
+                                errors,
+                            )?,
+                            plan_name: generated_ident(
+                                &(layout_stem + "Plan"),
+                                body.span(),
+                                "choice body layout plan",
+                                errors,
+                            )?,
+                        })
+                    }
+                    None => {
+                        push(
+                            errors,
+                            Error::new(
+                                body.span(),
+                                "choice case body must name a layout declared in this invocation",
+                            ),
+                        );
+                        None
+                    }
+                });
+        if body.is_some()
+            && matches!(
+                case_name.as_str(),
+                "TagTooShort" | "UnknownTag" | "UnknownBodyTooShort" | "TrailingBytes"
+            )
+            || body.is_some()
+                && dynamic
+                && matches!(case_name.as_str(), "MissingContext" | "Resolver")
+        {
+            push(
+                errors,
+                Error::new(
+                    case.name.span(),
+                    "choice body case conflicts with a generated parse error variant",
+                ),
+            );
+        }
+        let variant_name = case.name.clone();
+        let constructor_name = generated_ident(
+            &constructor_text,
+            case.name.span(),
+            "choice fluent constructor",
+            errors,
+        )?;
+        cases.push(ChoiceCase {
+            docs: case.docs,
+            variant_name,
+            constructor_name,
+            value,
+            body,
+        });
+    }
+    Some(Choice {
+        docs: source.docs,
+        visibility: source.visibility,
+        choice_name,
+        view_request_name,
+        variant_name,
+        built_name,
+        case_name,
+        error_name,
+        builder_name,
+        plan_name,
+        write_error_name,
+        unknown_name,
+        tag: ChoiceTag {
+            name: source.tag.name,
+            raw_type,
+            codec,
+        },
+        resolver,
+        cases,
+    })
+}
+
+fn choice_literal(literal: &syn::LitInt, codec: Builtin) -> std::result::Result<u128, Error> {
+    if !literal.suffix().is_empty() {
+        return Err(Error::new(
+            literal.span(),
+            "choice tag literal must be unsuffixed",
+        ));
+    }
+    let text = literal.to_string().replace('_', "");
+    let (digits, radix) = if let Some(value) = text.strip_prefix("0x") {
+        (value, 16)
+    } else if let Some(value) = text.strip_prefix("0o") {
+        (value, 8)
+    } else if let Some(value) = text.strip_prefix("0b") {
+        (value, 2)
+    } else {
+        (text.as_str(), 10)
+    };
+    let value = u128::from_str_radix(digits, radix).map_err(|_| {
+        Error::new(
+            literal.span(),
+            "choice tag literal must be an unsigned integer",
+        )
+    })?;
+    let maximum = match codec {
+        Builtin::U8 => u8::MAX as u128,
+        Builtin::BeU16 | Builtin::LeU16 => u16::MAX as u128,
+        Builtin::BeU24 | Builtin::LeU24 => 0xFF_FFFF,
+        Builtin::BeU32 | Builtin::LeU32 => u32::MAX as u128,
+        Builtin::BeU64 | Builtin::LeU64 => u64::MAX as u128,
+        Builtin::BeU128 | Builtin::LeU128 => u128::MAX,
+        _ => unreachable!("validated unsigned choice codec"),
+    };
+    if value > maximum {
+        return Err(Error::new(
+            literal.span(),
+            "choice tag literal does not fit decoded raw type",
+        ));
+    }
+    Ok(value)
 }
 
 fn normalize_scalar(
@@ -2420,6 +2881,30 @@ fn normalized_name(name: &Ident) -> String {
     text.strip_prefix("r#").unwrap_or(&text).to_owned()
 }
 
+/// Converts a choice case identifier into its fluent constructor name.
+fn choice_constructor_name(name: &Ident) -> String {
+    let text = normalized_name(name);
+    let characters: Vec<_> = text.chars().collect();
+    let mut result = String::with_capacity(text.len());
+
+    for (index, character) in characters.iter().copied().enumerate() {
+        let previous = index.checked_sub(1).and_then(|index| characters.get(index));
+        let next = characters.get(index + 1);
+        let starts_word = character.is_uppercase()
+            && previous.is_some_and(|previous| {
+                previous.is_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_uppercase() && next.is_some_and(|next| next.is_lowercase()))
+            });
+        if starts_word && !result.ends_with('_') {
+            result.push('_');
+        }
+        result.extend(character.to_lowercase());
+    }
+
+    result
+}
+
 fn generated_ident(
     text: &str,
     span: Span,
@@ -3495,5 +3980,194 @@ mod tests {
             "layout H { a: U8 { finalize: crate::a(bytes(a.end..a.start)); }; }",
             "start must not be after end",
         );
+    }
+    #[test]
+    fn validates_choice_generated_namespaces_before_rendering() {
+        for source in [
+            "choice C { tagged by kind: U8; A = 1; } scalar __CSelection: U8;",
+            "scalar __CSelection: U8; choice C { tagged by kind: U8; A = 1; }",
+            "choice C { tagged by kind: U8; A = 1; } scalar __CPrepared: U8;",
+            "scalar __CPrepared: U8; choice C { tagged by kind: U8; A = 1; }",
+        ] {
+            error(source, "top-level name collision");
+        }
+        error(
+            "choice C { tagged by kind: U8; Unknown = 1; }",
+            "case `Unknown`",
+        );
+        for case in ["Prepare", "BuildInto"] {
+            error(
+                &format!("choice C {{ tagged by kind: U8; {case} = 1; }}"),
+                "generated builder method",
+            );
+        }
+        error(
+            "choice C { context ping: crate::Resolver; tagged by kind: U8 using ping; Ping; }",
+            "dynamic resolver setter",
+        );
+        for context in [
+            "unknown_body",
+            "accept_unknown_exact",
+            "accept_unknown_remainder",
+            "with_remainder",
+            "without_trailing",
+            "unknown",
+            "prepare",
+            "build_into",
+        ] {
+            error(
+                &format!(
+                    "choice C {{ context {context}: crate::Resolver; tagged by kind: U8 using {context}; A; }}"
+                ),
+                "generated request or builder method",
+            );
+        }
+        for tag in ["view", "new", "as_bytes", "case", "variant"] {
+            error(
+                &format!("choice C {{ tagged by {tag}: U8; A = 1; }}"),
+                "tag getter conflicts",
+            );
+        }
+        for case in [
+            "TagTooShort",
+            "UnknownTag",
+            "UnknownBodyTooShort",
+            "TrailingBytes",
+        ] {
+            error(
+                &format!(
+                    "layout Body {{ value: U8; }} choice C {{ tagged by kind: U8; {case} = 1: Body; }}"
+                ),
+                "generated parse error variant",
+            );
+        }
+        for case in ["MissingContext", "Resolver"] {
+            error(
+                &format!(
+                    "layout Body {{ value: U8; }} choice C {{ context tag_table: crate::Resolver; tagged by kind: U8 using tag_table; {case}: Body; }}"
+                ),
+                "generated parse error variant",
+            );
+        }
+        for case in [
+            "InvalidTagWidth",
+            "UnknownCase",
+            "MissingContext",
+            "Resolver",
+        ] {
+            model(&format!(
+                "layout Body {{ value: U8; }} choice C {{ tagged by kind: U8; {case} = 1: Body; }}"
+            ))
+            .expect("static choices reserve only variants their parse error emits");
+        }
+    }
+
+    #[test]
+    fn normalizes_tagged_choices_and_rejects_unsupported_forms() {
+        let value = model("pub choice StaticMessage { tagged by kind: BeU24; Ping = 0x01: PingBody; Halt = 0xff_ffff; } pub choice DynamicMessage { context tags: crate::TagTable; tagged by kind: U8 using tags; Ping: PingBody; Halt; } pub absolute layout PingBody { sequence @ 0: BeU16; }").unwrap();
+        let choices: Vec<_> = value
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Choice(choice) => Some(choice),
+                Item::Layout(_) | Item::Scalar(_) => None,
+            })
+            .collect();
+        assert_eq!(choices.len(), 2);
+        let static_choice = choices[0];
+        assert_eq!(static_choice.choice_name, "StaticMessage");
+        assert_eq!(static_choice.view_request_name, "StaticMessageViewRequest");
+        assert_eq!(static_choice.case_name, "StaticMessageCase");
+        assert_eq!(static_choice.tag.raw_type, IntegerType::U32);
+        assert!(matches!(static_choice.tag.codec, Builtin::BeU24));
+        assert_eq!(static_choice.cases[0].constructor_name, "ping");
+        assert_eq!(static_choice.cases[0].value, Some(1));
+        assert!(
+            matches!(&static_choice.cases[0].body, Some(ChoiceBody { layout_name, error_name, plan_name }) if layout_name == "PingBody" && error_name == "PingBodyError" && plan_name == "PingBodyPlan")
+        );
+        let named_cases = model(
+            "choice Constructors { tagged by kind: U8; Ping = 1; LoadImmediate = 2; HTTPFrame = 3; X509Cert = 4; }",
+        )
+        .unwrap();
+        let Item::Choice(named_cases) = &named_cases.items[0] else {
+            panic!("expected choice")
+        };
+        assert_eq!(
+            named_cases
+                .cases
+                .iter()
+                .map(|case| case.constructor_name.to_string())
+                .collect::<Vec<_>>(),
+            ["ping", "load_immediate", "http_frame", "x509_cert"]
+        );
+        let dynamic_choice = choices[1];
+        assert_eq!(dynamic_choice.resolver.as_ref().unwrap().name, "tags");
+        assert!(dynamic_choice.cases.iter().all(|case| case.value.is_none()));
+
+        for codec in [
+            "U8", "BeU16", "LeU16", "BeU24", "LeU24", "BeU32", "LeU32", "BeU64", "LeU64", "BeU128",
+            "LeU128",
+        ] {
+            assert!(
+                model(&format!(
+                    "choice C{codec} {{ tagged by kind: {codec}; A = 0; }}"
+                ))
+                .is_ok(),
+                "{codec}"
+            );
+        }
+        for (source, needle) in [
+            (
+                "choice C { tagged by kind: BeU24; A = 0x1_000000; }",
+                "does not fit",
+            ),
+            (
+                "choice C { tagged by kind: U8; A = 1; A = 2; }",
+                "duplicate choice case",
+            ),
+            (
+                "choice C { tagged by kind: U8; A = 1; B = 1; }",
+                "duplicate static",
+            ),
+            (
+                "choice C { tagged by kind: U8; HTTPFrame = 1; HttpFrame = 2; }",
+                "fluent constructor normalization collision",
+            ),
+            ("choice C { tagged by kind: U8; A; }", "static choice"),
+            (
+                "choice C { context tags: crate::T; tagged by kind: U8 using tags; A = 1; }",
+                "dynamic choice",
+            ),
+            (
+                "choice C { context tags: crate::T; tagged by kind: U8; A = 1; }",
+                "context requires",
+            ),
+            (
+                "choice C { tagged by kind: U8 using tags; A; }",
+                "unknown choice resolver",
+            ),
+            (
+                "choice C { tagged by kind: I8; A = 1; }",
+                "unsigned builtin",
+            ),
+            (
+                "choice C { tagged by kind: bytes(1); A = 1; }",
+                "unsigned builtin",
+            ),
+            (
+                "choice C { tagged by kind: U8; A = 1: Missing; }",
+                "must name a layout",
+            ),
+            (
+                "choice C { tagged by kind: U8; A = 1: crate::Body; }",
+                "expected identifier",
+            ),
+            (
+                "choice Message { tagged by kind: U8; A = 1; } scalar MessageError: U8;",
+                "top-level name collision",
+            ),
+        ] {
+            error(source, needle);
+        }
     }
 }

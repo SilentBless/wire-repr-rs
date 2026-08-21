@@ -37,6 +37,31 @@ pub(crate) enum Item {
     Layout(Layout),
     /// A transparent nominal fixed integer scalar.
     Scalar(Scalar),
+    /// A tagged choice declaration.
+    Choice(Choice),
+}
+
+/// Parsed choice declaration before semantic normalization.
+pub(crate) struct Choice {
+    pub(crate) docs: Vec<Attribute>,
+    pub(crate) visibility: Visibility,
+    pub(crate) name: Ident,
+    pub(crate) contexts: Vec<Context>,
+    pub(crate) tag: ChoiceTag,
+    pub(crate) cases: Vec<ChoiceCase>,
+}
+
+pub(crate) struct ChoiceTag {
+    pub(crate) name: Ident,
+    pub(crate) codec: Codec,
+    pub(crate) resolver: Option<Ident>,
+}
+
+pub(crate) struct ChoiceCase {
+    pub(crate) docs: Vec<Attribute>,
+    pub(crate) name: Ident,
+    pub(crate) value: Option<LitInt>,
+    pub(crate) body: Option<Ident>,
 }
 
 /// Parsed scalar declaration before semantic normalization.
@@ -58,7 +83,7 @@ pub(crate) struct Layout {
     pub(crate) physical: Vec<PhysicalEntry>,
 }
 
-/// A generated-builder-only borrowed input declaration.
+/// A borrowed context declaration interpreted by its enclosing item.
 pub(crate) struct Context {
     pub(crate) docs: Vec<Attribute>,
     pub(crate) name: Ident,
@@ -223,18 +248,152 @@ fn parse_item(input: ParseStream<'_>) -> Result<Item> {
         let keyword: Token![struct] = fork.parse()?;
         return Err(Error::new(
             keyword.span,
-            "expected `layout` or `scalar`; `struct` is not wire_repr syntax",
+            "expected `layout`, `scalar`, or `choice`; `struct` is not wire_repr syntax",
         ));
     }
     if !fork.peek(keyword::absolute) {
         let keyword: Ident = fork
             .parse()
-            .map_err(|_| Error::new(fork.span(), "expected `layout` or `scalar`"))?;
+            .map_err(|_| Error::new(fork.span(), "expected `layout`, `scalar`, or `choice`"))?;
         if keyword == "scalar" {
             return parse_scalar(input).map(Item::Scalar);
         }
+        if keyword == "choice" {
+            return parse_choice(input).map(Item::Choice);
+        }
     }
     parse_layout(input).map(Item::Layout)
+}
+
+fn parse_choice(input: ParseStream<'_>) -> Result<Choice> {
+    let docs = parse_docs(input)?;
+    let visibility = input.parse::<Visibility>()?;
+    let keyword: Ident = input.parse()?;
+    if keyword != "choice" {
+        return Err(Error::new(keyword.span(), "expected `choice`"));
+    }
+    let name: Ident = input.parse()?;
+    let content;
+    braced!(content in input);
+    let mut contexts = Vec::new();
+    let mut tag = None;
+    let mut cases = Vec::new();
+    while !content.is_empty() {
+        let declaration = content.fork();
+        parse_docs(&declaration)?;
+        if declaration.peek(keyword::context) {
+            if tag.is_some() || !cases.is_empty() {
+                return Err(Error::new(
+                    declaration.span(),
+                    "`context` declarations must appear before `tagged by`",
+                ));
+            }
+            contexts.push(parse_context(&content)?);
+        } else if tag.is_none() {
+            tag = Some(parse_choice_tag(&content)?);
+        } else {
+            if begins_choice_tag(&declaration) {
+                return Err(Error::new(
+                    declaration.span(),
+                    "choice requires exactly one `tagged by` declaration",
+                ));
+            }
+            cases.push(parse_choice_case(&content)?);
+        }
+    }
+    let tag = tag.ok_or_else(|| {
+        Error::new(
+            name.span(),
+            "choice requires exactly one `tagged by` declaration",
+        )
+    })?;
+    if cases.is_empty() {
+        return Err(Error::new(name.span(), "choice requires at least one case"));
+    }
+    Ok(Choice {
+        docs,
+        visibility,
+        name,
+        contexts,
+        tag,
+        cases,
+    })
+}
+
+/// Whether the next declaration begins the reserved `tagged by` sequence.
+/// A case named `tagged` remains valid unless it is followed by `by`.
+fn begins_choice_tag(input: ParseStream<'_>) -> bool {
+    let fork = input.fork();
+    if parse_docs(&fork).is_err() {
+        return false;
+    }
+    let Ok(tagged) = fork.parse::<Ident>() else {
+        return false;
+    };
+    if tagged != "tagged" {
+        return false;
+    }
+    let Ok(by) = fork.parse::<Ident>() else {
+        return false;
+    };
+    by == "by"
+}
+
+fn parse_choice_tag(input: ParseStream<'_>) -> Result<ChoiceTag> {
+    let tagged: Ident = input
+        .parse()
+        .map_err(|_| Error::new(input.span(), "expected `tagged by`"))?;
+    if tagged != "tagged" {
+        return Err(Error::new(tagged.span(), "expected `tagged by`"));
+    }
+    let by: Ident = input
+        .parse()
+        .map_err(|_| Error::new(input.span(), "expected `by` after `tagged`"))?;
+    if by != "by" {
+        return Err(Error::new(by.span(), "expected `by` after `tagged`"));
+    }
+    let name = input.parse()?;
+    input.parse::<Token![:]>()?;
+    let codec = parse_codec(input)?;
+    let resolver = if input.peek(Ident) {
+        let using: Ident = input.parse()?;
+        if using != "using" {
+            return Err(Error::new(using.span(), "expected `using context` or `;`"));
+        }
+        Some(input.parse()?)
+    } else {
+        None
+    };
+    input.parse::<Token![;]>()?;
+    Ok(ChoiceTag {
+        name,
+        codec,
+        resolver,
+    })
+}
+
+fn parse_choice_case(input: ParseStream<'_>) -> Result<ChoiceCase> {
+    let docs = parse_docs(input)?;
+    let name: Ident = input.parse()?;
+    let value = if input.peek(Token![=]) {
+        input.parse::<Token![=]>()?;
+        Some(input.parse()?)
+    } else {
+        None
+    };
+    let body = if input.peek(Token![:]) {
+        input.parse::<Token![:]>()?;
+        Some(input.parse()?)
+    } else {
+        None
+    };
+    input.parse::<Token![;]>()?;
+    Ok(ChoiceCase {
+        docs,
+        name,
+        value,
+        body,
+    })
 }
 
 fn parse_scalar(input: ParseStream<'_>) -> Result<Scalar> {
@@ -1092,5 +1251,38 @@ mod tests {
         assert_eq!(layout.fields[0].docs.len(), 1);
         assert_eq!(layout.fields[0].name, "r#type");
         assert!(matches!(layout.fields[0].codec, Codec::Custom(_)));
+    }
+    #[test]
+    fn distinguishes_duplicate_tagged_by_declarations_from_tagged_cases() {
+        let error = parse_error("choice C { tagged by kind: U8; tagged by other: U8; A = 1; }");
+        assert!(
+            error
+                .to_string()
+                .contains("exactly one `tagged by` declaration")
+        );
+
+        let parsed: Invocation = parse_str("choice C { tagged by kind: U8; tagged = 1; }").unwrap();
+        let Item::Choice(choice) = &parsed.items[0] else {
+            panic!("expected choice")
+        };
+        assert_eq!(choice.cases[0].name, "tagged");
+    }
+
+    #[test]
+    fn parses_canonical_tagged_choices() {
+        let parsed: Invocation = parse_str(
+            "pub layout PingBody { sequence: BeU16; } pub choice StaticMessage { tagged by kind: U8; Ping = 0x01: PingBody; Halt = 0xff; } pub choice DynamicMessage { context tags: crate::TagTable; tagged by kind: U8 using tags; Ping: PingBody; Halt; }",
+        ).unwrap();
+        let Item::Choice(static_choice) = &parsed.items[1] else {
+            panic!("expected choice")
+        };
+        assert_eq!(static_choice.cases.len(), 2);
+        assert!(static_choice.cases[0].value.is_some());
+        assert!(static_choice.cases[0].body.is_some());
+        let Item::Choice(dynamic_choice) = &parsed.items[2] else {
+            panic!("expected choice")
+        };
+        assert_eq!(dynamic_choice.contexts.len(), 1);
+        assert!(dynamic_choice.tag.resolver.is_some());
     }
 }

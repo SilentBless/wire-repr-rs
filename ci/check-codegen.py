@@ -29,6 +29,7 @@ PAIRS = (
     ("scalar_mutation", "generated_scalar_mutation", "handwritten_scalar_mutation", True, 4),
     ("scalar_builder", "generated_scalar_builder", "handwritten_scalar_builder", True, 4),
     ("mapped_getter", "generated_mapped_getter", "handwritten_mapped_getter", True, 8),
+    ("choice_getter", "generated_choice_getter", "handwritten_choice_getter", False, 12),
     ("mapped_mutation", "generated_mapped_mutation", "handwritten_mapped_mutation", True, 4),
     ("mapped_builder", "generated_mapped_builder", "handwritten_mapped_builder", True, 4),
     ("relative_range_getter", "generated_relative_range_getter", "handwritten_relative_range_getter", False, 8),

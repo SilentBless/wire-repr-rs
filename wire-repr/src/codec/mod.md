@@ -41,6 +41,21 @@ Keep framing between fields, range-source algebra, derived endpoints, and protoc
 validation outside a codec. A self-delimiting codec discovers its own field width; it
 is not a source for a later dynamic byte range.
 
+## Tagged discriminants
+
+[`Discriminant`] is a format-neutral runtime mapping between a raw tagged value and a
+semantic case. The mapping may read runtime state through `&self`, such as a negotiated
+format version, but it neither parses nor encodes a case body. Resolution returns
+`Ok(None)` for an unrecognized raw tag and reserves `Err` for a resolver failure, so
+generated choice parsing can apply explicit unknown-body policy without swallowing an
+infrastructure error. A dynamic choice supplies the mapping to its view request for
+parsing and to its builder for preparation; `resolve` serves the former and `encode`
+serves the latter.
+
+[`UnknownBody`] makes the body behavior for an unrecognized case explicit. Its default
+rejects the case. A consumer may instead accept exactly a caller-supplied body length or
+consume only the supplied remainder; the policy never infers a boundary or resynchronizes.
+
 ## Range-source adapters
 
 [`RangeSource`] performs checked bidirectional structural conversion between a decoded

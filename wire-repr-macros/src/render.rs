@@ -1,6 +1,7 @@
 //! Layout-mode dispatch and shared codec token mapping.
 
 mod absolute;
+mod choice;
 mod scalar;
 mod sequential;
 mod sequential_dynamic;
@@ -17,6 +18,7 @@ use crate::ir::{
 pub(crate) fn render(invocation: Invocation) -> TokenStream {
     let items = invocation.items.iter().map(|item| match item {
         Item::Scalar(scalar) => scalar::render_scalar(scalar),
+        Item::Choice(choice) => choice::render_choice(choice),
         Item::Layout(Layout::Sequential(layout)) if layout.has_dynamic => {
             sequential_dynamic::render_layout(layout)
         }

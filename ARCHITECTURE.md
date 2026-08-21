@@ -72,6 +72,35 @@ Generated mutable types retain the `FooViewMut` naming family. They parse with
 retain the `FooBuilder` naming family. Error types distinguish their operation and
 phase; successful public operations must not expose a runtime schema.
 
+### Tagged choices
+
+`pub choice Message` owns one physical unsigned fixed-integer tag and one selected
+body. It is generic dispatch machinery, not an opcode-specific feature or a domain
+policy engine. A case either names a layout declared in the same macro invocation or
+has no body. The choice view retains the raw tag, selected semantic case, exact
+represented bytes, and (for an accepted unknown case) its exact raw body bytes.
+
+Static choices bind each case to one unique in-range literal. Dynamic choices declare
+a resolver context and use `tagged by kind: U8 using tags;`; their cases omit literals.
+The generated view request uses it while parsing, and the builder uses it while
+preparing. The context implements `Discriminant<Raw, GeneratedCase>`:
+`resolve` distinguishes a known case (`Ok(Some(_))`), unknown raw tag (`Ok(None)`),
+and resolver failure (`Err(_)`); `encode` selects the raw tag while building. Encoding
+may therefore canonicalize a dynamic tag.
+
+Choice framing is literal. A body layout parses from the bytes after the tag and owns
+its own represented extent; a bodyless case owns only the tag. Unknown input rejects
+by default. The caller may explicitly request `UnknownBody::Exact(n)` or
+`UnknownBody::Remainder` on the generated view request; no choice infers an unknown
+body boundary or resynchronizes. Exact accepted unknown input retains its raw tag and
+body so consumer code can state an explicit rebuild policy.
+
+Choice builders accept an already prepared selected body plan, not body builder
+inputs. They resolve/encode the tag, validate its plan and total length, and check
+whole-output capacity before commit. A short output leaves the complete output
+unchanged. Commit writes the tag and then the prepared body; generated tag encoding,
+including canonicalization, is the encoded result.
+
 ## 5. Sequential physical geometry
 
 Sequential layouts have two exclusive placement modes.
@@ -291,10 +320,11 @@ of framework machinery.
 ## 15. Explicit exclusions
 
 The architecture excludes runtime schemas, endpoint recomputation, repeated
-sequences, arbitrary conditional fields, nested range schemas, independently owned
-bitfields, parser-owned protocol semantics, and target-runtime dependencies. Each
-layout declaration has one immutable owner; alternate compatibility owners are not
-generated. These are exclusions, not deferred subsystems.
+sequences, arbitrary conditional fields or predicates, nested range schemas,
+multi-field discriminants, mutable variant switching, inferred unknown framing,
+independently owned bitfields, parser-owned protocol semantics, and target-runtime
+dependencies. Each layout declaration has one immutable owner; alternate compatibility
+owners are not generated. These are exclusions, not deferred subsystems.
 
 ## 16. Testing and ownership
 
@@ -303,6 +333,9 @@ and macro reexport live in `wire-repr/src/lib.rs`; parsing/rendering belongs to
 `wire-repr-macros`. Public cross-owner behavior belongs in `wire-repr/tests`.
 Narrow owner invariants remain with their owner. Tests must exercise contracts at
 the relevant boundary rather than duplicate the production algorithm as an oracle.
+Tagged-choice runtime contracts live with codecs; choice grammar, normalization, and
+rendering remain macro-owned; generated public choice behavior belongs in the public
+integration boundary.
 
 The baseline target library is `no_std`, safe Rust only, has no target-runtime
 dependencies, uses empty default features, and is governed by Rust 1.91 / edition

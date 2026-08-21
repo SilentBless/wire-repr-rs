@@ -20,6 +20,13 @@ This reference describes the 0.5.2 declaration language.
 visibility scalar ScalarName: Codec;
 
 [outer doc attributes]
+visibility choice Name {
+    [context resolver: Type;]
+    tagged by tag: UnsignedBuiltin [using resolver];
+    CaseName [= UNSIGNED_LITERAL] [: BodyLayout];
+}
+
+[outer doc attributes]
 visibility layout Name {
     context name: Type;
     name [@ N]: FieldForm [as SemanticType] [{ properties }];
@@ -37,6 +44,74 @@ Top-level `scalar` declarations and layout-local `context` declarations are opti
 A sequential layout contains named fields, padding, and alignment. An absolute layout
 contains fixed fields only. Bracketed grammar elements are optional; attributes in
 these positions are outer documentation attributes only.
+
+## Tagged choices
+
+A choice is a generic physical tagged representation: one direct unsigned built-in
+fixed-integer tag and one selected body. It is not an opcode-specific facility and does
+not apply domain policy. A body names a `layout` declared in the same macro invocation;
+omitting `: BodyLayout` declares a bodyless case.
+
+```rust,ignore
+wire_repr! {
+    pub layout PingBody { value: BeU16; }
+    pub choice Message {
+        tagged by kind: U8;
+        Ping = 1: PingBody;
+        Halt = 2;
+    }
+}
+```
+
+Static choices require one unique, in-range unsigned literal for every case. The tag
+codec must be one of `U8`, `BeU16`/`LeU16`, `BeU24`/`LeU24`, `BeU32`/`LeU32`,
+`BeU64`/`LeU64`, or `BeU128`/`LeU128`.
+
+A dynamic choice has exactly one context, declared before the tag, and names it with
+`using`. Dynamic cases omit literals:
+
+```rust,ignore
+wire_repr! {
+    pub layout PingBody { value: BeU16; }
+
+    pub choice Message {
+        context tags: crate::MessageTags;
+        tagged by kind: U8 using tags;
+        Ping: PingBody;
+        Halt;
+    }
+}
+```
+
+The context type implements `wire_repr::Discriminant<Raw, MessageCase>`. Supply it to
+the view request before a parsing terminal and to the builder before `prepare()`.
+`resolve(raw)` returns `Ok(Some(case))` for a selected case, `Ok(None)` for an
+unrecognized raw tag, or `Err(error)` for resolver failure; `encode(case)` selects the
+output raw tag and may canonicalize it. Other contexts, mixed static/dynamic literals,
+non-layout bodies, and unknown resolver names are rejected.
+
+### Generated choice surface
+
+For `choice Message`, the macro generates `Message<'wire>`, `MessageVariant<'wire>`,
+`MessageCase`, `MessageUnknown<'wire>`, `MessageViewRequest`, `MessageBuilder<'value>`,
+`MessagePlan<'value>`, `MessageBuilt<'output>`, `MessageError`, and
+`MessageWriteError`. The view exposes the raw tag getter, `case()`, `variant()`, and
+exact represented `as_bytes()`.
+
+`Message::view(input)` rejects unknown tags by default. On its request,
+`unknown_body(UnknownBody::Exact(n))` accepts exactly `n` unknown body bytes, and
+`unknown_body(UnknownBody::Remainder)` consumes the supplied remainder; the convenience
+methods are `accept_unknown_exact(n)` and `accept_unknown_remainder()`. Unknown views
+retain their raw tag and exact body bytes. Choices never infer unknown body framing or
+resynchronize parsing.
+
+A body case constructor accepts that body's already prepared layout plan, for example
+`MessageBuilder::ping(PingBodyBuilder::new().value(7).prepare()?)`; a bodyless case uses
+`MessageBuilder::halt()`. `prepare()` resolves and plans the tag and validates total
+length before commit. `commit_into` prechecks whole-output capacity, then writes the
+tag followed by the body, so short output leaves the complete output unchanged. Dynamic
+`encode` results are the written tags and may canonicalize them. Choices have no mutable
+view or variant-switching API.
 
 ## Sequential and absolute geometry
 
@@ -296,6 +371,7 @@ The macro rejects malformed declarations and structural ambiguity before generat
 methods are type-checked. This includes mixed, duplicate, zero, or gapped explicit
 positions; missing or invalid absolute offsets; overlapping projections; generated-name
 collisions; invalid range sources; unsupported field forms; invalid static extents;
-and invalid derive/finalizer dependencies. Repeated sequences, tagged unions,
-arbitrary conditional fields, nested range schemas, and inferred absolute offsets are
-outside the grammar.
+and invalid derive/finalizer dependencies. Repeated sequences, arbitrary conditional
+fields or predicates, multi-field discriminants, mutable variant switching, inferred
+unknown framing, nested range schemas, and inferred absolute offsets are outside the
+grammar.
