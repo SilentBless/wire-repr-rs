@@ -14,8 +14,9 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         validators: model_validators,
         validation_error,
         fields,
-        computation_order: _,
+        preparation,
     } = model;
+    let position_sources = preparation.position_sources;
     let view = format_ident!("{name}View");
     let decode_error = format_ident!("{name}DecodeError");
     let encode_error = format_ident!("{name}EncodeError");
@@ -45,13 +46,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let gap_names: Vec<_> = gaps.iter().flatten().collect();
     let has_geometry = !gap_names.is_empty();
     let has_positions = fields.iter().any(|field| field.position.is_some());
-    let position_sources: Vec<_> = (0..fields.len())
-        .map(|index| {
-            fields.iter().any(|field| {
-                matches!(field.position, Some(FieldPosition::Source(ref source)) if source == &fields[index].name)
-            })
-        })
-        .collect();
     let validation_error_type = validation_error
         .as_ref()
         .map(|error| quote!(#error))

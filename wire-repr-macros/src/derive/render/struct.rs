@@ -27,8 +27,11 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         validators: model_validators,
         validation_error,
         fields,
-        computation_order,
+        preparation,
     } = model;
+    let computation_order = preparation.computation_order;
+    let controlled_by = preparation.controlled_by;
+    let position_sources = preparation.position_sources;
     let plan = format_ident!("{name}Plan");
     let view = format_ident!("{name}View");
     let decode_error = format_ident!("{name}DecodeError");
@@ -70,19 +73,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let gap_names: Vec<_> = gaps.iter().flatten().collect();
     let has_geometry = !gap_names.is_empty();
     let has_positions = fields.iter().any(|field| field.position.is_some());
-    let controlled_by: Vec<_> = (0..fields.len())
-        .map(|source_index| {
-            fields.iter().position(|field| {
-                matches!(
-                    field.kind,
-                    FieldKind::Bytes {
-                        source_index: candidate,
-                        ..
-                    } if candidate == source_index
-                )
-            })
-        })
-        .collect();
     let has_computed = fields.iter().any(|field| field.computation.is_some());
     let has_builder = has_computed || controlled_by.iter().any(Option::is_some);
     let prepare_fields: Vec<_> = fields
@@ -115,14 +105,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let prepare_helper = format_ident!("__wire_repr_prepare_fields");
 
     let has_bytes = controlled_by.iter().any(Option::is_some) || has_computed;
-    let position_sources: Vec<_> = fields
-        .iter()
-        .map(|source| {
-            fields.iter().any(|field| {
-                matches!(field.position, Some(FieldPosition::Source(ref name)) if name == &source.name)
-            })
-        })
-        .collect();
     let has_nested = fields
         .iter()
         .any(|field| matches!(field.kind, FieldKind::Nested));

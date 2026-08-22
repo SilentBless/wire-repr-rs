@@ -1,7 +1,5 @@
 //! Resolved struct preparation policy.
 
-use std::collections::BTreeSet;
-
 use syn::{Ident, Lifetime, Type};
 
 use super::{Codec, Field, FieldKind, FieldPosition, is_borrowed_byte_slice, is_unsigned_integer};
@@ -30,6 +28,12 @@ pub(in crate::derive) struct ComputationFieldPath {
     pub(in crate::derive) top_level: Ident,
     pub(in crate::derive) top_level_index: usize,
     pub(in crate::derive) nested: Vec<Ident>,
+}
+
+pub(in crate::derive) struct StructPreparation {
+    pub(in crate::derive) computation_order: Vec<usize>,
+    pub(in crate::derive) controlled_by: Vec<Option<usize>>,
+    pub(in crate::derive) position_sources: Vec<bool>,
 }
 
 pub(in crate::derive) fn validate_computations(fields: &mut [Field]) -> syn::Result<Vec<usize>> {
@@ -212,10 +216,10 @@ fn is_unsigned_builtin_codec(codec: &str) -> bool {
 }
 
 pub(in crate::derive) fn validate_byte_fields(
-    fields: &mut [Field],
+    fields: &[Field],
     wire_lifetime: Option<&Lifetime>,
-) -> syn::Result<()> {
-    let mut controlled_sources = BTreeSet::new();
+) -> syn::Result<Vec<Option<usize>>> {
+    let mut controlled_by = vec![None; fields.len()];
 
     for index in 0..fields.len() {
         let FieldKind::Bytes { source, .. } = &fields[index].kind else {
@@ -257,27 +261,22 @@ pub(in crate::derive) fn validate_byte_fields(
                 "byte length source must be an unsigned integer encoded by a built-in fixed or prefix codec",
             ));
         }
-        if !controlled_sources.insert(source_index) {
+        if controlled_by[source_index].is_some() {
             return Err(syn::Error::new_spanned(
                 &source,
                 "a byte length source may control only one field",
             ));
         }
-        fields[index].kind = FieldKind::Bytes {
-            source,
-            source_index,
-        };
+        controlled_by[source_index] = Some(index);
     }
-    Ok(())
+    Ok(controlled_by)
 }
 
-pub(in crate::derive) fn validate_positions(fields: &mut [Field]) -> syn::Result<()> {
-    let mut controlled_sources = BTreeSet::new();
-    for field in fields.iter() {
-        if let FieldKind::Bytes { source_index, .. } = field.kind {
-            controlled_sources.insert(source_index);
-        }
-    }
+pub(in crate::derive) fn validate_positions(
+    fields: &mut [Field],
+    controlled_by: &[Option<usize>],
+) -> syn::Result<Vec<bool>> {
+    let mut position_sources = vec![false; fields.len()];
 
     for index in 0..fields.len() {
         let Some(position) = &fields[index].position else {
@@ -324,13 +323,14 @@ pub(in crate::derive) fn validate_positions(fields: &mut [Field]) -> syn::Result
                 "a computed position source cannot depend on physical geometry that its position controls",
             ));
         }
-        if !controlled_sources.insert(source_index) {
+        if controlled_by[source_index].is_some() || position_sources[source_index] {
             return Err(syn::Error::new_spanned(
                 &source,
                 "a geometry source may control only one field",
             ));
         }
+        position_sources[source_index] = true;
         fields[index].position = Some(FieldPosition::Source(source));
     }
-    Ok(())
+    Ok(position_sources)
 }

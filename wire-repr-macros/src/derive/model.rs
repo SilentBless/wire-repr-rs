@@ -5,7 +5,7 @@ mod syntax;
 
 pub(super) use preparation::{
     Computation, ComputationArgument, ComputationByteSelection, ComputationFieldPath,
-    validate_byte_fields, validate_computations, validate_positions,
+    StructPreparation, validate_byte_fields, validate_computations, validate_positions,
 };
 
 use proc_macro2::TokenStream;
@@ -50,7 +50,7 @@ pub(super) struct WireStruct {
     pub(super) validators: Vec<Path>,
     pub(super) validation_error: Option<Type>,
     pub(super) fields: Vec<Field>,
-    pub(super) computation_order: Vec<usize>,
+    pub(super) preparation: StructPreparation,
 }
 
 pub(super) struct WireEnum {
@@ -84,7 +84,7 @@ pub(super) enum FieldKind {
     Fixed(Codec),
     Nested,
     Prefix(Path),
-    Bytes { source: Ident, source_index: usize },
+    Bytes { source: Ident },
     Rest,
 }
 
@@ -225,18 +225,11 @@ impl WireType {
             }
             _ => {}
         }
-        validate_byte_fields(&mut fields, wire_lifetime.as_ref())?;
+        let controlled_by = validate_byte_fields(&fields, wire_lifetime.as_ref())?;
         validate_operation_fields(&fields, operation_input.as_ref())?;
         let computation_order = validate_computations(&mut fields)?;
-        validate_positions(&mut fields)?;
-        let controlled_sources: BTreeSet<_> = fields
-            .iter()
-            .filter_map(|field| match field.kind {
-                FieldKind::Bytes { source_index, .. } => Some(source_index),
-                _ => None,
-            })
-            .collect();
-        let has_builder = !controlled_sources.is_empty()
+        let position_sources = validate_positions(&mut fields, &controlled_by)?;
+        let has_builder = controlled_by.iter().any(Option::is_some)
             || fields.iter().any(|field| field.computation.is_some());
         if has_builder {
             let reserved = operation_input
@@ -246,7 +239,7 @@ impl WireType {
                 .chain(["prepare".to_owned(), "build_into".to_owned()]);
             if let Some(field) = fields.iter().enumerate().find_map(|(index, field)| {
                 (field.computation.is_none()
-                    && !controlled_sources.contains(&index)
+                    && controlled_by[index].is_none()
                     && reserved.clone().any(|method| field.name == method))
                 .then_some(field)
             }) {
@@ -281,7 +274,11 @@ impl WireType {
             validators: attributes.validators,
             validation_error: attributes.validation_error,
             fields,
-            computation_order,
+            preparation: StructPreparation {
+                computation_order,
+                controlled_by,
+                position_sources,
+            },
         })))
     }
 
@@ -449,10 +446,7 @@ impl Field {
                 })?,
             ),
             WireAttribute::Prefix(path) => FieldKind::Prefix(path),
-            WireAttribute::Bytes(source) => FieldKind::Bytes {
-                source,
-                source_index: usize::MAX,
-            },
+            WireAttribute::Bytes(source) => FieldKind::Bytes { source },
             WireAttribute::Rest => FieldKind::Rest,
             WireAttribute::None if attributes.computation.is_some() => {
                 match builtin_codec(representation_ty, None) {
@@ -1355,13 +1349,12 @@ mod tests {
         else {
             panic!()
         };
-        assert!(matches!(
-            model.fields[1].kind,
-            FieldKind::Bytes {
-                source_index: 0,
-                ..
-            }
-        ));
+        assert!(matches!(model.fields[1].kind, FieldKind::Bytes { .. }));
+        assert_eq!(model.preparation.controlled_by, vec![Some(1), None, None]);
+        assert_eq!(
+            model.preparation.position_sources,
+            vec![false, false, false]
+        );
     }
 
     #[test]
@@ -1377,6 +1370,8 @@ mod tests {
             model.fields[2].position.as_ref().expect("position"),
             FieldPosition::Source(source) if source == "offset"
         ));
+        assert_eq!(model.preparation.controlled_by, vec![None, Some(2), None]);
+        assert_eq!(model.preparation.position_sources, vec![true, false, false]);
 
         let WireType::Struct(model) =
             parse("struct Header { kind: u8, #[wire(at = 8)] value: u8 }").unwrap()
@@ -1411,6 +1406,7 @@ mod tests {
             model.fields[2].position,
             Some(FieldPosition::Source(ref source)) if source == "offset"
         ));
+        assert_eq!(model.preparation.computation_order, vec![1]);
         assert!(
             !model.fields[1]
                 .computation
@@ -1467,13 +1463,7 @@ mod tests {
             panic!()
         };
         assert!(matches!(model.fields[0].kind, FieldKind::Prefix(_)));
-        assert!(matches!(
-            model.fields[1].kind,
-            FieldKind::Bytes {
-                source_index: 0,
-                ..
-            }
-        ));
+        assert!(matches!(model.fields[1].kind, FieldKind::Bytes { .. }));
     }
 
     #[test]
