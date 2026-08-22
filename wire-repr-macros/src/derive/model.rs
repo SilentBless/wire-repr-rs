@@ -861,16 +861,6 @@ fn validate_computation_selection(
         }
         path.top_level_index = top_level_index;
     }
-    if !is_include
-        && !paths
-            .iter()
-            .any(|path| path.top_level_index == own_index && path.nested.is_empty())
-    {
-        return Err(syn::Error::new_spanned(
-            &fields[own_index].name,
-            "computed exclusion arguments must exclude the current computed field",
-        ));
-    }
     Ok(())
 }
 
@@ -1950,7 +1940,6 @@ mod tests {
             "struct Packet { #[wire(computed = wire_repr::computation::len(payload), bytes(include(payload)))] checksum: u8, payload: Payload }",
             "struct Packet { #[wire(computed = checksum(include(missing)))] checksum: u8, payload: Payload }",
             "struct Packet { #[wire(computed = checksum(include(checksum)))] checksum: u8, payload: Payload }",
-            "struct Packet { #[wire(computed = checksum(exclude()))] checksum: u8, payload: Payload }",
             "struct Packet { #[wire(computed = checksum(checksum))] checksum: u8, payload: Payload }",
             "struct Packet { #[wire(computed = first(include(second)))] first: u8, #[wire(computed = second(include(first)))] second: u8 }",
             "struct Packet { #[wire(computed = first(exclude(self)))] first: u8, #[wire(computed = second(exclude(self)))] second: u8 }",
@@ -1965,6 +1954,10 @@ mod tests {
         );
         assert!(parse(
             "struct Packet { #[wire(computed = checksum(include()))] checksum: u8, payload: Payload }"
+        )
+        .is_ok());
+        assert!(parse(
+            "struct Packet { #[wire(computed = checksum(exclude()))] checksum: u8, payload: Payload }"
         )
         .is_ok());
     }

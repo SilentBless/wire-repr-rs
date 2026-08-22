@@ -187,11 +187,21 @@ pub struct EmptyIncludeCallback {
     pub value: u8,
 }
 
+/// An empty exclusion selects every available physical field.
+#[derive(Wire)]
+pub struct EmptyExcludeCallback {
+    /// Number of available bytes.
+    #[wire(computed = byte_count(exclude()))]
+    pub count: u8,
+    /// Ordinary field retained by the empty exclusion.
+    pub value: u8,
+}
+
 /// A computation with semantic and independently selected physical arguments.
 #[derive(Wire)]
 pub struct OrderedCallback {
     /// Ordered callback result.
-    #[wire(computed = ordered_count(kind, include(first), exclude(self, second)))]
+    #[wire(computed = ordered_count(kind, include(first), exclude(second)))]
     pub checksum: u8,
     /// Semantic callback input.
     pub kind: u8,
@@ -588,6 +598,14 @@ fn callbacks_accept_zero_arguments_and_empty_include_arguments() {
         .build_into(&mut empty)
         .unwrap();
     assert_eq!(written.as_bytes(), &[0, 9]);
+    assert!(suffix.is_empty());
+
+    let mut all = [0; 2];
+    let (written, suffix) = EmptyExcludeCallback::builder()
+        .value(9)
+        .build_into(&mut all)
+        .unwrap();
+    assert_eq!(written.as_bytes(), &[1, 9]);
     assert!(suffix.is_empty());
 }
 
