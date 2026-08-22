@@ -259,7 +259,7 @@ building a temporary packet-sized buffer.
 Computed fields use the same source contract during preparation:
 
 ```rust
-use wire_repr::{ByteSourceCursor, Computed, Wire};
+use wire_repr::{ByteSourceCursor, Wire};
 
 fn checksum(source: &impl ByteSourceCursor) -> u8 {
     source.bytes().fold(0, u8::wrapping_add)
@@ -268,18 +268,19 @@ fn checksum(source: &impl ByteSourceCursor) -> u8 {
 #[derive(Wire)]
 struct Packet<'wire> {
     #[wire(computed = checksum(exclude(self)))]
-    checksum: Computed<u8>,
-    #[wire(computed = len(payload))]
-    length: Computed<u8>,
+    checksum: u8,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    length: u8,
     #[wire(bytes = length)]
     payload: &'wire [u8],
 }
 ```
 
 The selection is the computation's compile-time read-set, so dependencies are ordered
-without relying on declaration order and cycles are rejected by the derive. Reading still
-returns the stored computed value. If stored-value consistency matters, validate it
-separately against the exact-source view selection.
+without relying on declaration order and cycles are rejected by the derive. Computations are
+infallible derivations; preparation checked-converts their results into the stored field type.
+Reading still returns the stored computed value. If stored-value consistency matters, validate
+it separately against the exact-source view selection.
 
 ## 🧪 Real formats
 

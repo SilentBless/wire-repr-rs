@@ -180,8 +180,12 @@ A selected source remains fragmented. `ByteSourceCursor` exposes borrowed byte s
 virtual repeated-byte segments without copying them into one buffer; bounded chunks, bytes,
 and logical ranges are lazy adaptors over that representation.
 
-`Computed<T>` declares a physical stored value that is omitted from builder input and
-prepared canonically during encoding. `len(field)` derives a byte length. A callback such as
+`#[wire(computed = ...)]` declares a physical stored value that is omitted from builder input
+and prepared canonically during encoding. The declared field keeps its ordinary semantic
+type; a caller-supplied value on the direct struct path is ignored. `len(field)` derives a
+byte length. Computations are infallible derivations; preparation checked-converts each
+result into the field's semantic type and reports an unrepresentable result before creating
+the plan. A callback such as
 `checksum(exclude(self))` receives only the selected prepared physical source. The selection
 is also its compile-time read-set: computed dependencies are prepared topologically, while
 self-inclusion, duplicate paths, missing fields, and dependency cycles are derive errors.
