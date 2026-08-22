@@ -3,6 +3,7 @@
 mod builder;
 mod error;
 mod fixed;
+mod interface;
 mod plan;
 mod preparation;
 mod selection;
@@ -210,25 +211,10 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         };
     let custom_validation_error = validation_error;
     let validation_error = format_ident!("{name}ValidationError");
-    let view_request = quote!(#runtime::ValidatedViewRequest);
-    let cursor_method = quote! {
-        /// Returns a fail-closed cursor over consecutive representations.
-        #vis fn cursor<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #runtime::ValidatedViewCursor<'__wire_repr_view, #view<'__wire_repr_view>> {
-            #runtime::ValidatedViewCursor::new(input)
-        }
-    };
-    let (impl_generics, self_type, view_signature) = if let Some(lifetime) = &wire_lifetime {
-        (
-            quote!(<#lifetime>),
-            quote!(#name<#lifetime>),
-            quote!(#vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #view_request<'__wire_repr_view, #view<'__wire_repr_view>>),
-        )
+    let self_type = if let Some(lifetime) = &wire_lifetime {
+        quote!(#name<#lifetime>)
     } else {
-        (
-            quote!(),
-            quote!(#name),
-            quote!(#vis fn view<'__wire_repr_wire>(input: &'__wire_repr_wire [u8]) -> #view_request<'__wire_repr_wire, #view<'__wire_repr_wire>>),
-        )
+        quote!(#name)
     };
 
     let selection = selection::render(selection::Input {
@@ -358,107 +344,37 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let builder_declaration = builder.declaration;
     let builder_method = builder.method;
 
-    let inherent_impl = if operation_input_ty.is_some() {
-        let operation_name = operation_name.expect("operation input");
-        let operation_encode_generics = if let Some(lifetime) = &wire_lifetime {
-            quote!(<#lifetime, '__wire_repr_operation>)
-        } else {
-            quote!(<'__wire_repr_operation>)
-        };
-        let operation_encode_request_type = if let Some(lifetime) = &wire_lifetime {
-            quote!(#encode_request<#lifetime, '_>)
-        } else {
-            quote!(#encode_request<'_>)
-        };
-        quote! {
-            #[doc(hidden)] #vis struct #view_input_request<'__wire_repr_wire> { input: &'__wire_repr_wire [u8] }
-            #[doc(hidden)] #vis struct #direct_view_request<'__wire_repr_wire, '__wire_repr_operation> { input: &'__wire_repr_wire [u8], operation: &'__wire_repr_operation #operation_input_ty }
-            #[doc(hidden)] #vis struct #unchecked_view_request<'__wire_repr_wire, '__wire_repr_operation> { input: &'__wire_repr_wire [u8], operation: &'__wire_repr_operation #operation_input_ty }
-            #[doc(hidden)] #vis struct #cursor_input_request<'__wire_repr_wire> { input: &'__wire_repr_wire [u8] }
-            #[doc(hidden)] #vis struct #direct_cursor<'__wire_repr_wire, '__wire_repr_operation> { remaining: &'__wire_repr_wire [u8], operation: &'__wire_repr_operation #operation_input_ty }
-            #[doc(hidden)] #vis struct #unchecked_cursor<'__wire_repr_wire, '__wire_repr_operation> { remaining: &'__wire_repr_wire [u8], operation: &'__wire_repr_operation #operation_input_ty }
-            #[doc(hidden)] #vis struct #encode_request #operation_encode_generics { value: #self_type, operation: &'__wire_repr_operation #operation_input_ty }
-
-            #[allow(missing_docs)] impl<'__wire_repr_wire> #view_input_request<'__wire_repr_wire> {
-                #[must_use] #vis fn #operation_name(self, operation: &#operation_input_ty) -> #direct_view_request<'__wire_repr_wire, '_> { #direct_view_request { input: self.input, operation } }
-            }
-            #[allow(missing_docs)]
-            impl<'__wire_repr_wire, '__wire_repr_operation> #direct_view_request<'__wire_repr_wire, '__wire_repr_operation> {
-                #[must_use] #vis fn unchecked(self) -> #unchecked_view_request<'__wire_repr_wire, '__wire_repr_operation> { #unchecked_view_request { input: self.input, operation: self.operation } }
-                #vis fn with_remainder(self) -> Result<(#view<'__wire_repr_wire>, &'__wire_repr_wire [u8]), #validation_error_type> { let (view, remainder) = #view::#operation_parse(self.input, self.operation)?; #runtime::WireViewValidation::validate(&view)?; Ok((view, remainder)) }
-                #vis fn without_trailing(self) -> Result<#view<'__wire_repr_wire>, #validation_error_type> { let input_len = self.input.len(); let (view, suffix) = self.with_remainder()?; if suffix.is_empty() { Ok(view) } else { Err(<#validation_error_type as From<#view_error_type>>::from(#decode_error::TrailingBytes { expected: view.as_bytes().len(), actual: input_len })) } }
-            }
-            #[allow(missing_docs)]
-            impl<'__wire_repr_wire, '__wire_repr_operation> #unchecked_view_request<'__wire_repr_wire, '__wire_repr_operation> {
-                #vis fn with_remainder(self) -> Result<(#view<'__wire_repr_wire>, &'__wire_repr_wire [u8]), #view_error_type> { #view::#operation_parse(self.input, self.operation) }
-                #vis fn without_trailing(self) -> Result<#view<'__wire_repr_wire>, #view_error_type> { let input_len = self.input.len(); let (view, suffix) = self.with_remainder()?; if suffix.is_empty() { Ok(view) } else { Err(#decode_error::TrailingBytes { expected: view.as_bytes().len(), actual: input_len }) } }
-            }
-            #[allow(missing_docs)] impl<'__wire_repr_wire> #cursor_input_request<'__wire_repr_wire> { #[must_use] #vis fn #operation_name(self, operation: &#operation_input_ty) -> #direct_cursor<'__wire_repr_wire, '_> { #direct_cursor { remaining: self.input, operation } } }
-            #[allow(missing_docs)]
-            impl<'__wire_repr_wire, '__wire_repr_operation> #direct_cursor<'__wire_repr_wire, '__wire_repr_operation> {
-                #[must_use] #vis const fn remaining(&self) -> &'__wire_repr_wire [u8] { self.remaining }
-                #[must_use] #vis fn unchecked(self) -> #unchecked_cursor<'__wire_repr_wire, '__wire_repr_operation> { #unchecked_cursor { remaining: self.remaining, operation: self.operation } }
-                #vis fn next(&mut self) -> Result<Option<#view<'__wire_repr_wire>>, #runtime::ViewCursorError<#validation_error_type>> { if self.remaining.is_empty() { return Ok(None); } let (view, suffix) = #view::#operation_parse(self.remaining, self.operation).map_err(|error| #runtime::ViewCursorError::Item(error.into()))?; if suffix.len() == self.remaining.len() { return Err(#runtime::ViewCursorError::EmptyItem); } #runtime::WireViewValidation::validate(&view).map_err(#runtime::ViewCursorError::Item)?; self.remaining = suffix; Ok(Some(view)) }
-            }
-            #[allow(missing_docs)]
-            impl<'__wire_repr_wire, '__wire_repr_operation> #unchecked_cursor<'__wire_repr_wire, '__wire_repr_operation> {
-                #[must_use] #vis const fn remaining(&self) -> &'__wire_repr_wire [u8] { self.remaining }
-                #vis fn next(&mut self) -> Result<Option<#view<'__wire_repr_wire>>, #runtime::ViewCursorError<#view_error_type>> { if self.remaining.is_empty() { return Ok(None); } let (view, suffix) = #view::#operation_parse(self.remaining, self.operation).map_err(#runtime::ViewCursorError::Item)?; if suffix.len() == self.remaining.len() { return Err(#runtime::ViewCursorError::EmptyItem); } self.remaining = suffix; Ok(Some(view)) }
-            }
-            #[allow(missing_docs)] impl #operation_encode_generics #encode_request #operation_encode_generics { #vis fn prepare<'__wire_repr_value>(self) -> Result<#plan_type, #encode_error_type> where #self_type: '__wire_repr_value { <#self_type>::#operation_prepare(self.value, self.operation) } #vis fn build_into<'__wire_repr_value, '__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#encode_error_type>> where #self_type: '__wire_repr_value { let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?; #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output) } }
-            #[allow(missing_docs)]
-            impl #impl_generics #self_type {
-                #builder_method
-                #vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #view_input_request<'__wire_repr_view> { #view_input_request { input } }
-                #vis fn cursor<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #cursor_input_request<'__wire_repr_view> { #cursor_input_request { input } }
-                #vis fn #operation_name(self, operation: &#operation_input_ty) -> #operation_encode_request_type { #encode_request { value: self, operation } }
-                #[doc(hidden)]
-                #vis fn #operation_prepare<'__wire_repr_value>(self, #operation_value: &#operation_input_ty) -> Result<#plan_type, #encode_error_type>
-                where Self: '__wire_repr_value {
-                    let Self { #(#prepare_destructure,)* } = self;
-                    Self::#prepare_helper(#(#prepare_field_names,)* #operation_value)
-                }
-                #[doc(hidden)]
-                fn #prepare_helper<'__wire_repr_value>(#(#prepare_field_parameters,)* #operation_value: &#operation_input_ty) -> Result<#plan_type, #encode_error_type>
-                where Self: '__wire_repr_value {
-                    #preparation_body
-                }
-            }
-        }
-    } else {
-        quote! {
-            #[allow(missing_docs)]
-            impl #impl_generics #self_type {
-                #view_signature { #view_request::new(input) }
-                #cursor_method
-                #builder_method
-                #[doc(hidden)]
-                fn #prepare_helper<'__wire_repr_value>(#(#prepare_field_parameters),*) -> Result<#plan_type, #encode_error_type>
-                where Self: '__wire_repr_value {
-                    #preparation_body
-                }
-                /// Consumes this value and prepares an atomic encoding.
-                #vis fn prepare<'__wire_repr_value>(self) -> Result<#plan_type, #encode_error_type> where Self: '__wire_repr_value { <Self as #runtime::WireEncode>::prepare(self) }
-                /// Consumes this value, prepares it, and commits it into `output`.
-                #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#encode_error_type>> { let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?; #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output) }
-            }
-        }
-    };
-
-    let encode_impl = if operation_input_ty.is_some() {
-        quote!()
-    } else {
-        quote! {
-            impl #impl_generics #runtime::WireEncode for #self_type {
-                type EncodeError = #encode_error_type;
-                type Plan<'__wire_repr_value> = #plan_type where Self: '__wire_repr_value;
-                fn prepare<'__wire_repr_value>(self) -> Result<Self::Plan<'__wire_repr_value>, Self::EncodeError> where Self: '__wire_repr_value {
-                    let Self { #(#prepare_destructure,)* } = self;
-                    Self::#prepare_helper(#(#prepare_field_names),*)
-                }
-            }
-        }
-    };
+    let interface_declaration = interface::render(interface::Input {
+        name: &name,
+        vis: &vis,
+        wire_lifetime: wire_lifetime.as_ref(),
+        operation_input_ty,
+        operation_name,
+        operation_parse: operation_parse.as_ref(),
+        operation_prepare: operation_prepare.as_ref(),
+        operation_value: &operation_value,
+        view_input_request: &view_input_request,
+        direct_view_request: &direct_view_request,
+        unchecked_view_request: &unchecked_view_request,
+        cursor_input_request: &cursor_input_request,
+        direct_cursor: &direct_cursor,
+        unchecked_cursor: &unchecked_cursor,
+        encode_request: &encode_request,
+        view: &view,
+        decode_error: &decode_error,
+        view_error_type: &view_error_type,
+        validation_error_type: &validation_error_type,
+        association_error_type: &association_error_type,
+        plan_type: &plan_type,
+        encode_error_type: &encode_error_type,
+        prepare_helper: &prepare_helper,
+        preparation_body: &preparation_body,
+        prepare_field_parameters: &prepare_field_parameters,
+        prepare_destructure: &prepare_destructure,
+        prepare_field_names: &prepare_field_names,
+        builder_method: &builder_method,
+        runtime,
+    });
 
     Ok(quote! {
         #error_declaration
@@ -470,12 +386,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         #plan_declaration
 
         #builder_declaration
-        #inherent_impl
-        impl #impl_generics #runtime::WireViewType for #self_type {
-            type DecodeError<'__wire_repr_view> = #association_error_type;
-            type View<'__wire_repr_view> = #view<'__wire_repr_view>;
-        }
-        #encode_impl
+        #interface_declaration
 
     })
 }
