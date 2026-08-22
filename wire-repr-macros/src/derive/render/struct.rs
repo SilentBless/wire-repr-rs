@@ -6,6 +6,7 @@ mod fixed;
 mod plan;
 mod preparation;
 mod selection;
+mod validation;
 mod view;
 
 use super::super::model::{Codec, FieldKind, WireStruct};
@@ -208,87 +209,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             (quote!(), quote!(#encode_error), quote!(#encode_error))
         };
     let custom_validation_error = validation_error;
-    let generated_validation_error = custom_validation_error.is_none() && has_nested;
     let validation_error = format_ident!("{name}ValidationError");
-    let validation_error_type = if let Some(error) = custom_validation_error.as_ref() {
-        quote!(#error)
-    } else if generated_validation_error {
-        quote!(#validation_error<'__wire_repr_wire>)
-    } else {
-        quote!(#view_error_type)
-    };
-    let validation_impl = {
-        let field_validators = fields.iter().enumerate().flat_map(|(index, field)| {
-            let name = &field.name;
-            let own = field.validators.iter().map(move |validator| quote!(#validator(self.#name())?;));
-            if matches!(field.kind, FieldKind::Nested) {
-                let child_view = nested_view_paths[index].as_ref().expect("nested fields have generated view paths");
-                let variant = &variants[index];
-                let child = if generated_validation_error {
-                    let nested_variant = format_ident!("Nested{variant}");
-                    quote!(<#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::validate(&self.#name()).map_err(#validation_error::#nested_variant)?;)
-                } else {
-                    quote!(<#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::validate(&self.#name()).map_err(<Self::ValidationError as From<_>>::from)?;)
-                };
-                quote!(#child #(#own)*)
-            } else { quote!(#(#own)*) }
-        });
-        quote! {
-            impl<'__wire_repr_wire> #runtime::WireViewValidation<'__wire_repr_wire> for #view<'__wire_repr_wire> {
-                type ValidationError = #validation_error_type;
-                fn validate(&self) -> Result<(), Self::ValidationError> {
-                    #(#field_validators)*
-                    #(#model_validators(self)?;)*
-                    Ok(())
-                }
-            }
-        }
-    };
-    let generated_validation_error_decl = generated_validation_error.then(|| {
-        let nested_variants = fields
-            .iter()
-            .enumerate()
-            .filter(|(_, field)| matches!(field.kind, FieldKind::Nested))
-            .map(|(index, _)| {
-                let child_view = nested_view_paths[index].as_ref().expect("nested fields have generated view paths");
-                let variant = format_ident!("Nested{}", variants[index]);
-                let label = &labels[index];
-                quote!(
-                    #[doc = concat!("Nested semantic validation failed in field `", #label, "`.")]
-                    #variant(<#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::ValidationError),
-                )
-            });
-        let nested_arms = fields
-            .iter()
-            .enumerate()
-            .filter(|(_, field)| matches!(field.kind, FieldKind::Nested))
-            .map(|(index, _)| {
-                let variant = format_ident!("Nested{}", variants[index]);
-                let label = &labels[index];
-                quote!(Self::#variant(error) => write!(formatter, "nested validation failed in field `{}`: {error}", #label),)
-            });
-        quote! {
-            /// Semantic validation failures for this wire representation.
-            #[derive(Debug)]
-            #vis enum #validation_error<'__wire_repr_wire> {
-                /// Structural framing failed.
-                Decode(#view_error_type),
-                #(#nested_variants)*
-            }
-            impl ::core::fmt::Display for #validation_error<'_> {
-                fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    match self {
-                        Self::Decode(error) => error.fmt(formatter),
-                        #(#nested_arms)*
-                    }
-                }
-            }
-            impl ::core::error::Error for #validation_error<'_> {}
-            impl<'__wire_repr_wire> From<#view_error_type> for #validation_error<'__wire_repr_wire> {
-                fn from(error: #view_error_type) -> Self { Self::Decode(error) }
-            }
-        }
-    });
     let view_request = quote!(#runtime::ValidatedViewRequest);
     let cursor_method = quote! {
         /// Returns a fail-closed cursor over consecutive representations.
@@ -345,6 +266,23 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         runtime,
     })
     .declaration;
+    let validation::Output {
+        error_type: validation_error_type,
+        declaration: validation_declaration,
+    } = validation::render(validation::Input {
+        vis: &vis,
+        fields: &fields,
+        labels: &labels,
+        variants: &variants,
+        nested_view_paths: &nested_view_paths,
+        model_validators: &model_validators,
+        custom_validation_error: custom_validation_error.as_ref(),
+        has_nested,
+        view: &view,
+        validation_error: &validation_error,
+        view_error_type: &view_error_type,
+        runtime,
+    });
     let plan_output = plan::render(plan::Input {
         vis: &vis,
         wire_lifetime: wire_lifetime.as_ref(),
@@ -526,8 +464,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         #error_declaration
 
         #view_declaration
-        #generated_validation_error_decl
-        #validation_impl
+        #validation_declaration
 
         #selection_declaration
         #plan_declaration
