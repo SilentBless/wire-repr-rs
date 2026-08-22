@@ -2,7 +2,7 @@
 
 use core::num::NonZeroUsize;
 
-use super::EncodePlan;
+use super::ByteSourceCursor;
 
 /// The nonzero extent occupied by a validated encoded prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -67,7 +67,7 @@ pub trait PrefixCodec {
     type EncodeError: core::fmt::Debug;
 
     /// Prepared canonical encoded bytes, which may borrow the input value.
-    type Plan<'value>: EncodePlan
+    type Plan<'value>: ByteSourceCursor
     where
         Self: 'value;
 

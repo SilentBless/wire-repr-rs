@@ -57,7 +57,7 @@ enum Command {
 let command = Command::view(&[1, 0x12, 0x34]).without_trailing()?;
 assert!(!command.is_halt());
 assert_eq!(command.ping().unwrap().id(), 0x1234);
-# Ok::<(), CommandDecodeError>(())
+# Ok::<(), CommandValidationError>(())
 ```
 
 Fixed byte tags preserve byte identity without integer or UTF-8 reinterpretation:
@@ -81,8 +81,9 @@ assert_eq!(chunk_type.other(), Some(b"vpAg"));
 ```
 
 Unknown tags are rejected by the explicit policy. Dynamic numeric IDs can instead use a
-consumer-owned opcode table supplied with `.opcodes(&table)` during validation and
-preparation.
+consumer-owned operation input whose schema name generates the fluent method: an `opcodes`
+group uses `.opcodes(&table)`, while a `table` group uses `.table(&table)`. The input is
+borrowed during validation or preparation and is not retained in views or plans.
 
 ## Nominal bitfields
 
@@ -154,8 +155,46 @@ assert_eq!(suffix, &mut [0xa5]);
 # Ok::<(), Box<dyn core::error::Error>>(())
 ```
 
-Preparation completes all fallible codec work, conversions, opcode mapping, dynamic
+Preparation completes all fallible codec work, conversions, operation-input mapping, dynamic
 geometry, and total-length checks before output mutation. Commit checks capacity before
 its first write. Short output remains byte-for-byte unchanged.
+
+## Select and compute represented bytes
+
+Generated plans and views expose typed physical-byte selections. The result remains a
+streaming source rather than a hidden contiguous buffer:
+
+```rust
+use wire_repr::{ByteSource, ByteSourceCursor, Computed, Wire};
+
+fn checksum(source: &impl ByteSourceCursor) -> u8 {
+    source.bytes().fold(0, u8::wrapping_add)
+}
+
+#[derive(Wire)]
+struct Packet<'wire> {
+    #[wire(computed = checksum(exclude(self)))]
+    checksum: Computed<u8>,
+    #[wire(computed = len(payload))]
+    length: Computed<u8>,
+    #[wire(bytes = length)]
+    payload: &'wire [u8],
+}
+
+let payload = [1, 2, 3];
+let plan = Packet::builder()
+    .payload(&payload)
+    .prepare()
+    .expect("packet preparation succeeds");
+let selected = plan.bytes().exclude(|fields| fields.checksum);
+let mut represented = [0; 4];
+selected.write_into(&mut represented);
+assert_eq!(represented, [3, 1, 2, 3]);
+```
+
+Selectors are evaluated in physical wire order and support nested field projections.
+Computed selections also define compile-time dependencies; derive rejects self-inclusion,
+missing or duplicate paths, and cycles. Views select exact stored bytes, while plans select
+canonical prepared bytes.
 
 For custom field codecs and exact planning contracts, see [`codec`].

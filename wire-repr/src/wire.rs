@@ -2,6 +2,45 @@
 
 use crate::{OutputTooShortError, PreparedLayout};
 
+/// A zero-sized marker for a raw semantic wire value computed during encoding.
+pub struct Computed<T>(core::marker::PhantomData<fn() -> T>);
+
+impl<T> core::fmt::Debug for Computed<T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("Computed")
+    }
+}
+
+impl<T> PartialEq for Computed<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<T> Eq for Computed<T> {}
+
+impl<T> Computed<T> {
+    /// Creates a computed marker.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+impl<T> Default for Computed<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Copy for Computed<T> {}
+
+impl<T> Clone for Computed<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 /// Associates a semantic wire value with its generated read view.
 #[doc(hidden)]
 pub trait WireViewType {
@@ -28,11 +67,46 @@ pub trait WireView<'wire>: Sized {
     fn as_bytes(&self) -> &'wire [u8];
 }
 
+/// Generated semantic validation for a structurally decoded view.
+#[doc(hidden)]
+pub trait WireViewValidation<'wire> {
+    /// The human-owned validation error.
+    type ValidationError: core::fmt::Debug + core::fmt::Display;
+
+    /// Validates decoded field and model invariants.
+    fn validate(&self) -> Result<(), Self::ValidationError>;
+}
+
 /// A request to frame one bytes-backed wire view.
 #[doc(hidden)]
 pub struct ViewRequest<'wire, V> {
     input: &'wire [u8],
     view: core::marker::PhantomData<V>,
+}
+
+/// A request which performs structural framing followed by semantic validation.
+#[doc(hidden)]
+pub struct ValidatedViewRequest<'wire, V> {
+    input: &'wire [u8],
+    view: core::marker::PhantomData<V>,
+}
+
+impl<'wire, V> ValidatedViewRequest<'wire, V> {
+    /// Creates a validated view request.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(input: &'wire [u8]) -> Self {
+        Self {
+            input,
+            view: core::marker::PhantomData,
+        }
+    }
+
+    /// Skips semantic validation and retains structural decode errors.
+    #[must_use]
+    pub const fn unchecked(self) -> ViewRequest<'wire, V> {
+        ViewRequest::new(self.input)
+    }
 }
 
 impl<'wire, V> ViewRequest<'wire, V> {
@@ -43,66 +117,6 @@ impl<'wire, V> ViewRequest<'wire, V> {
         Self {
             input,
             view: core::marker::PhantomData,
-        }
-    }
-}
-
-impl<'wire, V> ViewRequest<'wire, V> {
-    /// Supplies the opcode mapping required by this representation.
-    #[must_use]
-    pub const fn opcodes<O>(self, opcodes: &O) -> OpcodeViewRequest<'wire, '_, V, O> {
-        OpcodeViewRequest {
-            input: self.input,
-            opcodes,
-            view: core::marker::PhantomData,
-        }
-    }
-}
-
-/// A view request with its explicit opcode mapping.
-#[doc(hidden)]
-pub struct OpcodeViewRequest<'wire, 'opcodes, V, O> {
-    input: &'wire [u8],
-    opcodes: &'opcodes O,
-    view: core::marker::PhantomData<V>,
-}
-
-/// Generated view composition through one concrete opcode mapping.
-#[doc(hidden)]
-pub trait WireViewWithOpcodes<'wire, O>: Sized {
-    /// The typed failure returned while validating the view.
-    type DecodeError: core::fmt::Debug + core::fmt::Display;
-
-    /// Validates one leading representation with `opcodes`.
-    fn parse_view_with_opcodes(
-        input: &'wire [u8],
-        opcodes: &O,
-    ) -> Result<(Self, &'wire [u8]), Self::DecodeError>;
-
-    /// Builds this view's typed error for trailing input.
-    fn trailing_bytes_error(represented: usize, input: usize) -> Self::DecodeError;
-
-    /// Returns this view's exact represented bytes.
-    fn as_bytes(&self) -> &'wire [u8];
-}
-
-impl<'wire, V, O> OpcodeViewRequest<'wire, '_, V, O>
-where
-    V: WireViewWithOpcodes<'wire, O>,
-{
-    /// Validates the leading representation and returns its unconsumed suffix.
-    pub fn with_remainder(self) -> Result<(V, &'wire [u8]), V::DecodeError> {
-        V::parse_view_with_opcodes(self.input, self.opcodes)
-    }
-
-    /// Validates one complete representation, rejecting trailing input.
-    pub fn without_trailing(self) -> Result<V, V::DecodeError> {
-        let input_len = self.input.len();
-        let (view, suffix) = self.with_remainder()?;
-        if suffix.is_empty() {
-            Ok(view)
-        } else {
-            Err(V::trailing_bytes_error(view.as_bytes().len(), input_len))
         }
     }
 }
@@ -124,6 +138,33 @@ where
             Ok(view)
         } else {
             Err(V::trailing_bytes_error(view.as_bytes().len(), input_len))
+        }
+    }
+}
+
+impl<'wire, V> ValidatedViewRequest<'wire, V>
+where
+    V: WireView<'wire> + WireViewValidation<'wire>,
+    V::ValidationError: From<V::DecodeError>,
+{
+    /// Frames and semantically validates the leading representation.
+    pub fn with_remainder(self) -> Result<(V, &'wire [u8]), V::ValidationError> {
+        let (view, remainder) = V::parse_view(self.input).map_err(V::ValidationError::from)?;
+        view.validate()?;
+        Ok((view, remainder))
+    }
+
+    /// Frames and semantically validates one complete representation.
+    pub fn without_trailing(self) -> Result<V, V::ValidationError> {
+        let input_len = self.input.len();
+        let (view, suffix) = self.with_remainder()?;
+        if suffix.is_empty() {
+            Ok(view)
+        } else {
+            Err(V::ValidationError::from(V::trailing_bytes_error(
+                view.as_bytes().len(),
+                input_len,
+            )))
         }
     }
 }
@@ -160,6 +201,29 @@ impl core::fmt::Display for FixedViewSequenceError {
 }
 
 impl core::error::Error for FixedViewSequenceError {}
+
+/// Failure while framing or semantically validating a fixed-width view sequence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FixedValidatedViewSequenceError<E> {
+    /// Sequence framing failed.
+    Framing(FixedViewSequenceError),
+    /// An item failed semantic validation.
+    Item(E),
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for FixedValidatedViewSequenceError<E> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Framing(error) => error.fmt(formatter),
+            Self::Item(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: core::fmt::Debug + core::fmt::Display> core::error::Error
+    for FixedValidatedViewSequenceError<E>
+{
+}
 
 /// An infallible iterator over preframed fixed-width wire views.
 #[derive(Clone, Debug)]
@@ -277,6 +341,61 @@ where
     }
 }
 
+/// A fail-closed cursor which semantically validates each framed item.
+#[derive(Clone, Copy, Debug)]
+pub struct ValidatedViewCursor<'wire, V> {
+    remaining: &'wire [u8],
+    view: core::marker::PhantomData<V>,
+}
+
+impl<'wire, V> ValidatedViewCursor<'wire, V> {
+    /// Creates a validated cursor over `input` without framing an item yet.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(input: &'wire [u8]) -> Self {
+        Self {
+            remaining: input,
+            view: core::marker::PhantomData,
+        }
+    }
+
+    /// Returns the unconsumed bytes.
+    #[must_use]
+    pub const fn remaining(&self) -> &'wire [u8] {
+        self.remaining
+    }
+
+    /// Skips semantic validation for the remaining items.
+    #[must_use]
+    pub const fn unchecked(self) -> ViewCursor<'wire, V> {
+        ViewCursor::new(self.remaining)
+    }
+}
+
+impl<'wire, V> ValidatedViewCursor<'wire, V>
+where
+    V: WireView<'wire> + WireViewValidation<'wire>,
+    V::ValidationError: From<V::DecodeError>,
+{
+    /// Validates and returns the next item, or `None` at the exact end.
+    ///
+    /// An error leaves the cursor at the failing item.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Result<Option<V>, ViewCursorError<V::ValidationError>> {
+        if self.remaining.is_empty() {
+            return Ok(None);
+        }
+        let (view, suffix) = V::parse_view(self.remaining)
+            .map_err(|error| ViewCursorError::Item(V::ValidationError::from(error)))?;
+        if suffix.len() == self.remaining.len() {
+            return Err(ViewCursorError::EmptyItem);
+        }
+        view.validate().map_err(ViewCursorError::Item)?;
+        self.remaining = suffix;
+        Ok(Some(view))
+    }
+}
+
 /// A committed leading output representation.
 #[derive(Debug)]
 pub struct Written<'output> {
@@ -344,66 +463,4 @@ pub trait WireEncode: Sized {
     fn prepare<'value>(self) -> Result<Self::Plan<'value>, Self::EncodeError>
     where
         Self: 'value;
-}
-
-/// Generated encoding composition through one concrete opcode mapping.
-#[doc(hidden)]
-pub trait WireEncodeWithOpcodes<O>: Sized {
-    /// Preparation error.
-    type EncodeError: core::fmt::Debug + core::fmt::Display;
-
-    /// Prepared plan that no longer depends on the opcode mapping.
-    type Plan<'value>: PreparedLayout
-    where
-        Self: 'value;
-
-    /// Resolves opcodes and prepares without output mutation.
-    fn prepare_with_opcodes<'value>(
-        self,
-        opcodes: &O,
-    ) -> Result<Self::Plan<'value>, Self::EncodeError>
-    where
-        Self: 'value;
-}
-
-/// A semantic write value paired with its explicit opcode mapping.
-#[doc(hidden)]
-pub struct OpcodeEncodeRequest<'opcodes, T, O> {
-    value: T,
-    opcodes: &'opcodes O,
-}
-
-impl<'opcodes, T, O> OpcodeEncodeRequest<'opcodes, T, O> {
-    /// Creates an opcode-aware encoding request.
-    #[doc(hidden)]
-    #[must_use]
-    pub const fn new(value: T, opcodes: &'opcodes O) -> Self {
-        Self { value, opcodes }
-    }
-}
-
-impl<T, O> OpcodeEncodeRequest<'_, T, O>
-where
-    T: WireEncodeWithOpcodes<O>,
-{
-    /// Resolves opcodes and prepares an atomic encoding.
-    pub fn prepare<'value>(self) -> Result<T::Plan<'value>, T::EncodeError>
-    where
-        T: 'value,
-    {
-        T::prepare_with_opcodes(self.value, self.opcodes)
-    }
-
-    /// Resolves opcodes, prepares, and commits into `output`.
-    pub fn build_into<'value, 'output>(
-        self,
-        output: &'output mut [u8],
-    ) -> Result<(Written<'output>, &'output mut [u8]), BuildIntoError<T::EncodeError>>
-    where
-        T: 'value,
-        T::Plan<'value>: for<'written> PreparedLayout<Written<'written> = Written<'written>>,
-    {
-        let plan: T::Plan<'value> = self.prepare().map_err(BuildIntoError::Prepare)?;
-        PreparedLayout::commit_into(plan, output).map_err(BuildIntoError::Output)
-    }
 }

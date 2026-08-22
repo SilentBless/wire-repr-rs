@@ -124,10 +124,12 @@ fn ihdr_and_iend_preserve_exact_fields_and_disjoint_suffix() {
     assert_eq!(view.crc(), read_be_u32(&IHDR, 21));
     assert!(matches!(
         PngChunk::view(&input).without_trailing(),
-        Err(PngChunkDecodeError::TrailingBytes {
-            expected: 25,
-            actual: 27
-        })
+        Err(PngChunkValidationError::Decode(
+            PngChunkDecodeError::TrailingBytes {
+                expected: 25,
+                actual: 27
+            }
+        ))
     ));
 
     let iend = PngChunk::view(&IEND)
@@ -174,19 +176,23 @@ fn malformed_domains_parse_structurally_then_consumer_checks_reject_them() {
     let overclaimed_data = [0, 0, 0, 1, b'I', b'E', b'N', b'D'];
     assert!(matches!(
         PngChunk::view(&overclaimed_data).with_remainder(),
-        Err(PngChunkDecodeError::InputTooShort {
-            field: "data",
-            required: 1,
-            available: 0
-        })
+        Err(PngChunkValidationError::Decode(
+            PngChunkDecodeError::InputTooShort {
+                field: "data",
+                required: 1,
+                available: 0
+            }
+        ))
     ));
     assert!(matches!(
         PngChunk::view(&IHDR[..20]).without_trailing(),
-        Err(PngChunkDecodeError::InputTooShort {
-            field: "data",
-            required: 13,
-            available: 12
-        })
+        Err(PngChunkValidationError::Decode(
+            PngChunkDecodeError::InputTooShort {
+                field: "data",
+                required: 13,
+                available: 12
+            }
+        ))
     ));
 }
 
@@ -288,7 +294,10 @@ fn consecutive_png_chunks_use_a_fail_closed_typed_cursor() {
     assert!(matches!(
         chunks.next(),
         Err(wire_repr::ViewCursorError::Item(
-            PngChunkDecodeError::InputTooShort { field: "crc", .. }
+            PngChunkValidationError::Decode(PngChunkDecodeError::InputTooShort {
+                field: "crc",
+                ..
+            })
         ))
     ));
     assert_eq!(chunks.remaining().as_ptr(), failing.as_ptr());

@@ -13,6 +13,7 @@ pub(super) fn render(model: WireBitfield, runtime: &TokenStream) -> syn::Result<
     } = model;
     let view = format_ident!("{name}View");
     let plan = format_ident!("{name}Plan");
+    let field_proxy = format_ident!("{name}Fields");
     let decode_error = format_ident!("{name}DecodeError");
     let encode_error = format_ident!("{name}EncodeError");
     let codec = format_ident!("{}", storage.codec);
@@ -153,10 +154,40 @@ pub(super) fn render(model: WireBitfield, runtime: &TokenStream) -> syn::Result<
             }
         }
 
+        impl<'__wire_repr_wire> #runtime::ByteSource for #view<'__wire_repr_wire> {
+            #[inline(always)]
+            fn byte_len(&self) -> usize { self.as_bytes().len() }
+
+            #[inline(always)]
+            fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) { sink.write(self.as_bytes()); }
+        }
+
+        impl<'__wire_repr_wire> #runtime::ByteSourceCursor for #view<'__wire_repr_wire> {
+            type Segments<'__wire_repr_source> = ::core::iter::Once<#runtime::ByteSegment<'__wire_repr_source>> where Self: '__wire_repr_source;
+
+            #[inline(always)]
+            fn segments(&self) -> Self::Segments<'_> {
+                ::core::iter::once(#runtime::ByteSegment::Bytes(self.as_bytes()))
+            }
+        }
+
+        impl<'__wire_repr_wire> #runtime::WireViewValidation<'__wire_repr_wire> for #view<'__wire_repr_wire> {
+            type ValidationError = #decode_error;
+            fn validate(&self) -> Result<(), Self::ValidationError> { Ok(()) }
+        }
+
         impl #runtime::WireViewType for #name {
             type DecodeError<'__wire_repr_wire> = #decode_error;
             type View<'__wire_repr_wire> = #view<'__wire_repr_wire>;
         }
+
+        /// Generated field-selection proxy for this nominal bitfield.
+        #[doc(hidden)]
+        #vis struct #field_proxy<S: #runtime::MarkerScope = #runtime::RootScope>(::core::marker::PhantomData<fn() -> S>);
+        impl<S: #runtime::MarkerScope> Copy for #field_proxy<S> {}
+        impl<S: #runtime::MarkerScope> Clone for #field_proxy<S> { fn clone(&self) -> Self { *self } }
+        #[allow(missing_docs)]
+        impl<S: #runtime::MarkerScope> #field_proxy<S> { #[doc(hidden)] #vis fn __wire_repr_new() -> Self { Self(::core::marker::PhantomData) } }
 
         /// Typed preparation failures for this nominal bitfield.
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -198,12 +229,34 @@ pub(super) fn render(model: WireBitfield, runtime: &TokenStream) -> syn::Result<
             }
         }
 
+        impl<'__wire_repr_value> #runtime::ByteSource for #plan<'__wire_repr_value> {
+            #[inline(always)]
+            fn byte_len(&self) -> usize {
+                <#runtime::#codec as #runtime::FixedCodec>::WIDTH
+            }
+
+            #[inline(always)]
+            fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) {
+                #runtime::ByteSource::emit_to(&self.storage, sink);
+            }
+        }
+
+        impl<'__wire_repr_value> #runtime::ByteSourceCursor for #plan<'__wire_repr_value>
+        where
+            <#runtime::#codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>: #runtime::ByteSourceCursor,
+        {
+            type Segments<'__wire_repr_source> = <<#runtime::#codec as #runtime::FixedCodec>::Plan<'__wire_repr_value> as #runtime::ByteSourceCursor>::Segments<'__wire_repr_source>
+            where
+                Self: '__wire_repr_source;
+
+            #[inline(always)]
+            fn segments(&self) -> Self::Segments<'_> {
+                #runtime::ByteSourceCursor::segments(&self.storage)
+            }
+        }
+
         impl<'__wire_repr_value> #runtime::PreparedLayout for #plan<'__wire_repr_value> {
             type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
-
-            fn encoded_len(&self) -> usize {
-                self.encoded_len()
-            }
 
             fn commit_into<'__wire_repr_output>(
                 self,
@@ -220,7 +273,7 @@ pub(super) fn render(model: WireBitfield, runtime: &TokenStream) -> syn::Result<
                     });
                 }
                 let (bytes, suffix) = output.split_at_mut(required);
-                #runtime::EncodePlan::write_into(&self.storage, bytes);
+                #runtime::ByteSource::write_into(&self, bytes);
                 Ok((#runtime::Written::new(bytes), suffix))
             }
         }

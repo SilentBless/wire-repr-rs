@@ -77,7 +77,7 @@ Structural validation establishes bounds, field extents, prefix claims, tag sele
 and physical geometry. It does not validate protocol meaning such as magic values,
 reserved protocol values, checksums, cryptographic hashes, or application state.
 
-## 4. Tagged enums and opcodes
+## 4. Tagged enums and operation inputs
 
 A static enum declares a typed tag representation and an explicit unknown policy. Integer
 tag codecs use explicit discriminants. Fixed byte tags use exact `b"..."` selectors whose
@@ -92,14 +92,15 @@ lossless raw tag in the decode error. `unknown = preserve` requires one explicit
 `#[wire(unknown)]` raw-tag variant and can round-trip it byte-for-byte. It preserves the tag
 only: an unknown body boundary is never inferred.
 
-Negotiated IDs use one concrete consumer-owned opcode table named by the enum. The table
-provides raw-to-semantic and semantic-to-raw inherent methods. It is supplied explicitly
-through `.opcodes(&table)` at view and preparation boundaries. One outer struct can pass
-the same table through several fields marked `#[wire(opcodes)]`.
+Negotiated IDs use one concrete consumer-owned operation input named by the schema. The
+input provides raw-to-semantic and semantic-to-raw inherent methods. Its declared group
+name becomes the generated fluent method: `opcodes` produces `.opcodes(&value)`, while
+`table` produces `.table(&value)`. An outer struct forwards it only through fields marked
+with that same name, such as `#[wire(table)]`; equal Rust types do not imply forwarding.
 
-Opcode mapping is not an ambient context framework. The table is used during validation
-or preparation and is not retained in a generated view or plan. Mapping failure remains
-distinct from an unknown raw ID.
+Operation inputs are not an ambient context or resolver framework. They are used during
+validation or preparation and are not retained in a generated view or plan. Mapping
+failure remains distinct from an unknown raw ID.
 
 ## 5. Nominal bitfields
 
@@ -142,8 +143,8 @@ requires a concrete owner and is not generalized speculatively.
 
 `FixedCodec` owns a nonzero compile-time width, value conversion, and a fallible prepared
 plan. `PrefixCodec` validates one nonzero accepted extent before decoding exactly that
-span. `EncodePlan` reports one exact length and writes that complete representation into
-an exact-sized output.
+span. `ByteSource` reports one exact length and streams that complete representation to
+a caller-owned sink or exact-sized output.
 
 Generated views call codecs only on validated spans. Generated aggregate preparation
 creates all codec plans before output mutation. A custom codec violating width, extent,
@@ -159,7 +160,7 @@ Writing has two stages:
    and returns `Written` plus the disjoint untouched suffix.
 
 Preparation completes every fallible operation: codec planning, canonical controller
-derivation, opcode mapping, conversions, range and placement checks, child preparation,
+derivation, operation-input mapping, conversions, range and placement checks, child preparation,
 and total-length arithmetic. The plan retains the resulting state. Commit does not
 reparse, remap, or repeat fallible planning.
 
@@ -167,7 +168,30 @@ Short output is checked before the first write and leaves the entire supplied sl
 unchanged. Successful commit writes only the represented prefix. `build_into` is the
 prepare-and-commit convenience path with the same guarantee.
 
-## 9. Responsibility boundary
+## 9. Physical byte sources and computed fields
+
+Prepared plans and exact-source views expose the same typed physical-byte selection model.
+`include` selects field representations in wire order. `exclude` preserves every other
+physical byte, including opaque source gaps on a view and canonical zero gaps on a plan.
+Nested field projections translate through retained runtime geometry without reparsing or
+runtime schema descriptors.
+
+A selected source remains fragmented. `ByteSourceCursor` exposes borrowed byte segments and
+virtual repeated-byte segments without copying them into one buffer; bounded chunks, bytes,
+and logical ranges are lazy adaptors over that representation.
+
+`Computed<T>` declares a physical stored value that is omitted from builder input and
+prepared canonically during encoding. `len(field)` derives a byte length. A callback such as
+`checksum(exclude(self))` receives only the selected prepared physical source. The selection
+is also its compile-time read-set: computed dependencies are prepared topologically, while
+self-inclusion, duplicate paths, missing fields, and dependency cycles are derive errors.
+Declaration order remains physical order, not computation order.
+
+On read, the generated getter returns the stored decoded `T`; it does not silently recompute
+or reject it. Cross-byte consistency remains ordinary model validation over the exact-source
+view selection, keeping derivation and validation separate.
+
+## 10. Responsibility boundary
 
 `wire-repr` owns physical representation: widths, byte order, field order, tags,
 self-delimiting extents, borrowed ranges, placement, framing, and atomic output.

@@ -1,11 +1,12 @@
 //! Fixed-width codec contracts.
 
-use super::EncodePlan;
+use super::ByteSourceCursor;
 
 /// A codec whose encoded representation always has one fixed width.
 ///
 /// [`Self::WIDTH`] must be nonzero. Every successful [`Self::plan`] must report that
-/// exact encoded length. For every such plan, [`EncodePlan::write_into`] called with
+/// exact encoded length. For every such plan,
+/// [`ByteSource::write_into`](super::ByteSource::write_into) called with
 /// an output slice of exactly [`Self::WIDTH`] bytes must write a complete representation
 /// whose decoding recovers the same semantic value supplied to [`Self::plan`]. Decoding
 /// is total for every exact-width byte pattern. A codec that violates these requirements
@@ -28,7 +29,7 @@ pub trait FixedCodec {
     type EncodeError: core::fmt::Debug;
 
     /// Prepared fixed-width encoded bytes.
-    type Plan<'value>: EncodePlan
+    type Plan<'value>: ByteSourceCursor
     where
         Self: 'value;
 
@@ -179,7 +180,7 @@ impl<const N: usize> FixedCodec for OwnedBytes<N> {
 #[cfg(test)]
 mod tests {
     use super::{FixedCodec, OwnedBytes};
-    use crate::codec::EncodePlan;
+    use crate::codec::ByteSource;
 
     #[test]
     fn owned_bytes_decode_copies_exact_input() {
@@ -196,7 +197,7 @@ mod tests {
         let plan = <OwnedBytes<4> as FixedCodec>::plan([1, 2, 3, 4]).unwrap();
         let mut output = [0; 4];
 
-        assert_eq!(plan.encoded_len(), 4);
+        assert_eq!(plan.byte_len(), 4);
         plan.write_into(&mut output);
         assert_eq!(output, [1, 2, 3, 4]);
     }

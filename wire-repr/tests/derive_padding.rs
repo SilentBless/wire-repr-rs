@@ -1,7 +1,28 @@
 #![deny(missing_docs, unsafe_code)]
 //! Declarative padding and alignment coverage.
 
-use wire_repr::{PreparedLayout, Wire};
+use wire_repr::{ByteSink, ByteSource, PreparedLayout, Wire};
+
+#[derive(Debug, Eq, PartialEq)]
+enum SinkEvent {
+    Write(Vec<u8>),
+    Fill { byte: u8, len: usize },
+}
+
+#[derive(Default)]
+struct RecordingSink {
+    events: Vec<SinkEvent>,
+}
+
+impl ByteSink for RecordingSink {
+    fn write(&mut self, bytes: &[u8]) {
+        self.events.push(SinkEvent::Write(bytes.to_vec()));
+    }
+
+    fn fill(&mut self, byte: u8, len: usize) {
+        self.events.push(SinkEvent::Fill { byte, len });
+    }
+}
 
 /// A fixed representation with canonical padding before an aligned field.
 #[derive(Debug, Eq, PartialEq, Wire)]
@@ -55,6 +76,17 @@ fn encoding_canonicalizes_padding_to_zero_atomically() {
     .prepare()
     .unwrap();
     assert_eq!(plan.encoded_len(), 6);
+
+    let mut sink = RecordingSink::default();
+    plan.emit_to(&mut sink);
+    assert_eq!(
+        sink.events,
+        [
+            SinkEvent::Write(vec![7]),
+            SinkEvent::Fill { byte: 0, len: 3 },
+            SinkEvent::Write(vec![0x12, 0x34]),
+        ]
+    );
 
     let mut output = [0xa5; 8];
     let (written, suffix) = plan.commit_into(&mut output).unwrap();

@@ -1,32 +1,53 @@
 //! Struct derive rendering.
 
-use super::super::model::{Codec, FieldKind, FieldPosition, WireStruct};
+mod fixed;
+
+use super::super::model::{
+    Codec, Computation, ComputationByteSelection, ComputationOperation, Field, FieldKind,
+    FieldPosition, WireStruct,
+};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::visit::Visit;
 
 pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<TokenStream> {
-    if model.opcodes.is_none()
-        && model.fields.iter().all(|field| {
-            matches!(field.kind, FieldKind::Fixed(_))
-                && !matches!(field.position, Some(FieldPosition::Source(_)))
-        })
+    if model.operation_input.is_none()
+        && model
+            .fields
+            .iter()
+            .all(|field| matches!(field.kind, FieldKind::Fixed(_)) && field.computation.is_none())
     {
-        return render_fixed_view(model, runtime);
+        return fixed::render(model, runtime);
     }
 
     let WireStruct {
         vis,
         name,
         wire_lifetime,
-        opcodes,
+        operation_input,
+        validators: model_validators,
+        validation_error,
         fields,
+        computation_order,
     } = model;
     let plan = format_ident!("{name}Plan");
     let view = format_ident!("{name}View");
     let decode_error = format_ident!("{name}DecodeError");
     let encode_error = format_ident!("{name}EncodeError");
-    let opcode_table = opcodes.as_ref();
+    let operation_input_ty = operation_input.as_ref().map(|input| &input.ty);
+    let operation_name = operation_input.as_ref().map(|input| &input.name);
+    let operation_parse = operation_input
+        .as_ref()
+        .map(|input| format_ident!("__wire_repr_parse_with_{}", input.name));
+    let operation_prepare = operation_input
+        .as_ref()
+        .map(|input| format_ident!("__wire_repr_prepare_with_{}", input.name));
+    let view_input_request = format_ident!("{name}ViewInputRequest");
+    let direct_view_request = format_ident!("{name}ViewRequest");
+    let unchecked_view_request = format_ident!("{name}UncheckedViewRequest");
+    let cursor_input_request = format_ident!("{name}CursorInputRequest");
+    let direct_cursor = format_ident!("{name}Cursor");
+    let unchecked_cursor = format_ident!("{name}UncheckedCursor");
+    let encode_request = format_ident!("{name}EncodeRequest");
     let labels: Vec<_> = fields.iter().map(|field| field.name.to_string()).collect();
     let variants: Vec<_> = fields
         .iter()
@@ -61,7 +82,8 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             })
         })
         .collect();
-    let has_bytes = controlled_by.iter().any(Option::is_some);
+    let has_computed = fields.iter().any(|field| field.computation.is_some());
+    let has_bytes = controlled_by.iter().any(Option::is_some) || has_computed;
     let position_sources: Vec<_> = fields
         .iter()
         .map(|source| {
@@ -70,11 +92,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             })
         })
         .collect();
-    let nested_wire_lifetime = wire_lifetime.as_ref().filter(|lifetime| {
-        fields.iter().any(|field| {
-            matches!(field.kind, FieldKind::Nested) && type_uses_lifetime(&field.ty, lifetime)
-        })
-    });
     let has_nested = fields
         .iter()
         .any(|field| matches!(field.kind, FieldKind::Nested));
@@ -86,8 +103,40 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 .transpose()
         })
         .collect::<syn::Result<_>>()?;
+    let nested_decode_error_paths: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            (matches!(field.kind, FieldKind::Nested) && field.operation_input.is_some())
+                .then(|| super::generated_decode_error_path(&field.ty))
+                .transpose()
+        })
+        .collect::<syn::Result<_>>()?;
+    let nested_plan_paths: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            (matches!(field.kind, FieldKind::Nested) && field.operation_input.is_some())
+                .then(|| super::generated_plan_path(&field.ty))
+                .transpose()
+        })
+        .collect::<syn::Result<_>>()?;
+    let nested_fields_paths: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            matches!(field.kind, FieldKind::Nested)
+                .then(|| super::generated_fields_path(&field.ty))
+                .transpose()
+        })
+        .collect::<syn::Result<_>>()?;
+    let nested_encode_error_paths: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            (matches!(field.kind, FieldKind::Nested) && field.operation_input.is_some())
+                .then(|| super::generated_encode_error_path(&field.ty))
+                .transpose()
+        })
+        .collect::<syn::Result<_>>()?;
     let (plan_decl_generics, plan_decl_where, plan_type, plan_impl_generics, plan_impl_type) =
-        if let Some(lifetime) = nested_wire_lifetime {
+        if let Some(lifetime) = wire_lifetime.as_ref() {
             (
                 quote!(<#lifetime, '__wire_repr_value>),
                 quote!(where #lifetime: '__wire_repr_value),
@@ -100,8 +149,20 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 quote!(<'__wire_repr_value>),
                 quote!(),
                 quote!(#plan<'__wire_repr_value>),
-                quote!(),
-                quote!(#plan<'_>),
+                quote!(<'__wire_repr_value>),
+                quote!(#plan<'__wire_repr_value>),
+            )
+        };
+    let (selection_impl_generics, selection_plan_type) =
+        if let Some(lifetime) = wire_lifetime.as_ref() {
+            (
+                quote!(<#lifetime: '__wire_repr_value, '__wire_repr_value>),
+                quote!(#plan<#lifetime, '__wire_repr_value>),
+            )
+        } else {
+            (
+                quote!(<'__wire_repr_value>),
+                quote!(#plan<'__wire_repr_value>),
             )
         };
     let (decode_error_decl_generics, error_impl_type, view_error_type, association_error_type) =
@@ -121,7 +182,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             )
         };
     let (encode_error_decl_generics, encode_error_type, encode_error_impl_type) =
-        if let Some(lifetime) = nested_wire_lifetime {
+        if let Some(lifetime) = wire_lifetime.as_ref() {
             (
                 quote!(<#lifetime>),
                 quote!(#encode_error<#lifetime>),
@@ -130,42 +191,335 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         } else {
             (quote!(), quote!(#encode_error), quote!(#encode_error))
         };
+    let encode_lifetime_variant = wire_lifetime.as_ref().map(|lifetime| {
+        quote! {
+            #[doc(hidden)]
+            __WireLifetime(
+                ::core::convert::Infallible,
+                ::core::marker::PhantomData<&#lifetime ()>,
+            ),
+        }
+    });
+    let encode_lifetime_arm = wire_lifetime
+        .as_ref()
+        .map(|_| quote!(Self::__WireLifetime(value, _) => match *value {},));
+    let plan_lifetime_field = wire_lifetime
+        .as_ref()
+        .map(|lifetime| quote!(__wire_repr_lifetime: ::core::marker::PhantomData<&#lifetime ()>,));
+    let plan_lifetime_init = wire_lifetime
+        .as_ref()
+        .map(|_| quote!(__wire_repr_lifetime: ::core::marker::PhantomData,));
+    let custom_validation_error = validation_error;
+    let generated_validation_error = custom_validation_error.is_none() && has_nested;
+    let validation_error = format_ident!("{name}ValidationError");
+    let validation_error_type = if let Some(error) = custom_validation_error.as_ref() {
+        quote!(#error)
+    } else if generated_validation_error {
+        quote!(#validation_error<'__wire_repr_wire>)
+    } else {
+        quote!(#view_error_type)
+    };
+    let validation_impl = {
+        let field_validators = fields.iter().enumerate().flat_map(|(index, field)| {
+            let name = &field.name;
+            let own = field.validators.iter().map(move |validator| quote!(#validator(self.#name())?;));
+            if matches!(field.kind, FieldKind::Nested) {
+                let child_view = nested_view_paths[index].as_ref().expect("nested fields have generated view paths");
+                let variant = &variants[index];
+                let child = if generated_validation_error {
+                    let nested_variant = format_ident!("Nested{variant}");
+                    quote!(<#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::validate(&self.#name()).map_err(#validation_error::#nested_variant)?;)
+                } else {
+                    quote!(<#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::validate(&self.#name()).map_err(<Self::ValidationError as From<_>>::from)?;)
+                };
+                quote!(#child #(#own)*)
+            } else { quote!(#(#own)*) }
+        });
+        quote! {
+            impl<'__wire_repr_wire> #runtime::WireViewValidation<'__wire_repr_wire> for #view<'__wire_repr_wire> {
+                type ValidationError = #validation_error_type;
+                fn validate(&self) -> Result<(), Self::ValidationError> {
+                    #(#field_validators)*
+                    #(#model_validators(self)?;)*
+                    Ok(())
+                }
+            }
+        }
+    };
+    let generated_validation_error_decl = generated_validation_error.then(|| {
+        let nested_variants = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| matches!(field.kind, FieldKind::Nested))
+            .map(|(index, _)| {
+                let child_view = nested_view_paths[index].as_ref().expect("nested fields have generated view paths");
+                let variant = format_ident!("Nested{}", variants[index]);
+                let label = &labels[index];
+                quote!(
+                    #[doc = concat!("Nested semantic validation failed in field `", #label, "`.")]
+                    #variant(<#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::ValidationError),
+                )
+            });
+        let nested_arms = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| matches!(field.kind, FieldKind::Nested))
+            .map(|(index, _)| {
+                let variant = format_ident!("Nested{}", variants[index]);
+                let label = &labels[index];
+                quote!(Self::#variant(error) => write!(formatter, "nested validation failed in field `{}`: {error}", #label),)
+            });
+        quote! {
+            /// Semantic validation failures for this wire representation.
+            #[derive(Debug)]
+            #vis enum #validation_error<'__wire_repr_wire> {
+                /// Structural framing failed.
+                Decode(#view_error_type),
+                #(#nested_variants)*
+            }
+            impl ::core::fmt::Display for #validation_error<'_> {
+                fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    match self {
+                        Self::Decode(error) => error.fmt(formatter),
+                        #(#nested_arms)*
+                    }
+                }
+            }
+            impl ::core::error::Error for #validation_error<'_> {}
+            impl<'__wire_repr_wire> From<#view_error_type> for #validation_error<'__wire_repr_wire> {
+                fn from(error: #view_error_type) -> Self { Self::Decode(error) }
+            }
+        }
+    });
+    let view_request = quote!(#runtime::ValidatedViewRequest);
+    let cursor_method = quote! {
+        /// Returns a fail-closed cursor over consecutive representations.
+        #vis fn cursor<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #runtime::ValidatedViewCursor<'__wire_repr_view, #view<'__wire_repr_view>> {
+            #runtime::ValidatedViewCursor::new(input)
+        }
+    };
     let (impl_generics, self_type, view_signature) = if let Some(lifetime) = &wire_lifetime {
         (
             quote!(<#lifetime>),
             quote!(#name<#lifetime>),
-            quote!(#vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #runtime::ViewRequest<'__wire_repr_view, #view<'__wire_repr_view>>),
+            quote!(#vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #view_request<'__wire_repr_view, #view<'__wire_repr_view>>),
         )
     } else {
         (
             quote!(),
             quote!(#name),
-            quote!(#vis fn view<'__wire_repr_wire>(input: &'__wire_repr_wire [u8]) -> #runtime::ViewRequest<'__wire_repr_wire, #view<'__wire_repr_wire>>),
+            quote!(#vis fn view<'__wire_repr_wire>(input: &'__wire_repr_wire [u8]) -> #view_request<'__wire_repr_wire, #view<'__wire_repr_wire>>),
         )
     };
 
-    let plan_fields = fields
+    let plan_field_types: Vec<_> = fields
         .iter()
-        .zip(&plans)
-        .map(|(field, plan)| match &field.kind {
+        .enumerate()
+        .map(|(index, field)| match &field.kind {
             FieldKind::Fixed(codec) => {
                 let codec = codec_tokens(codec, runtime);
-                quote!(#plan: <#codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>)
+                quote!(<#codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>)
             }
             FieldKind::Nested => {
                 let ty = &field.ty;
-                if field.uses_opcodes {
-                    let opcode_table = opcode_table.expect("validated struct opcode input");
-                    quote!(#plan: <#ty as #runtime::WireEncodeWithOpcodes<#opcode_table>>::Plan<'__wire_repr_value>)
+                if field.operation_input.is_some() {
+                    let child_plan = nested_plan_paths[index]
+                        .as_ref()
+                        .expect("operation-backed nested fields have generated plan paths");
+                    quote!(#child_plan)
                 } else {
-                    quote!(#plan: <#ty as #runtime::WireEncode>::Plan<'__wire_repr_value>)
+                    quote!(<#ty as #runtime::WireEncode>::Plan<'__wire_repr_value>)
                 }
             }
             FieldKind::Prefix(codec) => {
-                quote!(#plan: <#codec as #runtime::PrefixCodec>::Plan<'__wire_repr_value>)
+                quote!(<#codec as #runtime::PrefixCodec>::Plan<'__wire_repr_value>)
             }
-            FieldKind::Bytes { .. } | FieldKind::Rest => quote!(#plan: &'__wire_repr_value [u8]),
+            FieldKind::Bytes { .. } | FieldKind::Rest => quote!(&'__wire_repr_value [u8]),
+        })
+        .collect();
+    let plan_fields = plans
+        .iter()
+        .zip(&plan_field_types)
+        .map(|(plan, ty)| quote!(#plan: #ty));
+    let field_proxy = format_ident!("{name}Fields");
+    let markers: Vec<_> = (0..fields.len())
+        .map(|index| format_ident!("__WireRepr{name}Field{index}"))
+        .collect();
+    let proxy_fields = fields.iter().enumerate().zip(&markers).map(|((index, field), marker)| {
+        let field_name = &field.name;
+        if matches!(field.kind, FieldKind::Nested) {
+            let child_fields = nested_fields_paths[index].as_ref().expect("nested fields have generated field proxy paths");
+            quote!(#vis #field_name: #runtime::NestedField<<S as #runtime::MarkerScope>::Wrap<#marker>, #child_fields<#runtime::Through<S, #marker>>>)
+        } else {
+            quote!(#vis #field_name: <S as #runtime::MarkerScope>::Wrap<#marker>)
+        }
+    });
+    let proxy_values = fields.iter().enumerate().zip(&markers).map(|((index, field), marker)| {
+        let field_name = &field.name;
+        if matches!(field.kind, FieldKind::Nested) {
+            let child_fields = nested_fields_paths[index].as_ref().expect("nested fields have generated field proxy paths");
+            quote!(#field_name: #runtime::NestedField::new(<S as #runtime::MarkerScope>::wrap(#marker), #child_fields::<#runtime::Through<S, #marker>>::__wire_repr_new()))
+        } else {
+            quote!(#field_name: <S as #runtime::MarkerScope>::wrap(#marker))
+        }
+    });
+    let marker_impls = fields.iter().enumerate().map(|(index, field)| {
+        let marker = &markers[index];
+        let prior_steps = (0..index).map(|prior_index| {
+            let prior_plan = &plans[prior_index];
+            let prior_gap = &gaps[prior_index];
+            let gap = prior_gap.as_ref().map(|gap| quote! {
+                cursor = cursor.checked_add(target.#gap).expect("prepared field geometry overflow");
+            });
+            quote! {
+                #gap
+                cursor = cursor.checked_add(#runtime::ByteSource::byte_len(&target.#prior_plan)).expect("prepared field geometry overflow");
+            }
         });
+        let current_plan = &plans[index];
+        let current_gap = &gaps[index];
+        let gap = current_gap.as_ref().map(|gap| quote! {
+            cursor = cursor.checked_add(target.#gap).expect("prepared field geometry overflow");
+        });
+        let selection = if matches!(field.kind, FieldKind::Nested) {
+            let child_plan = if field.operation_input.is_some() {
+                let child_plan = nested_plan_paths[index].as_ref().expect("operation-backed nested fields have generated plan paths");
+                quote!(#child_plan)
+            } else {
+                let ty = &field.ty;
+                quote!(<#ty as #runtime::WireEncode>::Plan<'__wire_repr_value>)
+            };
+            quote! {
+                impl #selection_impl_generics #runtime::FieldProjection<#selection_plan_type> for #marker {
+                    type Inner = #child_plan;
+                    fn project<'a>(target: &'a #selection_plan_type) -> (::core::ops::Range<usize>, &'a Self::Inner) {
+                        let mut cursor = 0usize;
+                        #(#prior_steps)*
+                        #gap
+                        let end = cursor.checked_add(#runtime::ByteSource::byte_len(&target.#current_plan)).expect("prepared field geometry overflow");
+                        (cursor..end, &target.#current_plan)
+                    }
+                }
+                impl #selection_impl_generics #runtime::FieldSelection<#selection_plan_type> for #marker {
+                    #[inline(always)]
+                    fn visit_ranges<V>(&self, target: &#selection_plan_type, visitor: &mut V)
+                    where V: FnMut(::core::ops::Range<usize>) {
+                        let (span, _) = <Self as #runtime::FieldProjection<#selection_plan_type>>::project(target);
+                        visitor(span);
+                    }
+                    #[inline(always)]
+                    fn direct_len(&self, target: &#selection_plan_type) -> Option<usize> {
+                        Some(#runtime::ByteSource::byte_len(&target.#current_plan))
+                    }
+                    #[inline(always)]
+                    fn emit_direct<S: #runtime::ByteSink>(&self, target: &#selection_plan_type, sink: &mut S) -> bool {
+                        #runtime::ByteSource::emit_to(&target.#current_plan, sink);
+                        true
+                    }
+                }
+            }
+        } else {
+            quote! {
+                impl #selection_impl_generics #runtime::FieldSelection<#selection_plan_type> for #marker {
+                    #[inline(always)]
+                    fn visit_ranges<V>(&self, target: &#selection_plan_type, visitor: &mut V)
+                    where V: FnMut(::core::ops::Range<usize>) {
+                        let mut cursor = 0usize;
+                        #(#prior_steps)*
+                        #gap
+                        let end = cursor.checked_add(#runtime::ByteSource::byte_len(&target.#current_plan)).expect("prepared field geometry overflow");
+                        visitor(cursor..end);
+                    }
+                    #[inline(always)]
+                    fn direct_len(&self, target: &#selection_plan_type) -> Option<usize> {
+                        Some(#runtime::ByteSource::byte_len(&target.#current_plan))
+                    }
+                    #[inline(always)]
+                    fn emit_direct<S: #runtime::ByteSink>(&self, target: &#selection_plan_type, sink: &mut S) -> bool {
+                        #runtime::ByteSource::emit_to(&target.#current_plan, sink);
+                        true
+                    }
+                }
+            }
+        };
+        quote! {
+            #[allow(missing_docs)]
+            #[doc(hidden)]
+            #[derive(Clone, Copy)]
+            #vis struct #marker;
+            impl<R> ::core::ops::BitOr<R> for #marker {
+                type Output = #runtime::FieldUnion<Self, R>;
+                fn bitor(self, right: R) -> Self::Output {
+                    #runtime::FieldUnion::new(self, right)
+                }
+            }
+            #selection
+        }
+    });
+    let view_marker_impls = fields.iter().enumerate().map(|(index, field)| {
+        let marker = &markers[index];
+        let prior_steps = (0..index).map(|prior_index| {
+            let prior = &fields[prior_index];
+            let prior_geometry = view_geometry(prior, runtime, &view);
+            let stored = format_ident!("field_{prior_index}");
+            let length = if matches!(prior.kind, FieldKind::Nested) {
+                quote!(target.#stored.as_bytes().len())
+            } else {
+                quote!(target.#stored.len())
+            };
+            quote! {
+                #prior_geometry
+                cursor = cursor.checked_add(#length).expect("view field geometry overflow");
+            }
+        });
+        let geometry = view_geometry(field, runtime, &view);
+        let stored = format_ident!("field_{index}");
+        let length = if matches!(field.kind, FieldKind::Nested) {
+            quote!(target.#stored.as_bytes().len())
+        } else {
+            quote!(target.#stored.len())
+        };
+        let selection = if matches!(field.kind, FieldKind::Nested) {
+            let child_view = nested_view_paths[index]
+                .as_ref()
+                .expect("nested fields have generated view paths");
+            quote! {
+                impl<'__wire_repr_wire> #runtime::FieldProjection<#view<'__wire_repr_wire>> for #marker {
+                    type Inner = #child_view<'__wire_repr_wire>;
+                    fn project<'a>(target: &'a #view<'__wire_repr_wire>) -> (::core::ops::Range<usize>, &'a Self::Inner) {
+                        let mut cursor = 0usize;
+                        #(#prior_steps)*
+                        #geometry
+                        let end = cursor.checked_add(#length).expect("view field geometry overflow");
+                        (cursor..end, &target.#stored)
+                    }
+                }
+                impl<'__wire_repr_wire> #runtime::FieldSelection<#view<'__wire_repr_wire>> for #marker {
+                    #[inline(always)]
+                    fn visit_ranges<V>(&self, target: &#view<'__wire_repr_wire>, visitor: &mut V)
+                    where V: FnMut(::core::ops::Range<usize>) {
+                        let (span, _) = <Self as #runtime::FieldProjection<#view<'__wire_repr_wire>>>::project(target);
+                        visitor(span);
+                    }
+                }
+            }
+        } else {
+            quote! {
+                impl<'__wire_repr_wire> #runtime::FieldSelection<#view<'__wire_repr_wire>> for #marker {
+                    #[inline(always)]
+                    fn visit_ranges<V>(&self, target: &#view<'__wire_repr_wire>, visitor: &mut V)
+                    where V: FnMut(::core::ops::Range<usize>) {
+                        let mut cursor = 0usize;
+                        #(#prior_steps)*
+                        #geometry
+                        let end = cursor.checked_add(#length).expect("view field geometry overflow");
+                        visitor(cursor..end);
+                    }
+                }
+            }
+        };
+        quote!(#selection)
+    });
     let gap_fields = gap_names.iter().map(|gap| quote!(#gap: usize));
     let view_fields: Vec<_> = fields
         .iter()
@@ -209,7 +563,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             }
         })
         .collect();
-    let decode_steps = fields
+    let decode_steps: Vec<_> = fields
         .iter()
         .enumerate()
         .zip(&labels)
@@ -322,10 +676,10 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     let child_view = nested_view_paths[index]
                         .as_ref()
                         .expect("nested fields have generated view paths");
-                    if field.uses_opcodes {
-                        let opcode_table = opcode_table.expect("validated struct opcode input");
+                    if let Some(operation) = &field.operation_input {
+                        let parse = format_ident!("__wire_repr_parse_with_{operation}");
                         quote! {
-                            let (#field_name, suffix) = <#child_view<'__wire_repr_wire> as #runtime::WireViewWithOpcodes<'__wire_repr_wire, #opcode_table>>::parse_view_with_opcodes(remaining, opcodes)
+                            let (#field_name, suffix) = #child_view::#parse(remaining, operation)
                                 .map_err(#decode_error::#variant)?;
                             remaining = suffix;
                         }
@@ -361,7 +715,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     let required = usize::try_from(#source).map_err(|_| {
                         #decode_error::LengthNotRepresentable {
                             field: #label,
-                            value: #source as u128,
                         }
                     })?;
                     let available = remaining.len();
@@ -380,7 +733,8 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 },
             };
             quote! { #geometry #decode }
-        });
+        })
+        .collect();
     let getters = fields.iter().enumerate().map(|(index, field)| {
         let field_name = &field.name;
         let label = &labels[index];
@@ -390,6 +744,10 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 let codec_tokens = codec_tokens(codec, runtime);
                 match codec {
                     Codec::OwnedBytes(length) => (quote!(&'__wire_repr_wire [u8; #length]), quote!(match <&'__wire_repr_wire [u8; #length]>::try_from(self.#stored) { Ok(bytes) => bytes, Err(_) => unreachable!("validated fixed byte array has its declared width"), })),
+                    _ if field.computation.is_some() => {
+                        let value_ty = &field.computation.as_ref().expect("checked").value_ty;
+                        (quote!(#value_ty), quote!(<#codec_tokens as #runtime::FixedCodec>::decode(self.#stored)))
+                    }
                     _ => (quote!(<#codec_tokens as #runtime::FixedCodec>::Value<'__wire_repr_wire>), quote!(<#codec_tokens as #runtime::FixedCodec>::decode(self.#stored))),
                 }
             }
@@ -419,9 +777,11 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     let child_view = nested_view_paths[index]
                         .as_ref()
                         .expect("nested fields have generated view paths");
-                    let error = if field.uses_opcodes {
-                        let opcode_table = opcode_table.expect("validated struct opcode input");
-                        quote!(<#child_view<'__wire_repr_wire> as #runtime::WireViewWithOpcodes<'__wire_repr_wire, #opcode_table>>::DecodeError)
+                    let error = if field.operation_input.is_some() {
+                        let error = nested_decode_error_paths[index]
+                            .as_ref()
+                            .expect("operation-backed nested fields have generated error paths");
+                        quote!(#error)
                     } else {
                         quote!(<#child_view<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::DecodeError)
                     };
@@ -445,17 +805,19 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             FieldKind::Prefix(_) => Some(quote!(Self::#variant(error) => write!(formatter, "wire prefix validation failed in field `{}`: {error:?}", #label),)),
             FieldKind::Fixed(_) | FieldKind::Bytes { .. } | FieldKind::Rest => None,
         });
-    let encode_variants = fields.iter().zip(&variants).zip(&labels).filter_map(
-        |((field, variant), label)| match &field.kind {
+    let encode_variants = fields.iter().zip(&variants).zip(&labels).enumerate().filter_map(
+        |(index, ((field, variant), label))| match &field.kind {
             FieldKind::Fixed(codec) => {
                 let codec = codec_tokens(codec, runtime);
                 Some(quote!(#[doc = concat!("Preparation error for field `", #label, "`.")] #variant(<#codec as #runtime::FixedCodec>::EncodeError),))
             }
             FieldKind::Nested => {
                 let ty = &field.ty;
-                if field.uses_opcodes {
-                    let opcode_table = opcode_table.expect("validated struct opcode input");
-                    Some(quote!(#[doc = concat!("Nested preparation error for field `", #label, "`.")] #variant(<#ty as #runtime::WireEncodeWithOpcodes<#opcode_table>>::EncodeError),))
+                if field.operation_input.is_some() {
+                    let error = nested_encode_error_paths[index]
+                        .as_ref()
+                        .expect("operation-backed nested fields have generated error paths");
+                    Some(quote!(#[doc = concat!("Nested preparation error for field `", #label, "`.")] #variant(#error),))
                 } else {
                     Some(quote!(#[doc = concat!("Nested preparation error for field `", #label, "`.")] #variant(<#ty as #runtime::WireEncode>::EncodeError),))
                 }
@@ -474,14 +836,17 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             FieldKind::Prefix(_) => Some(quote!(Self::#variant(error) => write!(formatter, "wire prefix preparation failed for field `{}`: {error:?}", #label),)),
             FieldKind::Bytes { .. } | FieldKind::Rest => None,
         });
-    let prepare_steps = fields
+    let prepare_steps: Vec<_> = fields
         .iter()
         .zip(&plans)
         .zip(&variants)
         .zip(&controlled_by)
-        .map(|(((field, plan), variant), controlled_by)| {
+        .filter_map(|(((field, plan), variant), controlled_by)| {
+            if field.computation.is_some() {
+                return None;
+            }
             let field_name = &field.name;
-            match (&field.kind, controlled_by) {
+            Some(match (&field.kind, controlled_by) {
                 (FieldKind::Fixed(codec), Some(bytes_index)) => {
                     let codec = codec_tokens(codec, runtime);
                     let source_ty = &field.ty;
@@ -507,9 +872,8 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 }
                 (FieldKind::Nested, _) => {
                     let ty = &field.ty;
-                    if field.uses_opcodes {
-                        let opcode_table = opcode_table.expect("validated struct opcode input");
-                        quote!(let #plan = <#ty as #runtime::WireEncodeWithOpcodes<#opcode_table>>::prepare_with_opcodes(self.#field_name, opcodes).map_err(#encode_error::#variant)?;)
+                    if field.operation_input.is_some() {
+                        quote!(let #plan = <#ty>::#operation_prepare(self.#field_name, operation).map_err(#encode_error::#variant)?;)
                     } else {
                         quote!(let #plan = <#ty as #runtime::WireEncode>::prepare(self.#field_name).map_err(#encode_error::#variant)?;)
                     }
@@ -538,19 +902,88 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 (FieldKind::Bytes { .. } | FieldKind::Rest, _) => {
                     quote!(let #plan = self.#field_name;)
                 }
-            }
-        });
-    let geometry_steps = fields
+            })
+        })
+        .collect();
+    let computation_steps: Vec<_> = computation_order
+        .iter()
+        .map(|&index| {
+            let field = &fields[index];
+            let computation = field.computation.as_ref().expect("computed order");
+            let FieldKind::Fixed(codec) = &field.kind else {
+                unreachable!("computed fields are fixed codecs")
+            };
+            let codec = codec_tokens(codec, runtime);
+            let plan = &plans[index];
+            let variant = &variants[index];
+            let source_ty = &computation.value_ty;
+            let bytes_name = format_ident!("__wire_repr_computed_bytes_{index}");
+            let source = computation_source(computation, index, &fields, &plans, &gaps, runtime);
+            let value = match &computation.operation {
+                ComputationOperation::Length => {
+                    let ComputationByteSelection::Include(paths) = &computation.bytes else {
+                        unreachable!("length computation selection")
+                    };
+                    let target = &fields[paths[0].top_level_index].name;
+                    let target_label = target.to_string();
+                    let source_label = field.name.to_string();
+                    quote! {
+                        let length = #runtime::ByteSource::byte_len(&#bytes_name);
+                        let source_value = <#source_ty>::try_from(length).map_err(|_| {
+                            #encode_error::LengthNotRepresentable {
+                                field: #target_label,
+                                source: #source_label,
+                                length,
+                            }
+                        })?;
+                    }
+                }
+                ComputationOperation::Callback(callback) => {
+                    quote!(let source_value: #source_ty = #callback(&#bytes_name);)
+                }
+            };
+            (
+                matches!(computation.operation, ComputationOperation::Length),
+                quote! {
+                    let #bytes_name = #source;
+                    #value
+                    let #plan = <#codec as #runtime::FixedCodec>::plan(source_value)
+                        .map_err(#encode_error::#variant)?;
+                },
+            )
+        })
+        .collect();
+    let (early_computation_steps, computation_steps): (Vec<_>, Vec<_>) =
+        computation_steps.into_iter().partition(|(early, _)| *early);
+    let early_computation_steps: Vec<_> = early_computation_steps
+        .into_iter()
+        .map(|(_, step)| step)
+        .collect();
+    let computation_steps: Vec<_> = computation_steps
+        .into_iter()
+        .map(|(_, step)| step)
+        .collect();
+    let early_computation_steps = &early_computation_steps;
+    let computation_steps = &computation_steps;
+    let geometry_steps: Vec<_> = fields
         .iter()
         .zip(&plans)
         .zip(&gaps)
         .map(|((field, plan), gap)| {
-            let length = match field.kind {
+            let length = if field.computation.is_some() {
+                let FieldKind::Fixed(codec) = &field.kind else {
+                    unreachable!("computed fields are fixed codecs")
+                };
+                let codec = codec_tokens(codec, runtime);
+                quote!(<#codec as #runtime::FixedCodec>::WIDTH)
+            } else {
+                match field.kind {
                 FieldKind::Fixed(_) | FieldKind::Prefix(_) | FieldKind::Bytes { .. } | FieldKind::Rest => {
-                    quote!(#runtime::EncodePlan::encoded_len(&#plan))
+                    quote!(#runtime::ByteSource::byte_len(&#plan))
                 }
                 FieldKind::Nested => {
-                    quote!(#runtime::PreparedLayout::encoded_len(&#plan))
+                    quote!(#runtime::ByteSource::byte_len(&#plan))
+                }
                 }
             };
             if let (Some(gap), Some(position)) = (gap, &field.position) {
@@ -611,41 +1044,58 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                         .ok_or(#encode_error::LengthOverflow)?;
                 }
             }
-        });
-    let commit_steps = fields
+        })
+        .collect();
+    let emit_steps = fields
         .iter()
         .zip(&plans)
         .zip(&gaps)
         .map(|((field, plan), gap)| {
-            let padding = gap.as_ref().map(|gap| {
-                quote! {
-                    let (padding, suffix) = remaining.split_at_mut(self.#gap);
-                    padding.fill(0);
-                    remaining = suffix;
-                }
-            });
-            let write = match field.kind {
+            let padding = gap
+                .as_ref()
+                .map(|gap| quote!(#runtime::ByteSink::fill(sink, 0, self.#gap);));
+            let emit = match field.kind {
                 FieldKind::Fixed(_)
                 | FieldKind::Prefix(_)
                 | FieldKind::Bytes { .. }
                 | FieldKind::Rest => quote! {
-                    let width = #runtime::EncodePlan::encoded_len(&self.#plan);
-                    let (slot, suffix) = remaining.split_at_mut(width);
-                    #runtime::EncodePlan::write_into(&self.#plan, slot);
-                    remaining = suffix;
+                    #runtime::ByteSource::emit_to(&self.#plan, sink);
                 },
                 FieldKind::Nested => quote! {
-                    let width = #runtime::PreparedLayout::encoded_len(&self.#plan);
-                    let (slot, suffix) = remaining.split_at_mut(width);
-                    let _ = #runtime::PreparedLayout::commit_into(self.#plan, slot)?;
-                    remaining = suffix;
+                    #runtime::ByteSource::emit_to(&self.#plan, sink);
                 },
             };
             quote! {
                 #padding
-                #write
+                #emit
             }
         });
+    let plan_cursor_bounds = plan_field_types
+        .iter()
+        .map(|ty| quote!(#ty: #runtime::ByteSourceCursor));
+    let mut plan_segment_types = Vec::new();
+    let mut plan_segment_values = Vec::new();
+    for ((plan, ty), gap) in plans.iter().zip(&plan_field_types).zip(&gaps) {
+        if let Some(gap) = gap {
+            plan_segment_types
+                .push(quote!(::core::iter::Once<#runtime::ByteSegment<'__wire_repr_source>>));
+            plan_segment_values.push(quote!(::core::iter::once(#runtime::ByteSegment::Rest {
+                byte: 0,
+                len: self.#gap,
+            })));
+        }
+        plan_segment_types
+            .push(quote!(<#ty as #runtime::ByteSourceCursor>::Segments<'__wire_repr_source>));
+        plan_segment_values.push(quote!(#runtime::ByteSourceCursor::segments(&self.#plan)));
+    }
+    let plan_segments_type = plan_segment_types
+        .into_iter()
+        .reduce(|left, right| quote!(::core::iter::Chain<#left, #right>))
+        .expect("wire structs have fields");
+    let plan_segments_value = plan_segment_values
+        .into_iter()
+        .reduce(|left, right| quote!(::core::iter::Iterator::chain(#left, #right)))
+        .expect("wire structs have fields");
 
     let decode_position_variants = has_positions.then(|| {
         quote! {
@@ -729,16 +1179,28 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             LengthNotRepresentable {
                 /// The byte field controlled by the source value.
                 field: &'static str,
-                /// The decoded source value.
-                value: u128,
             },
         }
     });
     let decode_length_arm = has_bytes.then(|| {
         quote! {
-            Self::LengthNotRepresentable { field, value } => {
-                write!(formatter, "byte length {value} for field `{field}` does not fit in usize")
+            Self::LengthNotRepresentable { field } => {
+                write!(formatter, "byte length for field `{field}` does not fit in usize")
             }
+        }
+    });
+    let encode_missing_variant = has_computed.then(|| {
+        quote! {
+            /// A caller-owned builder field was not supplied.
+            MissingField {
+                /// The omitted field.
+                field: &'static str,
+            },
+        }
+    });
+    let encode_missing_arm = has_computed.then(|| {
+        quote! {
+            Self::MissingField { field } => write!(formatter, "missing required field `{field}`"),
         }
     });
     let encode_length_variant = has_bytes.then(|| {
@@ -760,20 +1222,24 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         }
     });
 
-    let view_impl = if let Some(opcode_table) = opcode_table {
+    let operation_view_helper = if operation_input_ty.is_some() {
         quote! {
-            impl<'__wire_repr_wire> #runtime::WireViewWithOpcodes<'__wire_repr_wire, #opcode_table> for #view<'__wire_repr_wire> {
-                type DecodeError = #view_error_type;
-                fn parse_view_with_opcodes(input: &'__wire_repr_wire [u8], opcodes: &#opcode_table) -> Result<(Self, &'__wire_repr_wire [u8]), Self::DecodeError> {
-                    let mut remaining = input;
-                    #(#decode_steps)*
-                    let represented = &input[..input.len() - remaining.len()];
-                    Ok((Self { bytes: represented, #(#view_initializers,)* }, remaining))
-                }
-                fn trailing_bytes_error(represented: usize, input: usize) -> Self::DecodeError { #decode_error::TrailingBytes { expected: represented, actual: input } }
-                fn as_bytes(&self) -> &'__wire_repr_wire [u8] { self.bytes }
+            #[doc(hidden)]
+            #vis fn #operation_parse(
+                input: &'__wire_repr_wire [u8],
+                operation: &#operation_input_ty,
+            ) -> Result<(Self, &'__wire_repr_wire [u8]), #view_error_type> {
+                let mut remaining = input;
+                #(#decode_steps)*
+                let represented = &input[..input.len() - remaining.len()];
+                Ok((Self { bytes: represented, #(#view_initializers,)* }, remaining))
             }
         }
+    } else {
+        quote!()
+    };
+    let view_impl = if operation_input_ty.is_some() {
+        quote!()
     } else {
         quote! {
             impl<'__wire_repr_wire> #runtime::WireView<'__wire_repr_wire> for #view<'__wire_repr_wire> {
@@ -790,24 +1256,190 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         }
     };
 
-    let inherent_impl = if let Some(opcode_table) = opcode_table {
-        quote! {
-            impl #impl_generics #self_type {
-                /// Starts decoding from the supplied input.
-                #view_signature { #runtime::ViewRequest::new(input) }
-                /// Supplies the opcode mapping used to prepare this value.
-                #vis fn opcodes(self, opcodes: &#opcode_table) -> #runtime::OpcodeEncodeRequest<'_, Self, #opcode_table> { #runtime::OpcodeEncodeRequest::new(self, opcodes) }
+    let builder = has_computed.then(|| {
+        let builder_name = format_ident!("{name}Builder");
+        let (builder_decl_generics, builder_type, builder_plan_type, builder_error_type) =
+            if let Some(lifetime) = wire_lifetime.as_ref() {
+                (
+                    quote!(<#lifetime>),
+                    quote!(#builder_name<#lifetime>),
+                    quote!(#plan<#lifetime, #lifetime>),
+                    quote!(#encode_error<#lifetime>),
+                )
+            } else {
+                (
+                    quote!(),
+                    quote!(#builder_name),
+                    quote!(#plan<'static>),
+                    quote!(#encode_error),
+                )
+            };
+        let builder_fields = fields.iter().filter(|field| field.computation.is_none()).map(|field| {
+            let field_name = &field.name;
+            let ty = match (&field.kind, wire_lifetime.as_ref()) {
+                (FieldKind::Bytes { .. } | FieldKind::Rest, Some(lifetime)) => quote!(&#lifetime [u8]),
+                _ => { let ty = &field.ty; quote!(#ty) }
+            };
+            quote!(#field_name: ::core::option::Option<#ty>)
+        });
+        let setters = fields.iter().filter(|field| field.computation.is_none()).map(|field| {
+            let field_name = &field.name;
+            let ty = match (&field.kind, wire_lifetime.as_ref()) {
+                (FieldKind::Bytes { .. } | FieldKind::Rest, Some(lifetime)) => quote!(&#lifetime [u8]),
+                _ => { let ty = &field.ty; quote!(#ty) }
+            };
+            quote! {
+                #[doc = concat!("Sets the `", stringify!(#field_name), "` field.")]
+                #vis fn #field_name(mut self, value: #ty) -> Self {
+                    self.#field_name = Some(value);
+                    self
+                }
             }
+        });
+        let missing = fields.iter().filter(|field| field.computation.is_none()).map(|field| { let field_name=&field.name; let label=field_name.to_string(); quote!(let #field_name = builder.#field_name.ok_or(#encode_error::MissingField { field: #label })?;) });
+        let initializers = fields.iter().map(|field| { let field_name=&field.name; if field.computation.is_some() { quote!(#field_name: #runtime::Computed::new()) } else { quote!(#field_name) } });
+        if let (Some(operation_input_ty), Some(operation_name), Some(operation_prepare)) = (
+            operation_input_ty,
+            operation_name,
+            operation_prepare.as_ref(),
+        ) {
+            let request_name = format_ident!("{name}Builder{}Request", operation_name);
+            let request_decl_generics = if let Some(lifetime) = wire_lifetime.as_ref() {
+                quote!(<#lifetime, '__wire_repr_operation>)
+            } else {
+                quote!(<'__wire_repr_operation>)
+            };
+            let request_type = if let Some(lifetime) = wire_lifetime.as_ref() {
+                quote!(#request_name<#lifetime, '_>)
+            } else {
+                quote!(#request_name<'_>)
+            };
+            quote! {
+                /// A no-allocation builder for this computed wire representation.
+                #vis struct #builder_name #builder_decl_generics { #(#builder_fields,)* }
+                #[doc(hidden)]
+                #vis struct #request_name #request_decl_generics {
+                    builder: #builder_type,
+                    #operation_name: &'__wire_repr_operation #operation_input_ty,
+                }
+                impl #builder_decl_generics #builder_type {
+                    #(#setters)*
+                    /// Binds the schema-named input for encoding.
+                    #[must_use]
+                    #vis fn #operation_name(self, #operation_name: &#operation_input_ty) -> #request_type {
+                        #request_name { builder: self, #operation_name }
+                    }
+                }
+                #[allow(missing_docs)]
+                impl #request_decl_generics #request_name #request_decl_generics {
+                    /// Prepares this encoding after checking all caller-owned fields.
+                    #vis fn prepare(self) -> Result<#builder_plan_type, #builder_error_type> {
+                        let Self { builder, #operation_name } = self;
+                        #(#missing)*
+                        #name { #(#initializers,)* }.#operation_prepare(#operation_name)
+                    }
+                    /// Prepares and atomically writes this encoding into `output`.
+                    #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#builder_error_type>> {
+                        let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?;
+                        #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output)
+                    }
+                }
+            }
+        } else {
+            quote! {
+                /// A no-allocation builder for this computed wire representation.
+                #vis struct #builder_name #builder_decl_generics { #(#builder_fields,)* }
+                impl #builder_decl_generics #builder_type {
+                    #(#setters)*
+                    /// Prepares this encoding after checking all caller-owned fields.
+                    #vis fn prepare(self) -> Result<#builder_plan_type, #builder_error_type> { let builder = self; #(#missing)* #name { #(#initializers,)* }.prepare() }
+                    /// Prepares and atomically writes this encoding into `output`.
+                    #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#builder_error_type>> { let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?; #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output) }
+                }
+            }
+        }
+    });
+
+    let builder_method = has_computed.then(|| {
+        let builder_name = format_ident!("{name}Builder");
+        let builder_type = if let Some(lifetime) = wire_lifetime.as_ref() {
+            quote!(#builder_name<#lifetime>)
+        } else {
+            quote!(#builder_name)
+        };
+        let builder_empty_fields = fields
+            .iter()
+            .filter(|field| field.computation.is_none())
+            .map(|field| {
+                let name = &field.name;
+                quote!(#name: ::core::option::Option::None)
+            });
+        quote! {
+            /// Starts a no-allocation builder for this computed representation.
+            #vis fn builder() -> #builder_type {
+                #builder_name { #(#builder_empty_fields,)* }
+            }
+        }
+    });
+
+    let inherent_impl = if operation_input_ty.is_some() {
+        let operation_name = operation_name.expect("operation input");
+        let operation_encode_generics = if let Some(lifetime) = &wire_lifetime {
+            quote!(<#lifetime, '__wire_repr_operation>)
+        } else {
+            quote!(<'__wire_repr_operation>)
+        };
+        let operation_encode_request_type = if let Some(lifetime) = &wire_lifetime {
+            quote!(#encode_request<#lifetime, '_>)
+        } else {
+            quote!(#encode_request<'_>)
+        };
+        quote! {
+            #[doc(hidden)] #vis struct #view_input_request<'__wire_repr_wire> { input: &'__wire_repr_wire [u8] }
+            #[doc(hidden)] #vis struct #direct_view_request<'__wire_repr_wire, '__wire_repr_operation> { input: &'__wire_repr_wire [u8], operation: &'__wire_repr_operation #operation_input_ty }
+            #[doc(hidden)] #vis struct #unchecked_view_request<'__wire_repr_wire, '__wire_repr_operation> { input: &'__wire_repr_wire [u8], operation: &'__wire_repr_operation #operation_input_ty }
+            #[doc(hidden)] #vis struct #cursor_input_request<'__wire_repr_wire> { input: &'__wire_repr_wire [u8] }
+            #[doc(hidden)] #vis struct #direct_cursor<'__wire_repr_wire, '__wire_repr_operation> { remaining: &'__wire_repr_wire [u8], operation: &'__wire_repr_operation #operation_input_ty }
+            #[doc(hidden)] #vis struct #unchecked_cursor<'__wire_repr_wire, '__wire_repr_operation> { remaining: &'__wire_repr_wire [u8], operation: &'__wire_repr_operation #operation_input_ty }
+            #[doc(hidden)] #vis struct #encode_request #operation_encode_generics { value: #self_type, operation: &'__wire_repr_operation #operation_input_ty }
+
+            #[allow(missing_docs)] impl<'__wire_repr_wire> #view_input_request<'__wire_repr_wire> {
+                #[must_use] #vis fn #operation_name(self, operation: &#operation_input_ty) -> #direct_view_request<'__wire_repr_wire, '_> { #direct_view_request { input: self.input, operation } }
+            }
+            #[allow(missing_docs)]
+            impl<'__wire_repr_wire, '__wire_repr_operation> #direct_view_request<'__wire_repr_wire, '__wire_repr_operation> {
+                #[must_use] #vis fn unchecked(self) -> #unchecked_view_request<'__wire_repr_wire, '__wire_repr_operation> { #unchecked_view_request { input: self.input, operation: self.operation } }
+                #vis fn with_remainder(self) -> Result<(#view<'__wire_repr_wire>, &'__wire_repr_wire [u8]), #validation_error_type> { let (view, remainder) = #view::#operation_parse(self.input, self.operation)?; #runtime::WireViewValidation::validate(&view)?; Ok((view, remainder)) }
+                #vis fn without_trailing(self) -> Result<#view<'__wire_repr_wire>, #validation_error_type> { let input_len = self.input.len(); let (view, suffix) = self.with_remainder()?; if suffix.is_empty() { Ok(view) } else { Err(<#validation_error_type as From<#view_error_type>>::from(#decode_error::TrailingBytes { expected: view.as_bytes().len(), actual: input_len })) } }
+            }
+            #[allow(missing_docs)]
+            impl<'__wire_repr_wire, '__wire_repr_operation> #unchecked_view_request<'__wire_repr_wire, '__wire_repr_operation> {
+                #vis fn with_remainder(self) -> Result<(#view<'__wire_repr_wire>, &'__wire_repr_wire [u8]), #view_error_type> { #view::#operation_parse(self.input, self.operation) }
+                #vis fn without_trailing(self) -> Result<#view<'__wire_repr_wire>, #view_error_type> { let input_len = self.input.len(); let (view, suffix) = self.with_remainder()?; if suffix.is_empty() { Ok(view) } else { Err(#decode_error::TrailingBytes { expected: view.as_bytes().len(), actual: input_len }) } }
+            }
+            #[allow(missing_docs)] impl<'__wire_repr_wire> #cursor_input_request<'__wire_repr_wire> { #[must_use] #vis fn #operation_name(self, operation: &#operation_input_ty) -> #direct_cursor<'__wire_repr_wire, '_> { #direct_cursor { remaining: self.input, operation } } }
+            #[allow(missing_docs)]
+            impl<'__wire_repr_wire, '__wire_repr_operation> #direct_cursor<'__wire_repr_wire, '__wire_repr_operation> {
+                #[must_use] #vis const fn remaining(&self) -> &'__wire_repr_wire [u8] { self.remaining }
+                #[must_use] #vis fn unchecked(self) -> #unchecked_cursor<'__wire_repr_wire, '__wire_repr_operation> { #unchecked_cursor { remaining: self.remaining, operation: self.operation } }
+                #vis fn next(&mut self) -> Result<Option<#view<'__wire_repr_wire>>, #runtime::ViewCursorError<#validation_error_type>> { if self.remaining.is_empty() { return Ok(None); } let (view, suffix) = #view::#operation_parse(self.remaining, self.operation).map_err(|error| #runtime::ViewCursorError::Item(error.into()))?; if suffix.len() == self.remaining.len() { return Err(#runtime::ViewCursorError::EmptyItem); } #runtime::WireViewValidation::validate(&view).map_err(#runtime::ViewCursorError::Item)?; self.remaining = suffix; Ok(Some(view)) }
+            }
+            #[allow(missing_docs)]
+            impl<'__wire_repr_wire, '__wire_repr_operation> #unchecked_cursor<'__wire_repr_wire, '__wire_repr_operation> {
+                #[must_use] #vis const fn remaining(&self) -> &'__wire_repr_wire [u8] { self.remaining }
+                #vis fn next(&mut self) -> Result<Option<#view<'__wire_repr_wire>>, #runtime::ViewCursorError<#view_error_type>> { if self.remaining.is_empty() { return Ok(None); } let (view, suffix) = #view::#operation_parse(self.remaining, self.operation).map_err(#runtime::ViewCursorError::Item)?; if suffix.len() == self.remaining.len() { return Err(#runtime::ViewCursorError::EmptyItem); } self.remaining = suffix; Ok(Some(view)) }
+            }
+            #[allow(missing_docs)] impl #operation_encode_generics #encode_request #operation_encode_generics { #vis fn prepare<'__wire_repr_value>(self) -> Result<#plan_type, #encode_error_type> where #self_type: '__wire_repr_value { <#self_type>::#operation_prepare(self.value, self.operation) } #vis fn build_into<'__wire_repr_value, '__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#encode_error_type>> where #self_type: '__wire_repr_value { let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?; #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output) } }
+            #[allow(missing_docs)]
+            impl #impl_generics #self_type { #builder_method #vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #view_input_request<'__wire_repr_view> { #view_input_request { input } } #vis fn cursor<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #cursor_input_request<'__wire_repr_view> { #cursor_input_request { input } } #vis fn #operation_name(self, operation: &#operation_input_ty) -> #operation_encode_request_type { #encode_request { value: self, operation } } #[doc(hidden)] #vis fn #operation_prepare<'__wire_repr_value>(self, operation: &#operation_input_ty) -> Result<#plan_type, #encode_error_type> where Self: '__wire_repr_value { #(#prepare_steps)* #(#early_computation_steps)* let mut encoded_len = 0usize; #(#geometry_steps)* #(#computation_steps)* Ok(#plan { #(#plans,)* #(#gap_names,)* #plan_lifetime_init encoded_len }) } }
         }
     } else {
         quote! {
+            #[allow(missing_docs)]
             impl #impl_generics #self_type {
-                /// Starts decoding from the supplied input.
-                #view_signature { #runtime::ViewRequest::new(input) }
-                /// Returns a fail-closed cursor over consecutive representations.
-                #vis fn cursor<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #runtime::ViewCursor<'__wire_repr_view, #view<'__wire_repr_view>> {
-                    #runtime::ViewCursor::new(input)
-                }
+                #view_signature { #view_request::new(input) }
+                #cursor_method
+                #builder_method
                 /// Consumes this value and prepares an atomic encoding.
                 #vis fn prepare<'__wire_repr_value>(self) -> Result<#plan_type, #encode_error_type> where Self: '__wire_repr_value { <Self as #runtime::WireEncode>::prepare(self) }
                 /// Consumes this value, prepares it, and commits it into `output`.
@@ -816,20 +1448,14 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         }
     };
 
-    let encode_impl = if let Some(opcode_table) = opcode_table {
-        quote! {
-            impl #impl_generics #runtime::WireEncodeWithOpcodes<#opcode_table> for #self_type {
-                type EncodeError = #encode_error_type;
-                type Plan<'__wire_repr_value> = #plan_type where Self: '__wire_repr_value;
-                fn prepare_with_opcodes<'__wire_repr_value>(self, opcodes: &#opcode_table) -> Result<Self::Plan<'__wire_repr_value>, Self::EncodeError> where Self: '__wire_repr_value { #(#prepare_steps)* let mut encoded_len = 0usize; #(#geometry_steps)* Ok(#plan { #(#plans,)* #(#gap_names,)* encoded_len }) }
-            }
-        }
+    let encode_impl = if operation_input_ty.is_some() {
+        quote!()
     } else {
         quote! {
             impl #impl_generics #runtime::WireEncode for #self_type {
                 type EncodeError = #encode_error_type;
                 type Plan<'__wire_repr_value> = #plan_type where Self: '__wire_repr_value;
-                fn prepare<'__wire_repr_value>(self) -> Result<Self::Plan<'__wire_repr_value>, Self::EncodeError> where Self: '__wire_repr_value { #(#prepare_steps)* let mut encoded_len = 0usize; #(#geometry_steps)* Ok(#plan { #(#plans,)* #(#gap_names,)* encoded_len }) }
+                fn prepare<'__wire_repr_value>(self) -> Result<Self::Plan<'__wire_repr_value>, Self::EncodeError> where Self: '__wire_repr_value { #(#prepare_steps)* #(#early_computation_steps)* let mut encoded_len = 0usize; #(#geometry_steps)* #(#computation_steps)* Ok(#plan { #(#plans,)* #(#gap_names,)* #plan_lifetime_init encoded_len }) }
             }
         }
     };
@@ -885,7 +1511,9 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         /// Typed encoding-preparation failures for this wire representation.
         #[derive(Debug)]
         #vis enum #encode_error #encode_error_decl_generics {
+            #encode_lifetime_variant
             #encode_position_variants
+            #encode_missing_variant
             #encode_length_variant
             #(#encode_variants)*
             /// The encoded length overflowed `usize`.
@@ -894,7 +1522,9 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         impl ::core::fmt::Display for #encode_error_impl_type {
             fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 match self {
+                    #encode_lifetime_arm
                     #encode_position_arms
+                    #encode_missing_arm
                     #encode_length_arm
                     #(#encode_display_arms)*
                     Self::LengthOverflow => formatter.write_str("encoded representation length does not fit in usize"),
@@ -910,28 +1540,78 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             /// Returns this view's exact represented bytes.
             #[must_use]
             #vis const fn as_bytes(&self) -> &'__wire_repr_wire [u8] { self.bytes }
+            /// Returns a byte-selection root for this exact source representation.
+            #[must_use]
+            #vis fn bytes(&self) -> #runtime::ByteSelection<'_, Self, #field_proxy<#runtime::RootScope>> {
+                #runtime::ByteSelection::new(self, #field_proxy::__wire_repr_new())
+            }
             #(#getters)*
+            #operation_view_helper
         }
         #view_impl
+        impl<'__wire_repr_wire> #runtime::ByteSource for #view<'__wire_repr_wire> {
+            #[inline(always)]
+            fn byte_len(&self) -> usize { self.as_bytes().len() }
+            #[inline(always)]
+            fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) { sink.write(self.as_bytes()); }
+        }
+        impl<'__wire_repr_wire> #runtime::ByteSourceCursor for #view<'__wire_repr_wire> {
+            type Segments<'__wire_repr_source> = ::core::iter::Once<#runtime::ByteSegment<'__wire_repr_source>> where Self: '__wire_repr_source;
+            #[inline(always)]
+            fn segments(&self) -> Self::Segments<'_> {
+                ::core::iter::once(#runtime::ByteSegment::Bytes(self.as_bytes()))
+            }
+        }
+        #generated_validation_error_decl
+        #validation_impl
 
+        #[allow(missing_docs)]
+        #[doc(hidden)]
+        #vis struct #field_proxy<S: #runtime::MarkerScope = #runtime::RootScope> { #(#proxy_fields,)* }
+        impl<S: #runtime::MarkerScope> Copy for #field_proxy<S> {}
+        impl<S: #runtime::MarkerScope> Clone for #field_proxy<S> { fn clone(&self) -> Self { *self } }
+        #[allow(missing_docs)]
+        impl<S: #runtime::MarkerScope> #field_proxy<S> { #[doc(hidden)] #vis fn __wire_repr_new() -> Self { Self { #(#proxy_values,)* } } }
+        #(#marker_impls)*
+        #(#view_marker_impls)*
         /// A prepared encoding for this wire representation.
-        #vis struct #plan #plan_decl_generics #plan_decl_where { #(#plan_fields,)* #(#gap_fields,)* encoded_len: usize }
+        #vis struct #plan #plan_decl_generics #plan_decl_where { #(#plan_fields,)* #(#gap_fields,)* #plan_lifetime_field encoded_len: usize }
         impl #plan_impl_generics #plan_impl_type {
             /// Returns the exact encoded byte count.
             #[must_use]
             #vis const fn encoded_len(&self) -> usize { self.encoded_len }
+            /// Returns a byte-selection root for this prepared representation.
+            #[must_use]
+            #vis fn bytes(&self) -> #runtime::ByteSelection<'_, Self, #field_proxy<#runtime::RootScope>> {
+                #runtime::ByteSelection::new(self, #field_proxy::__wire_repr_new())
+            }
+        }
+        impl #plan_impl_generics #runtime::ByteSource for #plan_impl_type {
+            #[inline(always)]
+            fn byte_len(&self) -> usize { self.encoded_len }
+            #[inline(always)]
+            fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) { #(#emit_steps)* }
+        }
+        impl #plan_impl_generics #runtime::ByteSourceCursor for #plan_impl_type
+        where
+            #(#plan_cursor_bounds,)*
+        {
+            type Segments<'__wire_repr_source> = #plan_segments_type where Self: '__wire_repr_source;
+            #[inline(always)]
+            fn segments(&self) -> Self::Segments<'_> { #plan_segments_value }
         }
         impl #plan_impl_generics #runtime::PreparedLayout for #plan_impl_type {
             type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
-            fn encoded_len(&self) -> usize { self.encoded_len }
             fn commit_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(Self::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::OutputTooShortError> {
-                if output.len() < self.encoded_len { return Err(#runtime::OutputTooShortError { required: self.encoded_len, available: output.len() }); }
-                { let (mut remaining, _) = output.split_at_mut(self.encoded_len); #(#commit_steps)* }
-                let (bytes, suffix) = output.split_at_mut(self.encoded_len);
+                let required = self.encoded_len;
+                if output.len() < required { return Err(#runtime::OutputTooShortError { required, available: output.len() }); }
+                let (bytes, suffix) = output.split_at_mut(required);
+                #runtime::ByteSource::write_into(&self, bytes);
                 Ok((#runtime::Written::new(bytes), suffix))
             }
         }
 
+        #builder
         #inherent_impl
         impl #impl_generics #runtime::WireViewType for #self_type {
             type DecodeError<'__wire_repr_view> = #association_error_type;
@@ -942,291 +1622,77 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     })
 }
 
-fn type_uses_lifetime(ty: &syn::Type, lifetime: &syn::Lifetime) -> bool {
-    struct Finder<'a> {
-        target: &'a syn::Lifetime,
-        found: bool,
-    }
-
-    impl<'ast> Visit<'ast> for Finder<'_> {
-        fn visit_lifetime(&mut self, lifetime: &'ast syn::Lifetime) {
-            self.found |= lifetime.ident == self.target.ident;
-        }
-    }
-
-    let mut finder = Finder {
-        target: lifetime,
-        found: false,
-    };
-    finder.visit_type(ty);
-    finder.found
-}
-
-fn render_fixed_view(model: WireStruct, runtime: &TokenStream) -> syn::Result<TokenStream> {
-    let WireStruct {
-        vis,
-        name,
-        wire_lifetime,
-        opcodes: _,
-        fields,
-    } = model;
-    let view = format_ident!("{name}View");
-    let decode_error = format_ident!("{name}DecodeError");
-    let encode_error = format_ident!("{name}EncodeError");
-    let plan = format_ident!("{name}Plan");
-    let labels: Vec<_> = fields.iter().map(|field| field.name.to_string()).collect();
-    let variants: Vec<_> = fields
-        .iter()
-        .map(|field| variant_name(&field.name.to_string()))
-        .collect();
-    let plans: Vec<_> = (0..fields.len())
-        .map(|index| format_ident!("field_{index}"))
-        .collect();
-    let gaps: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            (field.position.is_some()
-                || field.padding_before != 0
-                || field.alignment_before.is_some())
-            .then(|| format_ident!("gap_{index}"))
-        })
-        .collect();
-    let gap_names: Vec<_> = gaps.iter().flatten().collect();
-    let has_geometry = !gap_names.is_empty();
-    let has_positions = fields.iter().any(|field| field.position.is_some());
-    let position_sources: Vec<_> = (0..fields.len())
-        .map(|index| {
-            fields.iter().any(|field| {
-                matches!(field.position, Some(FieldPosition::Source(ref source)) if source == &fields[index].name)
-            })
-        })
-        .collect();
-    let (impl_generics, self_type, view_signature) = if let Some(lifetime) = &wire_lifetime {
-        (
-            quote!(<#lifetime>),
-            quote!(#name<#lifetime>),
-            quote!(#vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #runtime::ViewRequest<'__wire_repr_view, #view<'__wire_repr_view>>),
-        )
-    } else {
-        (
-            quote!(),
-            quote!(#name),
-            quote!(#vis fn view<'__wire_repr_wire>(input: &'__wire_repr_wire [u8]) -> #runtime::ViewRequest<'__wire_repr_wire, #view<'__wire_repr_wire>>),
-        )
-    };
-
-    let plain_fixed_sequence = fields.iter().all(|field| {
-        field.position.is_none() && field.padding_before == 0 && field.alignment_before.is_none()
-    });
-    let fixed_widths: Vec<_> = fields
-        .iter()
-        .map(|field| match &field.kind {
-            FieldKind::Fixed(codec) => {
-                let codec = codec_tokens(codec, runtime);
-                quote!(<#codec as #runtime::FixedCodec>::WIDTH)
-            }
-            _ => unreachable!(),
-        })
-        .collect();
-    let fixed_view_constructor = plain_fixed_sequence.then(|| {
-        quote! {
-            fn from_sequence(bytes: &'__wire_repr_wire [u8]) -> Self {
-                Self { bytes }
-            }
-        }
-    });
-    let fixed_sequence_method = plain_fixed_sequence.then(|| {
-        quote! {
-            /// Validates complete fixed-width sequence framing and returns an infallible iterator.
-            #vis fn views<'__wire_repr_view>(
-                input: &'__wire_repr_view [u8],
-            ) -> Result<
-                #runtime::FixedViewIterator<'__wire_repr_view, #view<'__wire_repr_view>>,
-                #runtime::FixedViewSequenceError,
-            > {
-                let item_width = 0usize #(+ #fixed_widths)*;
-                #runtime::FixedViewIterator::new(input, item_width, #view::from_sequence)
-            }
-        }
-    });
-
-    let decode_steps = fields.iter().enumerate().map(|(index, field)| {
-        let label = &labels[index];
-        let field_name = &field.name;
-        let codec = match &field.kind { FieldKind::Fixed(codec) => codec_tokens(codec, runtime), _ => unreachable!() };
-        let geometry = decode_geometry(field, label, &decode_error);
-        let decode_source = position_sources[index].then(|| quote!(
-            let #field_name = <#codec as #runtime::FixedCodec>::decode(bytes);
-        ));
-        quote! {
-            #geometry
-            let width = <#codec as #runtime::FixedCodec>::WIDTH;
-            let available = remaining.len();
-            let Some((bytes, suffix)) = remaining.split_at_checked(width) else {
-                return Err(#decode_error::InputTooShort { field: #label, required: width, available });
-            };
-            #decode_source
-            remaining = suffix;
-        }
-    });
-    let getters = fields.iter().enumerate().map(|(index, field)| {
-        let field_name = &field.name;
-        let label = &labels[index];
-        let codec = match &field.kind {
-            FieldKind::Fixed(codec) => codec_tokens(codec, runtime),
-            _ => unreachable!(),
-        };
-        let prior = fields
-            .iter()
-            .take(index)
-            .map(|prior| getter_cursor_step(prior, runtime));
-        let geometry = getter_geometry(field, runtime);
-        let return_type = match &field.kind {
-            FieldKind::Fixed(Codec::OwnedBytes(length)) => quote!(&'__wire_repr_wire [u8; #length]),
-            FieldKind::Fixed(_) => {
-                quote!(<#codec as #runtime::FixedCodec>::Value<'__wire_repr_wire>)
-            }
-            _ => unreachable!(),
-        };
-        let value = match &field.kind {
-            FieldKind::Fixed(Codec::OwnedBytes(length)) => quote! {
-                match <&'__wire_repr_wire [u8; #length]>::try_from(bytes) {
-                    Ok(bytes) => bytes,
-                    Err(_) => unreachable!("validated fixed byte array has its declared width"),
-                }
-            },
-            FieldKind::Fixed(_) => quote!(<#codec as #runtime::FixedCodec>::decode(bytes)),
-            _ => unreachable!(),
-        };
-        quote! {
-            #[doc = concat!("Returns the decoded `", #label, "` field.")]
-            #[must_use]
-            #vis fn #field_name(&self) -> #return_type {
-                let mut cursor = 0usize;
-                #(#prior)*
-                #geometry
-                let width = <#codec as #runtime::FixedCodec>::WIDTH;
-                let bytes = &self.bytes[cursor..cursor + width];
-                #value
-            }
-        }
-    });
-    let plan_fields = fields.iter().zip(&plans).map(|(field, plan)| {
-        let codec = match &field.kind {
-            FieldKind::Fixed(codec) => codec_tokens(codec, runtime),
-            _ => unreachable!(),
-        };
-        quote!(#plan: <#codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>)
-    });
-    let prepare_steps = fields.iter().zip(&plans).zip(&variants).map(|((field, plan), variant)| {
-        let field_name = &field.name;
-        let codec = match &field.kind { FieldKind::Fixed(codec) => codec_tokens(codec, runtime), _ => unreachable!() };
-        quote!(let #plan = <#codec as #runtime::FixedCodec>::plan(self.#field_name).map_err(#encode_error::#variant)?;)
-    });
-    let geometry_steps = fields.iter().zip(&plans).zip(&gaps).map(|((field, plan), gap)| {
-        let length = quote!(#runtime::EncodePlan::encoded_len(&#plan));
-        if let (Some(gap), Some(position)) = (gap, &field.position) {
-            let label = field.name.to_string();
-            let field_start = match position {
-                FieldPosition::Static(position) => quote!(#position),
-                FieldPosition::Source(source) => quote! { usize::try_from(self.#source).map_err(|_| #encode_error::PositionNotRepresentable { field: #label, value: self.#source as u128 })? },
-            };
-            quote! { let field_start = #field_start; if field_start < encoded_len { return Err(#encode_error::PositionBeforeCursor { field: #label, position: field_start, cursor: encoded_len }); } let #gap = field_start - encoded_len; encoded_len = field_start.checked_add(#length).ok_or(#encode_error::LengthOverflow)?; }
-        } else if let Some(gap) = gap {
-            let padding = field.padding_before;
-            let alignment = match field.alignment_before { Some(boundary) => quote!(Some(#boundary)), None => quote!(None::<usize>) };
-            quote! { let before_gap = encoded_len; let padded = encoded_len.checked_add(#padding).ok_or(#encode_error::LengthOverflow)?; let alignment_padding = match #alignment { Some(boundary) => { let remainder = padded % boundary; if remainder == 0 { 0 } else { boundary - remainder } }, None => 0 }; let field_start = padded.checked_add(alignment_padding).ok_or(#encode_error::LengthOverflow)?; let #gap = field_start - before_gap; encoded_len = field_start.checked_add(#length).ok_or(#encode_error::LengthOverflow)?; }
-        } else { quote!(encoded_len = encoded_len.checked_add(#length).ok_or(#encode_error::LengthOverflow)?;) }
-    });
-    let commit_steps = fields.iter().zip(&plans).zip(&gaps).map(|((_, plan), gap)| {
-        let padding = gap.as_ref().map(|gap| quote! { let (padding, suffix) = remaining.split_at_mut(self.#gap); padding.fill(0); remaining = suffix; });
-        quote! { #padding let width = #runtime::EncodePlan::encoded_len(&self.#plan); let (slot, suffix) = remaining.split_at_mut(width); #runtime::EncodePlan::write_into(&self.#plan, slot); remaining = suffix; }
-    });
-    let encode_variants = fields.iter().zip(&variants).zip(&labels).map(|((field, variant), label)| {
-        let codec = match &field.kind { FieldKind::Fixed(codec) => codec_tokens(codec, runtime), _ => unreachable!() };
-        quote!(#[doc = concat!("Preparation error for field `", #label, "`.")] #variant(<#codec as #runtime::FixedCodec>::EncodeError),)
-    });
-    let encode_display_arms = fields.iter().zip(&variants).zip(&labels).map(|((_, variant), label)| quote!(Self::#variant(error) => write!(formatter, "wire preparation failed for field `{}`: {error:?}", #label),));
-    let decode_position_variants = has_positions.then(|| quote! { PositionNotRepresentable { field: &'static str, value: u128 }, PositionBeforeCursor { field: &'static str, position: usize, cursor: usize }, });
-    let decode_position_arms = has_positions.then(|| quote! { Self::PositionNotRepresentable { field, value } => write!(formatter, "position {value} for field `{field}` does not fit in usize"), Self::PositionBeforeCursor { field, position, cursor } => write!(formatter, "field `{field}` starts at byte {position}, before the current byte {cursor}"), });
-    let encode_position_variants = decode_position_variants.clone();
-    let encode_position_arms = decode_position_arms.clone();
-    let decode_geometry_variant =
-        has_geometry.then(|| quote!(GeometryOverflow { field: &'static str },));
-    let decode_geometry_arm = has_geometry.then(|| quote!(Self::GeometryOverflow { field } => write!(formatter, "placement before field `{field}` does not fit in usize"),));
-
-    Ok(quote! {
-        /// Typed decoding failures for this wire representation.
-        #[allow(missing_docs)]
-        #[derive(Debug)]
-        #vis enum #decode_error { InputTooShort { field: &'static str, required: usize, available: usize }, #decode_position_variants #decode_geometry_variant TrailingBytes { expected: usize, actual: usize }, }
-        impl ::core::fmt::Display for #decode_error { fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { match self { Self::InputTooShort { field, required, available } => { let required_unit = if *required == 1 { "byte" } else { "bytes" }; let available_unit = if *available == 1 { "byte" } else { "bytes" }; let available_verb = if *available == 1 { "remains" } else { "remain" }; write!(formatter, "field `{field}` needs {required} {required_unit}, but only {available} {available_unit} {available_verb}") }, #decode_position_arms #decode_geometry_arm Self::TrailingBytes { expected, actual } => { let trailing = actual.saturating_sub(*expected); let unit = if trailing == 1 { "byte" } else { "bytes" }; write!(formatter, "input has {trailing} trailing {unit} after the {expected}-byte representation") } } } }
-        impl ::core::error::Error for #decode_error {}
-        /// Typed encoding-preparation failures for this wire representation.
-        #[allow(missing_docs)]
-        #[derive(Debug)]
-        #vis enum #encode_error { #encode_position_variants #(#encode_variants)* LengthOverflow, }
-        impl ::core::fmt::Display for #encode_error { fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { match self { #encode_position_arms #(#encode_display_arms)* Self::LengthOverflow => formatter.write_str("encoded representation length does not fit in usize"), } } }
-        impl ::core::error::Error for #encode_error {}
-        /// A bytes-backed validated read view for this wire representation.
-        #[derive(Clone, Copy, Debug)]
-        #vis struct #view<'__wire_repr_wire> { bytes: &'__wire_repr_wire [u8] }
-        impl<'__wire_repr_wire> #view<'__wire_repr_wire> { #[doc = "Returns this view's exact represented bytes."] #[must_use] #vis const fn as_bytes(&self) -> &'__wire_repr_wire [u8] { self.bytes } #fixed_view_constructor #(#getters)* }
-        impl<'__wire_repr_wire> #runtime::WireView<'__wire_repr_wire> for #view<'__wire_repr_wire> { type DecodeError = #decode_error; fn parse_view(input: &'__wire_repr_wire [u8]) -> Result<(Self, &'__wire_repr_wire [u8]), Self::DecodeError> { let mut remaining = input; #(#decode_steps)* let represented = &input[..input.len() - remaining.len()]; Ok((Self { bytes: represented }, remaining)) } fn trailing_bytes_error(represented: usize, input: usize) -> Self::DecodeError { #decode_error::TrailingBytes { expected: represented, actual: input } } fn as_bytes(&self) -> &'__wire_repr_wire [u8] { self.bytes } }
-        impl #impl_generics #runtime::WireViewType for #self_type { type DecodeError<'__wire_repr_view> = #decode_error; type View<'__wire_repr_view> = #view<'__wire_repr_view>; }
-        /// A prepared encoding for this wire representation.
-        #vis struct #plan<'__wire_repr_value> { #(#plan_fields,)* #(#gap_names: usize,)* encoded_len: usize }
-        #[allow(missing_docs)]
-        impl #plan<'_> { #[must_use] #vis const fn encoded_len(&self) -> usize { self.encoded_len } }
-        impl<'__wire_repr_value> #runtime::PreparedLayout for #plan<'__wire_repr_value> { type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>; fn encoded_len(&self) -> usize { self.encoded_len } fn commit_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(Self::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::OutputTooShortError> { if output.len() < self.encoded_len { return Err(#runtime::OutputTooShortError { required: self.encoded_len, available: output.len() }); } { let (mut remaining, _) = output.split_at_mut(self.encoded_len); #(#commit_steps)* } let (bytes, suffix) = output.split_at_mut(self.encoded_len); Ok((#runtime::Written::new(bytes), suffix)) } }
-        impl #impl_generics #self_type { #[doc = "Starts validating a bytes-backed read view from the supplied input."] #view_signature { #runtime::ViewRequest::new(input) } #fixed_sequence_method #[doc = "Consumes this value and prepares an atomic encoding."] #vis fn prepare<'__wire_repr_value>(self) -> Result<#plan<'__wire_repr_value>, #encode_error> where Self: '__wire_repr_value { <Self as #runtime::WireEncode>::prepare(self) } #[doc = "Consumes this value, prepares it, and commits it into `output`."] #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#encode_error>> { let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?; #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output) } }
-        impl #impl_generics #runtime::WireEncode for #self_type { type EncodeError = #encode_error; type Plan<'__wire_repr_value> = #plan<'__wire_repr_value> where Self: '__wire_repr_value; fn prepare<'__wire_repr_value>(self) -> Result<Self::Plan<'__wire_repr_value>, Self::EncodeError> where Self: '__wire_repr_value { #(#prepare_steps)* let mut encoded_len = 0usize; #(#geometry_steps)* Ok(#plan { #(#plans,)* #(#gap_names,)* encoded_len }) } }
-    })
-}
-
-fn decode_geometry(
-    field: &super::super::model::Field,
-    label: &str,
-    decode_error: &proc_macro2::Ident,
+fn computation_source(
+    computation: &Computation,
+    own_index: usize,
+    fields: &[Field],
+    plans: &[proc_macro2::Ident],
+    gaps: &[Option<proc_macro2::Ident>],
+    runtime: &TokenStream,
 ) -> TokenStream {
-    if let Some(position) = &field.position {
-        let (position, conversion) = match position {
-            FieldPosition::Static(position) => (quote!(#position), quote!()),
-            FieldPosition::Source(source) => (
-                quote!(position),
-                quote!(let position = usize::try_from(#source).map_err(|_| #decode_error::PositionNotRepresentable { field: #label, value: #source as u128 })?;),
-            ),
-        };
-        quote! { #conversion let represented = input.len() - remaining.len(); if #position < represented { return Err(#decode_error::PositionBeforeCursor { field: #label, position: #position, cursor: represented }); } let gap = #position - represented; let available = remaining.len(); let Some((_, suffix)) = remaining.split_at_checked(gap) else { return Err(#decode_error::InputTooShort { field: #label, required: gap, available }); }; remaining = suffix; }
-    } else if field.padding_before == 0 && field.alignment_before.is_none() {
-        quote!()
-    } else {
-        let padding = field.padding_before;
-        let alignment = match field.alignment_before {
-            Some(boundary) => quote!(Some(#boundary)),
-            None => quote!(None::<usize>),
-        };
-        quote! { let represented = input.len() - remaining.len(); let padded = represented.checked_add(#padding).ok_or(#decode_error::GeometryOverflow { field: #label })?; let alignment_padding = match #alignment { Some(boundary) => { let remainder = padded % boundary; if remainder == 0 { 0 } else { boundary - remainder } }, None => 0 }; let gap = #padding.checked_add(alignment_padding).ok_or(#decode_error::GeometryOverflow { field: #label })?; let available = remaining.len(); let Some((_, suffix)) = remaining.split_at_checked(gap) else { return Err(#decode_error::InputTooShort { field: #label, required: gap, available }); }; remaining = suffix; }
+    let mut components = Vec::new();
+    match &computation.bytes {
+        ComputationByteSelection::ExcludeSelf => {
+            for (index, plan) in plans.iter().enumerate() {
+                if let Some(gap) = &gaps[index] {
+                    components.push(quote!(#runtime::ByteSegment::Rest { byte: 0, len: #gap }));
+                }
+                if index != own_index {
+                    components.push(quote!(#runtime::__private::BorrowedSource::new(&#plan)));
+                }
+            }
+        }
+        ComputationByteSelection::Include(paths) => {
+            for (index, plan) in plans.iter().enumerate() {
+                let selected: Vec<_> = paths
+                    .iter()
+                    .filter(|path| path.top_level_index == index)
+                    .collect();
+                if selected.is_empty() {
+                    continue;
+                }
+                if selected.iter().any(|path| path.nested.is_empty()) {
+                    components.push(quote!(#runtime::__private::BorrowedSource::new(&#plan)));
+                    continue;
+                }
+                debug_assert!(matches!(fields[index].kind, FieldKind::Nested));
+                let selector = selected
+                    .iter()
+                    .map(|path| {
+                        let nested = &path.nested;
+                        quote!(fields #(.#nested)*)
+                    })
+                    .reduce(|left, right| quote!(#left | #right))
+                    .expect("nonempty nested selection");
+                components.push(quote!(#plan.bytes().include(|fields| #selector)));
+            }
+        }
     }
+    chain_sources(components, runtime)
 }
 
-fn getter_cursor_step(field: &super::super::model::Field, runtime: &TokenStream) -> TokenStream {
-    let codec = match &field.kind {
-        FieldKind::Fixed(codec) => codec_tokens(codec, runtime),
-        _ => unreachable!(),
+fn chain_sources(mut sources: Vec<TokenStream>, runtime: &TokenStream) -> TokenStream {
+    let Some(first) = sources.first().cloned() else {
+        return quote!(#runtime::__private::EmptySource);
     };
-    let geometry = getter_geometry(field, runtime);
-    quote! { #geometry cursor += <#codec as #runtime::FixedCodec>::WIDTH; }
+    sources.drain(1..).fold(
+        first,
+        |left, right| quote!(#runtime::__private::ByteChain::new(#left, #right)),
+    )
 }
 
-fn getter_geometry(field: &super::super::model::Field, _runtime: &TokenStream) -> TokenStream {
+fn view_geometry(
+    field: &super::super::model::Field,
+    _runtime: &TokenStream,
+    view: &proc_macro2::Ident,
+) -> TokenStream {
     if let Some(position) = &field.position {
         match position {
             FieldPosition::Static(position) => quote!(cursor = #position;),
-            FieldPosition::Source(source) => {
-                quote!(cursor = usize::try_from(self.#source()).expect("validated position source fits usize");)
-            }
+            FieldPosition::Source(source) => quote! {
+                cursor = usize::try_from(#view::#source(target))
+                    .expect("validated position source fits usize");
+            },
         }
     } else if field.padding_before == 0 && field.alignment_before.is_none() {
         quote!()
@@ -1236,7 +1702,17 @@ fn getter_geometry(field: &super::super::model::Field, _runtime: &TokenStream) -
             Some(boundary) => quote!(Some(#boundary)),
             None => quote!(None::<usize>),
         };
-        quote! { let padded = cursor + #padding; let alignment_padding = match #alignment { Some(boundary) => { let remainder = padded % boundary; if remainder == 0 { 0 } else { boundary - remainder } }, None => 0 }; cursor = padded + alignment_padding; }
+        quote! {
+            let padded = cursor.checked_add(#padding).expect("view field geometry overflow");
+            let alignment_padding = match #alignment {
+                Some(boundary) => {
+                    let remainder = padded % boundary;
+                    if remainder == 0 { 0 } else { boundary - remainder }
+                }
+                None => 0,
+            };
+            cursor = padded.checked_add(alignment_padding).expect("view field geometry overflow");
+        }
     }
 }
 

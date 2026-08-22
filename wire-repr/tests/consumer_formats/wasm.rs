@@ -1,7 +1,10 @@
 use core::convert::Infallible;
 use core::num::NonZeroUsize;
 
-use wire_repr::{EncodePlan, PrefixCodec, PrefixExtent, PreparedLayout, Wire};
+use wire_repr::{
+    ByteSegment, ByteSink, ByteSource, ByteSourceCursor, PrefixCodec, PrefixExtent, PreparedLayout,
+    Wire,
+};
 
 /// Structural failures while framing a `u32` ULEB128 prefix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,13 +24,24 @@ pub struct U32Leb128Plan {
     len: usize,
 }
 
-impl EncodePlan for U32Leb128Plan {
-    fn encoded_len(&self) -> usize {
+impl ByteSource for U32Leb128Plan {
+    fn byte_len(&self) -> usize {
         self.len
     }
 
-    fn write_into(&self, output: &mut [u8]) {
-        output.copy_from_slice(&self.bytes[..self.len]);
+    fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+        sink.write(&self.bytes[..self.len]);
+    }
+}
+
+impl ByteSourceCursor for U32Leb128Plan {
+    type Segments<'source>
+        = core::iter::Once<ByteSegment<'source>>
+    where
+        Self: 'source;
+
+    fn segments(&self) -> Self::Segments<'_> {
+        core::iter::once(ByteSegment::Bytes(&self.bytes[..self.len]))
     }
 }
 

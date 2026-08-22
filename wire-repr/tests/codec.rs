@@ -1,7 +1,7 @@
 use core::convert::Infallible;
 use core::num::NonZeroUsize;
 
-use wire_repr::codec::{self, EncodePlan};
+use wire_repr::codec::{self, ByteSegment, ByteSink, ByteSource, ByteSourceCursor};
 use wire_repr::{
     BeI16, BeI32, BeI64, BeI128, BeU16, BeU24, BeU32, BeU64, BeU128, FixedCodec, I8, LeI16, LeI32,
     LeI64, LeI128, LeU16, LeU24, LeU32, LeU64, LeU128, PrefixCodec, PrefixExtent, U8,
@@ -18,11 +18,184 @@ where
     }
 }
 
-fn render_plan<const N: usize>(plan: impl EncodePlan) -> [u8; N] {
-    assert_eq!(plan.encoded_len(), N);
+fn render_plan<const N: usize>(plan: impl ByteSource) -> [u8; N] {
+    assert_eq!(plan.byte_len(), N);
     let mut output = [0xa5; N];
     plan.write_into(&mut output);
     output
+}
+
+struct ChunkedSource;
+
+impl ByteSource for ChunkedSource {
+    fn byte_len(&self) -> usize {
+        6
+    }
+
+    fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+        sink.write(&[1, 2]);
+        sink.fill(0xa5, 3);
+        sink.write(&[9]);
+    }
+}
+
+struct RecordingSink {
+    output: [u8; 6],
+    written: usize,
+    fill_calls: usize,
+}
+
+impl ByteSink for RecordingSink {
+    fn write(&mut self, bytes: &[u8]) {
+        let end = self.written + bytes.len();
+        self.output[self.written..end].copy_from_slice(bytes);
+        self.written = end;
+    }
+
+    fn fill(&mut self, byte: u8, len: usize) {
+        let end = self.written + len;
+        self.output[self.written..end].fill(byte);
+        self.written = end;
+        self.fill_calls += 1;
+    }
+}
+
+struct UnderEmittingSource;
+
+impl ByteSource for UnderEmittingSource {
+    fn byte_len(&self) -> usize {
+        2
+    }
+
+    fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+        sink.write(&[1]);
+    }
+}
+
+struct OverEmittingSource;
+
+impl ByteSource for OverEmittingSource {
+    fn byte_len(&self) -> usize {
+        1
+    }
+
+    fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+        sink.write(&[1, 2]);
+    }
+}
+
+#[test]
+fn byte_sources_emit_ordered_chunks_and_repeated_runs() {
+    let source = ChunkedSource;
+    let mut sink = RecordingSink {
+        output: [0; 6],
+        written: 0,
+        fill_calls: 0,
+    };
+
+    source.emit_to(&mut sink);
+    assert_eq!(sink.output, [1, 2, 0xa5, 0xa5, 0xa5, 9]);
+    assert_eq!(sink.written, source.byte_len());
+    assert_eq!(sink.fill_calls, 1);
+
+    let mut output = [0; 6];
+    source.write_into(&mut output);
+    assert_eq!(output, sink.output);
+}
+
+#[test]
+fn runtime_byte_source_cursors_preserve_spans_and_flatten_bytes() {
+    let borrowed = [1, 2, 3];
+    let source = codec::ByteChain::new(&borrowed[..], ByteSegment::Rest { byte: 0xa5, len: 5 });
+    let segments: Vec<_> = source.segments().collect();
+    assert_eq!(
+        segments,
+        [
+            ByteSegment::Bytes(&borrowed),
+            ByteSegment::Rest { byte: 0xa5, len: 5 },
+        ]
+    );
+    assert_eq!(
+        match segments[0] {
+            ByteSegment::Bytes(bytes) => bytes.as_ptr(),
+            ByteSegment::Rest { .. } => unreachable!(),
+        },
+        borrowed.as_ptr()
+    );
+    assert_eq!(segments[0].len(), 3);
+    assert!(!segments[0].is_empty());
+    assert_eq!(segments[1].bytes().collect::<Vec<_>>(), vec![0xa5; 5]);
+    assert_eq!(
+        source.bytes().collect::<Vec<_>>(),
+        vec![1, 2, 3, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5]
+    );
+}
+
+#[test]
+fn runtime_byte_source_chunks_bound_borrowed_and_repeated_spans() {
+    let borrowed = [1, 2, 3];
+    let source = codec::ByteChain::new(&borrowed[..], ByteSegment::Rest { byte: 0xa5, len: 5 });
+    let chunks: Vec<_> = source.chunks(2).collect();
+    assert!(chunks.iter().all(|chunk| chunk.len() <= 2));
+    assert_eq!(
+        chunks,
+        [
+            ByteSegment::Bytes(&[1, 2]),
+            ByteSegment::Bytes(&[3]),
+            ByteSegment::Rest { byte: 0xa5, len: 2 },
+            ByteSegment::Rest { byte: 0xa5, len: 2 },
+            ByteSegment::Rest { byte: 0xa5, len: 1 },
+        ]
+    );
+    assert!(std::panic::catch_unwind(|| source.chunks(0)).is_err());
+
+    let mut output = [0; 8];
+    source.write_into(&mut output);
+    assert_eq!(output, [1, 2, 3, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5]);
+}
+
+#[test]
+fn runtime_byte_source_ranges_remain_zero_copy_across_segments() {
+    let borrowed = [1, 2, 3];
+    let source = codec::ByteChain::new(&borrowed[..], ByteSegment::Rest { byte: 0xa5, len: 5 });
+    let range = source.range(2..=5);
+    let segments: Vec<_> = range.segments().collect();
+
+    assert_eq!(
+        segments,
+        [
+            ByteSegment::Bytes(&borrowed[2..]),
+            ByteSegment::Rest { byte: 0xa5, len: 3 },
+        ]
+    );
+    let ByteSegment::Bytes(bytes) = segments[0] else {
+        unreachable!()
+    };
+    assert_eq!(bytes.as_ptr(), borrowed[2..].as_ptr());
+    assert_eq!(range.bytes().collect::<Vec<_>>(), [3, 0xa5, 0xa5, 0xa5]);
+
+    assert!(std::panic::catch_unwind(|| source.range(..9)).is_err());
+    let reversed_start = std::hint::black_box(5);
+    let reversed_end = std::hint::black_box(4);
+    assert!(std::panic::catch_unwind(|| source.range(reversed_start..reversed_end)).is_err());
+}
+
+#[test]
+fn byte_source_exact_write_rejects_wrong_emission_lengths() {
+    assert!(
+        std::panic::catch_unwind(|| {
+            let mut output = [0; 2];
+            UnderEmittingSource.write_into(&mut output);
+        })
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            let mut output = [0; 1];
+            OverEmittingSource.write_into(&mut output);
+        })
+        .is_err()
+    );
 }
 
 #[test]
@@ -128,7 +301,7 @@ fn signed_integer_codecs_round_trip_negative_values_and_endianness() {
 #[test]
 fn plans_are_caller_buffer_driven() {
     let plan = completed_plan::<BeU32>(0x1234_5678);
-    assert_eq!(plan.encoded_len(), 4);
+    assert_eq!(plan.byte_len(), 4);
     let mut output = [0xa5; 6];
     plan.write_into(&mut output[1..5]);
     assert_eq!(output, [0xa5, 0x12, 0x34, 0x56, 0x78, 0xa5]);
@@ -164,14 +337,27 @@ fn u24_codecs_cover_zero_maximum_and_rejection() {
 
 struct BorrowedValue<'wire>(&'wire [u8]);
 struct BorrowedPlan<'value>(&'value [u8]);
-impl EncodePlan for BorrowedPlan<'_> {
-    fn encoded_len(&self) -> usize {
+impl ByteSource for BorrowedPlan<'_> {
+    fn byte_len(&self) -> usize {
         self.0.len()
     }
-    fn write_into(&self, output: &mut [u8]) {
-        output.copy_from_slice(self.0);
+
+    fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+        sink.write(self.0);
     }
 }
+
+impl ByteSourceCursor for BorrowedPlan<'_> {
+    type Segments<'source>
+        = core::iter::Once<ByteSegment<'source>>
+    where
+        Self: 'source;
+
+    fn segments(&self) -> Self::Segments<'_> {
+        core::iter::once(ByteSegment::Bytes(self.0))
+    }
+}
+
 struct Borrowing;
 impl FixedCodec for Borrowing {
     type Value<'wire>
@@ -331,16 +517,32 @@ struct TerminatedPlan<'value> {
     value: &'value [u8],
     encoded_len: usize,
 }
-impl EncodePlan for TerminatedPlan<'_> {
-    fn encoded_len(&self) -> usize {
+impl ByteSource for TerminatedPlan<'_> {
+    fn byte_len(&self) -> usize {
         self.encoded_len
     }
-    fn write_into(&self, output: &mut [u8]) {
-        let (value, terminator) = output.split_at_mut(self.value.len());
-        value.copy_from_slice(self.value);
-        terminator.copy_from_slice(&[0]);
+
+    fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+        sink.write(self.value);
+        sink.fill(0, 1);
     }
 }
+
+impl ByteSourceCursor for TerminatedPlan<'_> {
+    type Segments<'source>
+        = core::array::IntoIter<ByteSegment<'source>, 2>
+    where
+        Self: 'source;
+
+    fn segments(&self) -> Self::Segments<'_> {
+        [
+            ByteSegment::Bytes(self.value),
+            ByteSegment::Rest { byte: 0, len: 1 },
+        ]
+        .into_iter()
+    }
+}
+
 struct Terminated;
 impl PrefixCodec for Terminated {
     type Value<'wire>

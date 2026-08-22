@@ -25,6 +25,12 @@ PAIRS = (
     ("bitfield_decode", "generated_bitfield_decode", "handwritten_bitfield_decode", False, 2),
     ("fixed_sequence", "generated_fixed_sequence", "handwritten_fixed_sequence", False, 2),
     ("variable_cursor", "generated_variable_cursor", "handwritten_variable_cursor", False, 2),
+    # The integration oracle exercises three payload/capacity cases for both probes.
+    ("computed_encode", "generated_computed_encode", "handwritten_computed_encode", False, 6),
+    ("validated_enum_decode", "generated_validated_enum_decode", "handwritten_validated_enum_decode", False, 2),
+    ("table_decode", "generated_table_decode", "handwritten_table_decode", False, 2),
+    ("direct_prepared_selection", "generated_direct_prepared_selection", "handwritten_direct_prepared_selection", False, 2),
+    ("nested_prepared_selection", "generated_nested_prepared_selection", "handwritten_nested_prepared_selection", False, 2),
 )
 ALLOWED_OVERHEAD = {
     "fixed_decode": {"instructions": 4, "branches": 1},
@@ -35,6 +41,10 @@ ALLOWED_OVERHEAD = {
     "positioned_encode": {"instructions": 20, "branches": 2},
     "bitfield_decode": {"instructions": 1},
     "variable_cursor": {"instructions": 11, "calls": 1, "branches": 2, "panic_paths": 1},
+    # Nested semantic validation retains its explicit success/error branch.
+    "validated_enum_decode": {"instructions": 7, "branches": 2},
+    # The consumer-owned table contributes one dispatch branch.
+    "table_decode": {"instructions": 2, "branches": 1},
 }
 ALLOWED_EXTRA_CALLEE_MARKERS = {
     "bounded_decode": ("slice_index_fail",),
@@ -163,8 +173,9 @@ def metrics(body: str) -> dict[str, int]:
     lines = [line.strip() for line in body.splitlines() if line.strip() and not line.lstrip().startswith(";")]
     calls = [line for line in lines if re.search(r'\b(?:call|invoke)\b', line)]
     relevant_calls = [line for line in calls if "llvm." not in line]
+    runtime_lines = [line for line in lines if "llvm." not in line]
     return {
-        "instructions": sum(1 for line in lines if not line.endswith(":")),
+        "instructions": sum(1 for line in runtime_lines if not line.endswith(":")),
         "calls": len(relevant_calls),
         "branches": sum(1 for line in lines if line.startswith("br ") or line.startswith("switch ")),
         "panic_paths": sum(1 for line in relevant_calls if any(marker in line for marker in PANIC_MARKERS)),

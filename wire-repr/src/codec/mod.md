@@ -12,7 +12,7 @@ The runtime is safe Rust, `no_std`, and allocation-free.
 
 - `decode` receives exactly [`FixedCodec::WIDTH`] validated bytes;
 - `plan` completes every fallible semantic conversion before output mutation;
-- the returned [`EncodePlan`] reports exactly that width and writes its complete
+- the returned [`ByteSource`] reports exactly that width and emits its complete
   representation into an exact-sized slice.
 
 Built-ins cover one-byte values, big- and little-endian signed and unsigned integers,
@@ -37,8 +37,13 @@ the codec plan rather than copying those source bytes.
 
 ## Plans
 
-[`EncodePlan`] is one completed, infallible field write. Its `encoded_len` and
-`write_into` methods must describe the same representation.
+[`ByteSource`] is one completed, infallible physical byte stream. Its `byte_len`,
+`emit_to`, and `write_into` methods must describe the same representation.
+
+[`ByteSourceCursor`] adds a zero-copy pull view over that stream. `segments` preserves
+borrowed slices and represents implicit repeated bytes as [`ByteSegment::Rest`] rather than
+materializing them. `chunks`, `bytes`, and `range` are lazy adaptors; they do not join a
+fragmented source into a contiguous allocation.
 
 [`PreparedLayout`] is an aggregate generated plan. `commit_into`:
 

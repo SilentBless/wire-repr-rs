@@ -1,13 +1,106 @@
 #![deny(missing_docs, unsafe_code)]
 //! Static tagged enum derive coverage.
 
-use wire_repr::{PreparedLayout, Wire};
+use wire_repr::{
+    ByteSegment, ByteSink, ByteSource, ByteSourceCursor, Computed, FixedCodec, PreparedLayout, Wire,
+};
+
+#[derive(Default)]
+struct RecordingSink {
+    writes: Vec<Vec<u8>>,
+}
+
+impl ByteSink for RecordingSink {
+    fn write(&mut self, bytes: &[u8]) {
+        self.writes.push(bytes.to_vec());
+    }
+
+    fn fill(&mut self, _byte: u8, _len: usize) {}
+}
+
+/// A two-segment fixed tag representation used to exercise prepared enum cursors.
+pub struct FragmentedTag;
+
+/// The prepared fragmented tag, retaining separate physical tag spans.
+pub struct FragmentedTagPlan {
+    first: [u8; 1],
+    second: [u8; 1],
+}
+
+impl ByteSource for FragmentedTagPlan {
+    fn byte_len(&self) -> usize {
+        2
+    }
+
+    fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+        sink.write(&self.first);
+        sink.write(&self.second);
+    }
+}
+
+impl ByteSourceCursor for FragmentedTagPlan {
+    type Segments<'source>
+        = core::array::IntoIter<ByteSegment<'source>, 2>
+    where
+        Self: 'source;
+
+    fn segments(&self) -> Self::Segments<'_> {
+        [
+            ByteSegment::Bytes(&self.first),
+            ByteSegment::Bytes(&self.second),
+        ]
+        .into_iter()
+    }
+}
+
+impl FixedCodec for FragmentedTag {
+    type Value<'wire> = u8;
+    type EncodeError = core::convert::Infallible;
+    type Plan<'value> = FragmentedTagPlan;
+
+    const WIDTH: usize = 2;
+
+    fn decode(bytes: &[u8]) -> Self::Value<'_> {
+        bytes[0]
+    }
+
+    fn plan<'value>(value: Self::Value<'value>) -> Result<Self::Plan<'value>, Self::EncodeError> {
+        Ok(FragmentedTagPlan {
+            first: [value],
+            second: [0xfe],
+        })
+    }
+}
+
+/// Semantic ping-body validation failure.
+#[derive(Debug)]
+pub enum PingError {
+    /// The ping value must not be zero.
+    Zero,
+}
+
+impl core::fmt::Display for PingError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ping value must not be zero")
+    }
+}
+
+impl core::error::Error for PingError {}
+
+fn ping_nonzero(value: u16) -> Result<(), PingError> {
+    if value == 0 {
+        Err(PingError::Zero)
+    } else {
+        Ok(())
+    }
+}
 
 /// A fixed body carried by one operation variant.
 #[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(error = PingError)]
 pub struct Ping {
     /// Network-order ping value.
-    #[wire(be)]
+    #[wire(be, validate = ping_nonzero)]
     pub value: u16,
 }
 
@@ -21,6 +114,17 @@ pub enum Operation {
     Ping(Ping) = 1,
     /// Carries no body.
     Halt = 2,
+}
+
+/// An enum with a custom tag plan split across two physical segments.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(tag = FragmentedTag, unknown = reject)]
+#[repr(u8)]
+pub enum FragmentedOperation {
+    /// Carries a fixed ping body after the fragmented tag.
+    Ping(Ping) = 2,
+    /// Carries no body after the fragmented tag.
+    Halt = 3,
 }
 
 /// Two independent tagged selections between fixed siblings.
@@ -96,15 +200,36 @@ impl Opcodes {
 #[wire(
     tag = U8,
     opcodes = Opcodes,
-    opcode_error = OpcodeMapError,
+    opcodes_error = OpcodeMapError,
     unknown = reject
 )]
 pub enum MappedOperation {
     /// Carries a fixed ping body.
-    #[wire(opcode = Opcode::Ping)]
+    #[wire(opcodes = Opcode::Ping)]
     Ping(Ping),
     /// Carries no body.
-    #[wire(opcode = Opcode::Halt)]
+    #[wire(opcodes = Opcode::Halt)]
+    Halt,
+}
+
+/// A table-named operation mapping, deliberately unrelated to the legacy `opcodes` spelling.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(tag = U8, table = Opcodes, table_error = OpcodeMapError, unknown = reject)]
+pub enum TableOperation {
+    /// Carries a fixed ping body.
+    #[wire(table = Opcode::Ping)]
+    Ping(Ping),
+    /// Carries no body.
+    #[wire(table = Opcode::Halt)]
+    Halt,
+}
+
+/// A table-selected tag-only enum.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(tag = U8, table = Opcodes, table_error = OpcodeMapError, unknown = reject)]
+pub enum TableSignal {
+    /// Carries no body.
+    #[wire(table = Opcode::Halt)]
     Halt,
 }
 
@@ -126,6 +251,30 @@ pub struct MappedPacket {
     pub tail: u8,
 }
 
+/// A struct forwarding a schema-named table to two independent fields.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(table = Opcodes)]
+pub struct TablePacket {
+    /// First mapped operation.
+    #[wire(table)]
+    pub first: TableOperation,
+    /// Second mapped operation.
+    #[wire(table)]
+    pub second: TableOperation,
+}
+
+/// A borrowed packet forwarding a table into a tag-only child.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(table = Opcodes)]
+pub struct BorrowedTablePacket<'wire> {
+    /// Selected signal.
+    #[wire(table)]
+    pub signal: TableSignal,
+    /// Remaining borrowed payload.
+    #[wire(rest)]
+    pub payload: &'wire [u8],
+}
+
 /// A wide big-endian tag.
 #[derive(Debug, Eq, PartialEq, Wire)]
 #[wire(tag = BeU16)]
@@ -144,6 +293,83 @@ pub struct BorrowedBody<'wire> {
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
+}
+
+/// A table-selected enum whose semantic body carries a borrow.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(tag = U8, table = Opcodes, table_error = OpcodeMapError, unknown = reject)]
+pub enum BorrowedTableOperation<'wire> {
+    /// Carries a borrowed body.
+    #[wire(table = Opcode::Ping)]
+    Ping(BorrowedBody<'wire>),
+}
+
+/// A borrowed parent forwarding its table to a borrowed enum body.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(table = Opcodes)]
+pub struct BorrowedTableEnvelope<'wire> {
+    /// Selected borrowed operation.
+    #[wire(table)]
+    pub operation: BorrowedTableOperation<'wire>,
+}
+
+/// A borrowed forwarding struct whose plan does not otherwise need its semantic lifetime.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(table = Opcodes)]
+pub struct BorrowedTableChild<'wire> {
+    /// Selected bodyless operation.
+    #[wire(table)]
+    pub signal: TableSignal,
+    /// Remaining borrowed payload.
+    #[wire(rest)]
+    pub payload: &'wire [u8],
+}
+
+/// A borrowed parent forwarding through another dynamic struct.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(table = Opcodes)]
+pub struct BorrowedTableParent<'wire> {
+    /// Nested forwarding child.
+    #[wire(table)]
+    pub child: BorrowedTableChild<'wire>,
+}
+
+/// Human-owned validation error for a forwarding struct.
+#[derive(Debug, Eq, PartialEq)]
+pub enum CustomTableEnvelopeError {
+    /// Parent framing failed.
+    Decode,
+    /// Nested signal validation failed.
+    Signal,
+}
+
+impl core::fmt::Display for CustomTableEnvelopeError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl core::error::Error for CustomTableEnvelopeError {}
+
+impl From<CustomTableEnvelopeDecodeError<'_>> for CustomTableEnvelopeError {
+    fn from(_: CustomTableEnvelopeDecodeError<'_>) -> Self {
+        Self::Decode
+    }
+}
+
+impl From<TableSignalDecodeError<'_>> for CustomTableEnvelopeError {
+    fn from(_: TableSignalDecodeError<'_>) -> Self {
+        Self::Signal
+    }
+}
+
+/// A forwarding struct selecting a human-owned validation error.
+#[derive(Debug, Eq, PartialEq, Wire)]
+#[wire(table = Opcodes, error = CustomTableEnvelopeError)]
+pub struct CustomTableEnvelope {
+    /// Selected bodyless operation.
+    #[wire(table)]
+    pub signal: TableSignal,
 }
 
 /// A tagged semantic enum retaining its input lifetime.
@@ -215,15 +441,17 @@ fn enum_framing_handles_unit_body_unknown_and_truncation() {
 
     assert!(matches!(
         Operation::view(&[3]).without_trailing(),
-        Err(OperationDecodeError::UnknownTag { tag: 3 })
+        Err(OperationValidationError::Decode(
+            OperationDecodeError::UnknownTag { tag: 3 }
+        ))
     ));
     let error = Operation::view(&[]).without_trailing().unwrap_err();
     assert!(matches!(
         error,
-        OperationDecodeError::InputTooShort {
+        OperationValidationError::Decode(OperationDecodeError::InputTooShort {
             required: 1,
             available: 0,
-        }
+        })
     ));
     assert_eq!(
         error.to_string(),
@@ -231,17 +459,22 @@ fn enum_framing_handles_unit_body_unknown_and_truncation() {
     );
 
     let error = Operation::view(&[3]).without_trailing().unwrap_err();
-    assert!(matches!(error, OperationDecodeError::UnknownTag { tag: 3 }));
+    assert!(matches!(
+        error,
+        OperationValidationError::Decode(OperationDecodeError::UnknownTag { tag: 3 })
+    ));
     assert_eq!(error.to_string(), "unknown wire tag 3");
 
     let error = Operation::view(&[1, 0]).without_trailing().unwrap_err();
     assert!(matches!(
         error,
-        OperationDecodeError::Ping(PingDecodeError::InputTooShort {
-            field: "value",
-            required: 2,
-            available: 1,
-        })
+        OperationValidationError::Decode(OperationDecodeError::Ping(
+            PingDecodeError::InputTooShort {
+                field: "value",
+                required: 2,
+                available: 1,
+            }
+        ))
     ));
     assert_eq!(
         error.to_string(),
@@ -251,10 +484,10 @@ fn enum_framing_handles_unit_body_unknown_and_truncation() {
     let error = Operation::view(&[2, 99]).without_trailing().unwrap_err();
     assert!(matches!(
         error,
-        OperationDecodeError::TrailingBytes {
+        OperationValidationError::Decode(OperationDecodeError::TrailingBytes {
             expected: 1,
             actual: 2,
-        }
+        })
     ));
     assert_eq!(
         error.to_string(),
@@ -289,9 +522,9 @@ fn nested_enum_fields_round_trip_and_short_output_is_atomic() {
 
     assert!(matches!(
         Packet::view(&[9, 3, 8, 2, 7]).without_trailing(),
-        Err(PacketDecodeError::First(OperationDecodeError::UnknownTag {
-            tag: 3,
-        }))
+        Err(PacketValidationError::Decode(PacketDecodeError::First(
+            OperationDecodeError::UnknownTag { tag: 3 }
+        )))
     ));
 
     let mut short = [0xa5; 6];
@@ -304,6 +537,14 @@ fn nested_enum_fields_round_trip_and_short_output_is_atomic() {
     };
     assert!(packet.build_into(&mut short).is_err());
     assert_eq!(short, [0xa5; 6]);
+}
+
+#[test]
+fn enum_byte_source_emits_tag_before_selected_body() {
+    let plan = Operation::Ping(Ping { value: 0x1234 }).prepare().unwrap();
+    let mut sink = RecordingSink::default();
+    plan.emit_to(&mut sink);
+    assert_eq!(sink.writes, [vec![1], vec![0x12, 0x34]]);
 }
 
 #[test]
@@ -374,7 +615,9 @@ fn runtime_opcode_mapping_is_bidirectional_and_explicit() {
         MappedOperation::view(&[0x55])
             .opcodes(&opcodes)
             .without_trailing(),
-        Err(MappedOperationDecodeError::UnknownTag { tag: 0x55 })
+        Err(MappedOperationValidationError::Decode(
+            MappedOperationDecodeError::UnknownTag { tag: 0x55 }
+        ))
     ));
 
     let failing = Opcodes {
@@ -386,7 +629,9 @@ fn runtime_opcode_mapping_is_bidirectional_and_explicit() {
         MappedOperation::view(&[0x41])
             .opcodes(&failing)
             .without_trailing(),
-        Err(MappedOperationDecodeError::OpcodeMapping(OpcodeMapError))
+        Err(MappedOperationValidationError::Decode(
+            MappedOperationDecodeError::OperationMapping(OpcodeMapError)
+        ))
     ));
 
     let plan = MappedOperation::Halt.opcodes(&opcodes).prepare().unwrap();
@@ -435,6 +680,262 @@ fn one_opcode_input_composes_across_independent_enum_fields() {
     let (written, suffix) = plan.commit_into(&mut output).unwrap();
     assert_eq!(written.as_bytes(), &input[..7]);
     assert_eq!(suffix, &mut [0xa5]);
+
+    let failing = Opcodes {
+        ping: 0x31,
+        halt: 0x62,
+        fail: true,
+    };
+    assert!(matches!(
+        MappedPacket::view(&input)
+            .opcodes(&failing)
+            .with_remainder(),
+        Err(MappedPacketValidationError::Decode(
+            MappedPacketDecodeError::First(MappedOperationDecodeError::OperationMapping(
+                OpcodeMapError
+            ))
+        ))
+    ));
+    assert!(matches!(
+        MappedPacket {
+            lead: 9,
+            first: MappedOperation::Ping(Ping { value: 0x1234 }),
+            separator: 8,
+            second: MappedOperation::Halt,
+            tail: 7,
+        }
+        .opcodes(&failing)
+        .prepare(),
+        Err(MappedPacketEncodeError::First(
+            MappedOperationEncodeError::OperationMapping(OpcodeMapError)
+        ))
+    ));
+}
+
+#[test]
+fn opcode_validated_cursor_retains_the_failing_item() {
+    let opcodes = Opcodes {
+        ping: 0x31,
+        halt: 0x62,
+        fail: false,
+    };
+    let input = [9, 0x62, 8, 0x62, 7, 9, 0x55, 8, 0x62, 7];
+    let mut cursor = MappedPacket::cursor(&input).opcodes(&opcodes);
+    assert!(cursor.next().unwrap().is_some());
+    assert_eq!(cursor.remaining(), &input[5..]);
+    assert!(matches!(
+        cursor.next(),
+        Err(wire_repr::ViewCursorError::Item(
+            MappedPacketValidationError::Decode(MappedPacketDecodeError::First(
+                MappedOperationDecodeError::UnknownTag { tag: 0x55 }
+            ))
+        ))
+    ));
+    assert_eq!(cursor.remaining(), &input[5..]);
+    let mut unchecked = cursor.unchecked();
+    assert!(matches!(
+        unchecked.next(),
+        Err(wire_repr::ViewCursorError::Item(
+            MappedPacketDecodeError::First(MappedOperationDecodeError::UnknownTag { tag: 0x55 })
+        ))
+    ));
+    assert_eq!(unchecked.remaining(), &input[5..]);
+}
+
+#[test]
+fn table_named_enum_requests_are_direct_and_do_not_retain_the_table() {
+    let input = [0x41, 0x12, 0x34, 0xaa];
+    let view = {
+        let table = Opcodes {
+            ping: 0x41,
+            halt: 0x7f,
+            fail: false,
+        };
+        let (view, suffix) = TableOperation::view(&input)
+            .table(&table)
+            .with_remainder()
+            .unwrap();
+        assert_eq!(suffix, &[0xaa]);
+        view
+    };
+    assert_eq!(view.ping().unwrap().value(), 0x1234);
+
+    let plan = {
+        let table = Opcodes {
+            ping: 0x41,
+            halt: 0x7f,
+            fail: false,
+        };
+        TableOperation::Halt.table(&table).prepare().unwrap()
+    };
+    let mut output = [0_u8; 1];
+    assert_eq!(plan.commit_into(&mut output).unwrap().0.as_bytes(), &[0x7f]);
+
+    let table = Opcodes {
+        ping: 0x41,
+        halt: 0x7f,
+        fail: false,
+    };
+    let mut cursor = TableOperation::cursor(&[0x7f, 0x55]).table(&table);
+    assert!(cursor.next().unwrap().unwrap().is_halt());
+    assert!(matches!(
+        cursor.next(),
+        Err(wire_repr::ViewCursorError::Item(
+            TableOperationValidationError::Decode(TableOperationDecodeError::UnknownTag {
+                tag: 0x55
+            })
+        ))
+    ));
+    assert_eq!(cursor.remaining(), &[0x55]);
+    let mut unchecked = cursor.unchecked();
+    assert!(matches!(
+        unchecked.next(),
+        Err(wire_repr::ViewCursorError::Item(
+            TableOperationDecodeError::UnknownTag { tag: 0x55 }
+        ))
+    ));
+}
+
+#[test]
+fn table_named_structs_forward_explicitly_without_retaining_the_table() {
+    let input = [0x41, 0x12, 0x34, 0x7f, 0xaa];
+    let view = {
+        let table = Opcodes {
+            ping: 0x41,
+            halt: 0x7f,
+            fail: false,
+        };
+        let (view, suffix) = TablePacket::view(&input)
+            .table(&table)
+            .with_remainder()
+            .unwrap();
+        assert_eq!(suffix, &[0xaa]);
+        view
+    };
+    assert_eq!(view.first().ping().unwrap().value(), 0x1234);
+    assert!(view.second().is_halt());
+
+    let plan = {
+        let table = Opcodes {
+            ping: 0x41,
+            halt: 0x7f,
+            fail: false,
+        };
+        TablePacket {
+            first: TableOperation::Ping(Ping { value: 0x1234 }),
+            second: TableOperation::Halt,
+        }
+        .table(&table)
+        .prepare()
+        .unwrap()
+    };
+    let mut output = [0_u8; 4];
+    assert_eq!(
+        plan.commit_into(&mut output).unwrap().0.as_bytes(),
+        &[0x41, 0x12, 0x34, 0x7f]
+    );
+
+    let table = Opcodes {
+        ping: 0x41,
+        halt: 0x7f,
+        fail: false,
+    };
+    let cursor_input = [0x7f, 0x7f, 0x55, 0x7f];
+    let mut cursor = TablePacket::cursor(&cursor_input).table(&table);
+    assert!(cursor.next().unwrap().is_some());
+    assert_eq!(cursor.remaining(), &cursor_input[2..]);
+    assert!(cursor.next().is_err());
+    assert_eq!(cursor.remaining(), &cursor_input[2..]);
+    let mut unchecked = cursor.unchecked();
+    assert!(unchecked.next().is_err());
+    assert_eq!(unchecked.remaining(), &cursor_input[2..]);
+}
+
+#[test]
+fn borrowed_table_structs_support_tag_only_children() {
+    let table = Opcodes {
+        ping: 0x41,
+        halt: 0x7f,
+        fail: false,
+    };
+    let input = [0x7f, 0xaa, 0xbb];
+    let view = BorrowedTablePacket::view(&input)
+        .table(&table)
+        .without_trailing()
+        .unwrap();
+    assert!(view.signal().is_halt());
+    assert_eq!(view.payload(), &[0xaa, 0xbb]);
+
+    let value = BorrowedTablePacket {
+        signal: TableSignal::Halt,
+        payload: &[0xaa, 0xbb],
+    };
+    let mut output = [0_u8; 3];
+    let (written, suffix) = value.table(&table).build_into(&mut output).unwrap();
+    assert_eq!(written.as_bytes(), &input);
+    assert!(suffix.is_empty());
+}
+
+#[test]
+fn borrowed_table_structs_support_borrowed_enum_bodies() {
+    let table = Opcodes {
+        ping: 0x41,
+        halt: 0x7f,
+        fail: false,
+    };
+    let input = [0x41, 2, 0xaa, 0xbb];
+    let view = BorrowedTableEnvelope::view(&input)
+        .table(&table)
+        .without_trailing()
+        .unwrap();
+    let body = view.operation().ping().unwrap();
+    assert_eq!(body.payload(), &[0xaa, 0xbb]);
+
+    let value = BorrowedTableEnvelope {
+        operation: BorrowedTableOperation::Ping(BorrowedBody {
+            length: 2,
+            payload: &[0xaa, 0xbb],
+        }),
+    };
+    let mut output = [0_u8; 4];
+    let (written, suffix) = value.table(&table).build_into(&mut output).unwrap();
+    assert_eq!(written.as_bytes(), &input);
+    assert!(suffix.is_empty());
+}
+
+#[test]
+fn borrowed_struct_forwarding_and_custom_errors_keep_generated_contracts_coherent() {
+    let table = Opcodes {
+        ping: 0x41,
+        halt: 0x7f,
+        fail: false,
+    };
+    let input = [0x7f, 0xaa, 0xbb];
+    let parent = BorrowedTableParent::view(&input)
+        .table(&table)
+        .without_trailing()
+        .unwrap();
+    assert!(parent.child().signal().is_halt());
+    assert_eq!(parent.child().payload(), &[0xaa, 0xbb]);
+
+    let plan = BorrowedTableParent {
+        child: BorrowedTableChild {
+            signal: TableSignal::Halt,
+            payload: &[0xaa, 0xbb],
+        },
+    }
+    .table(&table)
+    .prepare()
+    .unwrap();
+    let mut output = [0_u8; 3];
+    assert_eq!(plan.commit_into(&mut output).unwrap().0.as_bytes(), &input);
+
+    assert!(matches!(
+        CustomTableEnvelope::view(&[0x7f, 0xaa])
+            .table(&table)
+            .without_trailing(),
+        Err(CustomTableEnvelopeError::Decode)
+    ));
 }
 
 #[test]
@@ -448,10 +949,12 @@ fn fixed_byte_tags_decode_known_variants_and_preserve_framing() {
     assert!(core::ptr::eq(suffix.as_ptr(), input[4..].as_ptr()));
     assert!(matches!(
         ByteOperation::view(&input).without_trailing(),
-        Err(ByteOperationDecodeError::TrailingBytes {
-            expected: 4,
-            actual: 5,
-        })
+        Err(ByteOperationValidationError::Decode(
+            ByteOperationDecodeError::TrailingBytes {
+                expected: 4,
+                actual: 5,
+            }
+        ))
     ));
 
     let ping = ByteOperation::view(b"PING\x12\x34")
@@ -462,14 +965,16 @@ fn fixed_byte_tags_decode_known_variants_and_preserve_framing() {
 
     assert!(matches!(
         ByteOperation::view(b"NOPE").without_trailing(),
-        Err(ByteOperationDecodeError::UnknownTag { tag }) if tag == *b"NOPE"
+        Err(ByteOperationValidationError::Decode(ByteOperationDecodeError::UnknownTag { tag })) if tag == *b"NOPE"
     ));
     assert!(matches!(
         ByteOperation::view(b"PNG").with_remainder(),
-        Err(ByteOperationDecodeError::InputTooShort {
-            required: 4,
-            available: 3,
-        })
+        Err(ByteOperationValidationError::Decode(
+            ByteOperationDecodeError::InputTooShort {
+                required: 4,
+                available: 3,
+            }
+        ))
     ));
 }
 
@@ -525,4 +1030,169 @@ fn open_integer_tags_preserve_the_raw_scalar() {
         .unwrap();
     assert_eq!(written.as_bytes(), &[0xfe]);
     assert_eq!(suffix, &mut [0xa5]);
+}
+
+#[test]
+fn enum_body_validation_is_fail_closed_and_composes_into_parents() {
+    let invalid = [1, 0, 0];
+    assert!(matches!(
+        Operation::view(&invalid).without_trailing(),
+        Err(OperationValidationError::Ping(PingError::Zero))
+    ));
+    assert!(matches!(
+        Operation::view(&[1, 0, 0, 0xaa]).without_trailing(),
+        Err(OperationValidationError::Ping(PingError::Zero))
+    ));
+    assert_eq!(
+        Operation::view(&invalid)
+            .unchecked()
+            .without_trailing()
+            .unwrap()
+            .ping()
+            .unwrap()
+            .value(),
+        0
+    );
+
+    let parent = [9, 1, 0, 0, 8, 2, 7];
+    assert!(matches!(
+        Packet::view(&parent).without_trailing(),
+        Err(PacketValidationError::NestedFirst(
+            OperationValidationError::Ping(PingError::Zero)
+        ))
+    ));
+    assert_eq!(
+        Packet::view(&parent)
+            .unchecked()
+            .without_trailing()
+            .unwrap()
+            .first()
+            .ping()
+            .unwrap()
+            .value(),
+        0
+    );
+
+    let cursor_input = [1, 0, 0, 2];
+    let mut cursor = Operation::cursor(&cursor_input);
+    assert!(matches!(
+        cursor.next(),
+        Err(wire_repr::ViewCursorError::Item(
+            OperationValidationError::Ping(PingError::Zero)
+        ))
+    ));
+    assert_eq!(cursor.remaining(), &cursor_input);
+    let mut unchecked = cursor.unchecked();
+    assert_eq!(
+        unchecked.next().unwrap().unwrap().ping().unwrap().value(),
+        0
+    );
+    assert_eq!(unchecked.remaining(), &[2]);
+}
+
+#[test]
+fn table_operation_body_validation_is_fail_closed() {
+    let table = Opcodes {
+        ping: 0x41,
+        halt: 0x7f,
+        fail: false,
+    };
+    let input = [0x41, 0, 0, 0xaa];
+    assert!(matches!(
+        TableOperation::view(&input)
+            .table(&table)
+            .without_trailing(),
+        Err(TableOperationValidationError::Ping(PingError::Zero))
+    ));
+    assert_eq!(
+        TableOperation::view(&input)
+            .table(&table)
+            .unchecked()
+            .with_remainder()
+            .unwrap()
+            .0
+            .ping()
+            .unwrap()
+            .value(),
+        0
+    );
+    let mut cursor = TableOperation::cursor(&input).table(&table);
+    assert!(matches!(
+        cursor.next(),
+        Err(wire_repr::ViewCursorError::Item(
+            TableOperationValidationError::Ping(PingError::Zero)
+        ))
+    ));
+    assert_eq!(cursor.remaining(), &input);
+}
+
+fn cursor_byte_sum(source: &impl ByteSourceCursor) -> u8 {
+    source.bytes().fold(0, u8::wrapping_add)
+}
+
+/// A parent whose checksum includes the complete prepared enum representation.
+#[derive(Wire)]
+pub struct EnumCursorChecksum<'wire> {
+    /// Sum of the selected enum's physical bytes.
+    #[wire(computed = cursor_byte_sum(include(operation)))]
+    pub checksum: Computed<u8>,
+    /// Tagged operation selected by the checksum.
+    pub operation: Operation,
+    /// Retains the wire lifetime without adding bytes.
+    #[wire(rest)]
+    pub rest: &'wire [u8],
+}
+
+/// A parent whose checksum consumes a fragmented prepared enum tag before its body.
+#[derive(Wire)]
+pub struct FragmentedEnumCursorChecksum<'wire> {
+    /// Sum of the selected enum's physical bytes.
+    #[wire(computed = cursor_byte_sum(include(operation)))]
+    pub checksum: Computed<u8>,
+    /// Tagged operation selected by the checksum.
+    pub operation: FragmentedOperation,
+    /// Retains the wire lifetime without adding bytes.
+    #[wire(rest)]
+    pub rest: &'wire [u8],
+}
+
+#[test]
+fn computed_include_consumes_complete_enum_cursor() {
+    let mut output = [0; 4];
+    let (written, suffix) = EnumCursorChecksum::builder()
+        .operation(Operation::Ping(Ping { value: 1 }))
+        .rest(&[])
+        .build_into(&mut output)
+        .unwrap();
+
+    assert_eq!(written.as_bytes(), &[2, 1, 0, 1]);
+    assert_eq!(suffix, &mut []);
+    assert_eq!(
+        EnumCursorChecksum::view(written.as_bytes())
+            .without_trailing()
+            .unwrap()
+            .checksum(),
+        2
+    );
+}
+
+#[test]
+fn fragmented_fixed_tag_cursor_drains_every_tag_segment_before_the_body() {
+    let plan = FragmentedOperation::Ping(Ping { value: 1 })
+        .prepare()
+        .unwrap();
+    assert_eq!(plan.bytes().collect::<Vec<_>>(), [2, 0xfe, 0, 1]);
+
+    let unit_plan = FragmentedOperation::Halt.prepare().unwrap();
+    assert_eq!(unit_plan.bytes().collect::<Vec<_>>(), [3, 0xfe]);
+
+    let mut output = [0; 5];
+    let (written, suffix) = FragmentedEnumCursorChecksum::builder()
+        .operation(FragmentedOperation::Ping(Ping { value: 1 }))
+        .rest(&[])
+        .build_into(&mut output)
+        .unwrap();
+
+    assert_eq!(written.as_bytes(), &[1, 2, 0xfe, 0, 1]);
+    assert_eq!(suffix, &mut []);
 }

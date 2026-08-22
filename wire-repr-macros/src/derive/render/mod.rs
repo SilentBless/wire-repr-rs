@@ -9,7 +9,7 @@ use proc_macro2::TokenStream;
 
 pub(super) fn render(model: WireType, runtime: &TokenStream) -> syn::Result<TokenStream> {
     match model {
-        WireType::Struct(model) => r#struct::render(model, runtime),
+        WireType::Struct(model) => r#struct::render(*model, runtime),
         WireType::Enum(model) => r#enum::render(model, runtime),
         WireType::Bitfield(model) => bitfield::render(model, runtime),
     }
@@ -44,6 +44,121 @@ fn generated_view_path(ty: &syn::Type) -> syn::Result<TokenStream> {
             ty,
             "nested wire type path is empty",
         ));
+    }
+    Ok(path)
+}
+
+/// Returns a generated sibling path, retaining the nested type's module path.
+fn generated_named_path(ty: &syn::Type, suffix: &str) -> syn::Result<TokenStream> {
+    let syn::Type::Path(type_path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "nested wire fields must use a direct type path",
+        ));
+    };
+    let mut segments = type_path.path.segments.iter().peekable();
+    let mut path = TokenStream::new();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_some() {
+            path.extend(quote::quote!(#segment::));
+        } else {
+            let name = quote::format_ident!("{}{}", segment.ident, suffix);
+            let arguments = &segment.arguments;
+            path.extend(quote::quote!(#name #arguments));
+        }
+    }
+    Ok(path)
+}
+
+fn generated_decode_error_path(ty: &syn::Type) -> syn::Result<TokenStream> {
+    let syn::Type::Path(type_path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "nested wire fields must use a direct type path",
+        ));
+    };
+    if type_path.qself.is_some() {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "qualified nested wire types are not supported",
+        ));
+    }
+    let mut segments = type_path.path.segments.iter().peekable();
+    let mut path = TokenStream::new();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_some() {
+            path.extend(quote::quote!(#segment::));
+        } else {
+            let error = quote::format_ident!("{}DecodeError", segment.ident);
+            path.extend(quote::quote!(#error<'__wire_repr_wire>));
+        }
+    }
+    Ok(path)
+}
+
+fn generated_encode_error_path(ty: &syn::Type) -> syn::Result<TokenStream> {
+    generated_named_path(ty, "EncodeError")
+}
+
+/// Returns the generated field-proxy sibling path for a direct nested wire type.
+///
+/// Field proxies are generic only over their generated marker scope, so semantic type
+/// arguments on the final nested type segment must not be propagated here.
+fn generated_fields_path(ty: &syn::Type) -> syn::Result<TokenStream> {
+    let syn::Type::Path(type_path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "nested wire fields must use a direct type path",
+        ));
+    };
+    if type_path.qself.is_some() {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "qualified nested wire types are not supported",
+        ));
+    }
+    let mut segments = type_path.path.segments.iter().peekable();
+    let mut path = TokenStream::new();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_some() {
+            path.extend(quote::quote!(#segment::));
+        } else {
+            let fields = quote::format_ident!("{}Fields", segment.ident);
+            path.extend(quote::quote!(#fields));
+        }
+    }
+    Ok(path)
+}
+
+fn generated_plan_path(ty: &syn::Type) -> syn::Result<TokenStream> {
+    let syn::Type::Path(type_path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "nested wire fields must use a direct type path",
+        ));
+    };
+    let mut segments = type_path.path.segments.iter().peekable();
+    let mut path = TokenStream::new();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_some() {
+            path.extend(quote::quote!(#segment::));
+        } else {
+            let name = quote::format_ident!("{}Plan", segment.ident);
+            let inherited = match &segment.arguments {
+                syn::PathArguments::None => TokenStream::new(),
+                syn::PathArguments::AngleBracketed(arguments) => {
+                    let args = &arguments.args;
+                    quote::quote!(#args,)
+                }
+                syn::PathArguments::Parenthesized(_) => {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "nested wire types cannot use parenthesized generic arguments",
+                    ));
+                }
+            };
+            path.extend(quote::quote!(#name<#inherited '__wire_repr_value>));
+        }
     }
     Ok(path)
 }

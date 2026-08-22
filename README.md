@@ -137,17 +137,20 @@ let chunk_type = ChunkType::view(b"vpAg")
 assert_eq!(chunk_type.other(), Some(b"vpAg"));
 ```
 
-For negotiated numeric IDs, an enum may name one concrete consumer-owned opcode table
-with `opcodes = Type` and per-variant `opcode = Path`. Supply it explicitly at the
-boundary:
+For negotiated numeric IDs, a schema names one concrete consumer-owned operation input.
+The declared name is also the generated fluent method and the explicit forwarding marker.
+For example, `opcodes = Type`, per-variant `opcodes = Path`, and `#[wire(opcodes)]` fields
+generate:
 
 ```rust
 Packet::view(bytes).opcodes(&opcodes).without_trailing()
 packet.opcodes(&opcodes).prepare()
 ```
 
-The table maps raw IDs in both directions. It is used during validation or preparation
-and is not retained in the generated view or prepared plan.
+The name is schema-defined except for wire options and generated API method names:
+`table = Type` generates `.table(&table)`, while `offsets = Type` generates
+`.offsets(&offsets)`. The input maps raw IDs in both directions, is forwarded only by matching
+schema names, and is not retained in the generated view or prepared plan.
 
 ## 🚩 Nominal bitfields
 
@@ -234,9 +237,49 @@ assert_eq!(suffix, &mut [0xa5]);
 ```
 
 Preparation completes fallible codec planning, conversions, geometry, canonical length
-sources, opcode mapping, and total-length arithmetic before output mutation. Commit
+sources, operation-input mapping, and total-length arithmetic before output mutation. Commit
 checks full capacity before its first write. A short output remains byte-for-byte
 unchanged.
+
+## 🧮 Select and compute physical bytes
+
+Prepared plans and bytes-backed views expose typed, allocation-free selections of their
+physical representation:
+
+```rust
+let covered = view.bytes().include(|fields| fields.header | fields.payload);
+let signed = view.bytes().exclude(|fields| fields.signature);
+```
+
+Selections stay in physical wire order. Nested paths are supported, and exclusions preserve
+gaps and padding. A fragmented selection is a `ByteSource`: it can stream directly to a sink
+or expose borrowed and virtual repeated-byte segments through `ByteSourceCursor` without
+building a temporary packet-sized buffer.
+
+Computed fields use the same source contract during preparation:
+
+```rust
+use wire_repr::{ByteSourceCursor, Computed, Wire};
+
+fn checksum(source: &impl ByteSourceCursor) -> u8 {
+    source.bytes().fold(0, u8::wrapping_add)
+}
+
+#[derive(Wire)]
+struct Packet<'wire> {
+    #[wire(computed = checksum(exclude(self)))]
+    checksum: Computed<u8>,
+    #[wire(computed = len(payload))]
+    length: Computed<u8>,
+    #[wire(bytes = length)]
+    payload: &'wire [u8],
+}
+```
+
+The selection is the computation's compile-time read-set, so dependencies are ordered
+without relying on declaration order and cycles are rejected by the derive. Reading still
+returns the stored computed value. If stored-value consistency matters, validate it
+separately against the exact-source view selection.
 
 ## 🧪 Real formats
 

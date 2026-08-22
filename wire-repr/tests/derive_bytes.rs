@@ -64,10 +64,7 @@ fn bounded_bytes_report_truncation_and_platform_overflow() {
         let error = WidePacket::view(&input).with_remainder().unwrap_err();
         assert!(matches!(
             error,
-            WidePacketDecodeError::LengthNotRepresentable {
-                field: "payload",
-                value: u128::MAX,
-            }
+            WidePacketDecodeError::LengthNotRepresentable { field: "payload" }
         ));
     }
 }

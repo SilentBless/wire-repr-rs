@@ -1,7 +1,7 @@
 #![deny(missing_docs, unsafe_code)]
 //! Nested `Wire` derive composition coverage.
 
-use wire_repr::{PreparedLayout, Wire};
+use wire_repr::{ByteSource, PreparedLayout, Wire};
 
 /// A child representation between parent fixed fields.
 #[derive(Debug, Eq, PartialEq, Wire)]
@@ -78,19 +78,21 @@ fn nested_decode_preserves_bytes_suffix_and_child_provenance() {
     assert_eq!(copied.first().as_bytes(), first.as_bytes());
     assert!(matches!(
         Parent::view(&bytes).without_trailing(),
-        Err(ParentDecodeError::TrailingBytes {
-            expected: 9,
-            actual: 10
-        })
+        Err(ParentValidationError::Decode(
+            ParentDecodeError::TrailingBytes {
+                expected: 9,
+                actual: 10
+            }
+        ))
     ));
     let error = Parent::view(&[1, 2]).without_trailing().unwrap_err();
     assert!(matches!(
         error,
-        ParentDecodeError::First(ChildDecodeError::InputTooShort {
+        ParentValidationError::Decode(ParentDecodeError::First(ChildDecodeError::InputTooShort {
             field: "value",
             required: 2,
             available: 0
-        })
+        }))
     ));
     assert_eq!(
         error.to_string(),
@@ -109,6 +111,10 @@ fn nested_prepare_commit_is_exact_and_atomic() {
     };
     let plan = parent.prepare().unwrap();
     assert_eq!(plan.encoded_len(), 9);
+    assert_eq!(plan.byte_len(), 9);
+    let mut emitted = [0_u8; 9];
+    plan.write_into(&mut emitted);
+    assert_eq!(emitted, [1, 2, 0, 3, 252, 5, 0, 6, 7]);
     let mut output = [0_u8; 11];
     let (written, suffix) = plan.commit_into(&mut output).unwrap();
     assert_eq!(written.as_bytes(), &[1, 2, 0, 3, 252, 5, 0, 6, 7]);

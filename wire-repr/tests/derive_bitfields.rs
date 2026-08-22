@@ -2,7 +2,7 @@
 
 //! Public nominal bitfield view and prepared-write coverage.
 
-use wire_repr::{PreparedLayout, Wire};
+use wire_repr::{ByteSourceCursor, Computed, PreparedLayout, Wire};
 
 /// A nominal big-endian flags representation.
 #[derive(Debug, Eq, PartialEq, Wire)]
@@ -125,4 +125,45 @@ fn fixed_bitfield_sequences_are_exact_size_iterators() {
     assert_eq!(second.mode(), 1);
     assert!(!second.high());
     assert!(flags.next().is_none());
+}
+
+fn cursor_byte_sum(source: &impl ByteSourceCursor) -> u8 {
+    source.bytes().fold(0, u8::wrapping_add)
+}
+
+/// A parent whose checksum includes the complete prepared bitfield representation.
+#[derive(Wire)]
+pub struct BitfieldCursorChecksum<'wire> {
+    /// Sum of the selected bitfield's physical bytes.
+    #[wire(computed = cursor_byte_sum(include(flags)))]
+    pub checksum: Computed<u8>,
+    /// Nominal bitfield selected by the checksum.
+    pub flags: Flags,
+    /// Retains the wire lifetime without adding bytes.
+    #[wire(rest)]
+    pub rest: &'wire [u8],
+}
+
+#[test]
+fn computed_include_consumes_complete_bitfield_cursor() {
+    let mut output = [0; 3];
+    let (written, suffix) = BitfieldCursorChecksum::builder()
+        .flags(Flags {
+            enabled: true,
+            mode: 0,
+            high: true,
+        })
+        .rest(&[])
+        .build_into(&mut output)
+        .unwrap();
+
+    assert_eq!(written.as_bytes(), &[0x81, 0x80, 0x01]);
+    assert_eq!(suffix, &mut []);
+    assert_eq!(
+        BitfieldCursorChecksum::view(written.as_bytes())
+            .without_trailing()
+            .unwrap()
+            .checksum(),
+        0x81
+    );
 }

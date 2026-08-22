@@ -1,5 +1,7 @@
 //! Derive source model.
 
+mod syntax;
+
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use std::collections::BTreeSet;
@@ -8,8 +10,14 @@ use syn::{
     Type, Visibility,
 };
 
+use syntax::{
+    ComputationBytes, ComputationSyntax, WireAttribute, parse_enum_attributes,
+    parse_field_wire_attributes, parse_struct_attributes, parse_variant_attributes,
+    reject_wire_attributes,
+};
+
 pub(super) enum WireType {
-    Struct(WireStruct),
+    Struct(Box<WireStruct>),
     Enum(WireEnum),
     Bitfield(WireBitfield),
 }
@@ -32,8 +40,11 @@ pub(super) struct WireStruct {
     pub(super) vis: Visibility,
     pub(super) name: Ident,
     pub(super) wire_lifetime: Option<Lifetime>,
-    pub(super) opcodes: Option<Path>,
+    pub(super) operation_input: Option<OperationInput>,
+    pub(super) validators: Vec<Path>,
+    pub(super) validation_error: Option<Type>,
     pub(super) fields: Vec<Field>,
+    pub(super) computation_order: Vec<usize>,
 }
 
 pub(super) struct WireEnum {
@@ -42,7 +53,7 @@ pub(super) struct WireEnum {
     pub(super) wire_lifetime: Option<Lifetime>,
     pub(super) tag: EnumTag,
     pub(super) unknown: UnknownPolicy,
-    pub(super) opcodes: Option<OpcodeInput>,
+    pub(super) operation_input: Option<OperationInput>,
     pub(super) variants: Vec<Variant>,
 }
 
@@ -53,7 +64,32 @@ pub(super) struct Field {
     pub(super) position: Option<FieldPosition>,
     pub(super) padding_before: usize,
     pub(super) alignment_before: Option<usize>,
-    pub(super) uses_opcodes: bool,
+    pub(super) operation_input: Option<Ident>,
+    pub(super) validators: Vec<Path>,
+    pub(super) computation: Option<Computation>,
+}
+
+pub(super) struct Computation {
+    /// Raw semantic value encoded for this computed field.
+    pub(super) value_ty: Type,
+    pub(super) operation: ComputationOperation,
+    pub(super) bytes: ComputationByteSelection,
+}
+
+pub(super) enum ComputationOperation {
+    Length,
+    Callback(Path),
+}
+
+pub(super) enum ComputationByteSelection {
+    Include(Vec<ComputationFieldPath>),
+    ExcludeSelf,
+}
+
+pub(super) struct ComputationFieldPath {
+    pub(super) top_level: Ident,
+    pub(super) top_level_index: usize,
+    pub(super) nested: Vec<Ident>,
 }
 
 pub(super) enum FieldPosition {
@@ -72,7 +108,7 @@ pub(super) enum FieldKind {
 pub(super) struct Variant {
     pub(super) name: Ident,
     pub(super) selector: VariantSelector,
-    pub(super) opcode: Option<Path>,
+    pub(super) operation_selector: Option<Path>,
     pub(super) body: Option<Type>,
 }
 
@@ -99,12 +135,13 @@ enum SelectorKey {
     Integer(u128),
     Bytes(Vec<u8>),
     Unknown,
-    Opcode(String),
+    Operation(String),
 }
 
-pub(super) struct OpcodeInput {
-    pub(super) table: Path,
-    pub(super) error: Path,
+pub(super) struct OperationInput {
+    pub(super) name: Ident,
+    pub(super) ty: Path,
+    pub(super) error: Option<Path>,
 }
 
 pub(super) enum Codec {
@@ -114,7 +151,8 @@ pub(super) enum Codec {
 }
 
 pub(super) struct TagCodec {
-    pub(super) codec: &'static str,
+    pub(super) codec: String,
+    pub(super) builtin: bool,
     pub(super) ty: &'static str,
     pub(super) max: u128,
 }
@@ -152,9 +190,15 @@ impl WireType {
     ) -> syn::Result<Self> {
         let attributes = parse_struct_attributes(&attributes)?;
         if let Some(storage) = attributes.bitfield {
+            if !attributes.validators.is_empty() || attributes.validation_error.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "validators are not supported on bitfields",
+                ));
+            }
             return parse_bitfield(generics, vis, name, fields, storage);
         }
-        let opcodes = attributes.opcodes;
+        let operation_input = attributes.operation_input;
         let wire_lifetime = parse_wire_lifetime(&generics, "Wire structs")?;
         let Fields::Named(fields) = fields else {
             return Err(syn::Error::new_spanned(
@@ -174,9 +218,49 @@ impl WireType {
             .into_iter()
             .map(Field::parse)
             .collect::<syn::Result<Vec<_>>>()?;
+        let has_explicit_validators = !attributes.validators.is_empty()
+            || fields.iter().any(|field| !field.validators.is_empty());
+        let has_nested_validation = fields
+            .iter()
+            .any(|field| matches!(field.kind, FieldKind::Nested));
+        match (
+            has_explicit_validators,
+            has_nested_validation,
+            attributes.validation_error.is_some(),
+        ) {
+            (true, _, false) => {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "validators require exactly one `error = ErrorType`",
+                ));
+            }
+            (false, false, true) => {
+                return Err(syn::Error::new_spanned(
+                    attributes.validation_error.as_ref().expect("checked"),
+                    "`error = ErrorType` requires a validator or nested validated field",
+                ));
+            }
+            _ => {}
+        }
         validate_byte_fields(&mut fields, wire_lifetime.as_ref())?;
         validate_positions(&mut fields)?;
-        validate_opcode_fields(&fields, opcodes.as_ref())?;
+        validate_operation_fields(&fields, operation_input.as_ref())?;
+        let computation_order = validate_computations(&mut fields)?;
+        if fields.iter().any(|field| field.computation.is_some()) {
+            let reserved = operation_input
+                .as_ref()
+                .map(|input| input.name.to_string())
+                .into_iter()
+                .chain(["prepare".to_owned(), "build_into".to_owned()]);
+            if let Some(field) = fields.iter().find(|field| {
+                field.computation.is_none() && reserved.clone().any(|method| field.name == method)
+            }) {
+                return Err(syn::Error::new_spanned(
+                    &field.name,
+                    "computed builders reserve operation-input, `prepare`, and `build_into` method names",
+                ));
+            }
+        }
         for (index, field) in fields.iter().enumerate() {
             if matches!(field.kind, FieldKind::Rest) {
                 if index + 1 != fields.len() {
@@ -194,13 +278,16 @@ impl WireType {
             }
         }
 
-        Ok(Self::Struct(WireStruct {
+        Ok(Self::Struct(Box::new(WireStruct {
             vis,
             name,
             wire_lifetime,
-            opcodes,
+            operation_input,
+            validators: attributes.validators,
+            validation_error: attributes.validation_error,
             fields,
-        }))
+            computation_order,
+        })))
     }
 
     fn parse_enum(
@@ -228,39 +315,54 @@ impl WireType {
             ));
         }
 
-        let opcodes = match (attributes.opcodes, attributes.opcode_error) {
-            (Some(table), Some(error)) => Some(OpcodeInput { table, error }),
-            (Some(_), None) => {
+        let operation_input = match (attributes.operation_input, attributes.operation_error) {
+            (Some(mut input), Some((error_name, error))) if error_name == input.name => {
+                input.error = Some(error);
+                Some(input)
+            }
+            (Some(input), None) => {
                 return Err(syn::Error::new_spanned(
                     &name,
-                    "dynamic opcode enums require `opcode_error = ErrorType`",
+                    format!(
+                        "dynamic operation enums require `{}_error = ErrorType`",
+                        input.name
+                    ),
                 ));
             }
-            (None, Some(error)) => {
+            (Some(input), Some((error_name, error))) => {
                 return Err(syn::Error::new_spanned(
                     error,
-                    "`opcode_error` requires `opcodes = OpcodeTable`",
+                    format!(
+                        "`{}_error` does not match declared operation input `{}`",
+                        error_name, input.name
+                    ),
+                ));
+            }
+            (None, Some((error_name, error))) => {
+                return Err(syn::Error::new_spanned(
+                    error,
+                    format!("`{}_error` requires a matching operation input", error_name),
                 ));
             }
             (None, None) => None,
         };
-        if matches!(tag, EnumTag::Bytes { .. }) && opcodes.is_some() {
+        if matches!(tag, EnumTag::Bytes { .. }) && operation_input.is_some() {
             return Err(syn::Error::new_spanned(
                 &name,
-                "dynamic opcode enums cannot use fixed byte tag selectors",
+                "dynamic operation enums cannot use fixed byte tag selectors",
             ));
         }
-        if matches!(unknown, UnknownPolicy::Preserve) && opcodes.is_some() {
+        if matches!(unknown, UnknownPolicy::Preserve) && operation_input.is_some() {
             return Err(syn::Error::new_spanned(
                 &name,
-                "dynamic opcode enums currently require `unknown = reject`",
+                "dynamic operation enums currently require `unknown = reject`",
             ));
         }
 
         let mut selectors = BTreeSet::new();
         let variants = variants
             .into_iter()
-            .map(|variant| Variant::parse(variant, &tag, opcodes.is_some(), &mut selectors))
+            .map(|variant| Variant::parse(variant, &tag, operation_input.as_ref(), &mut selectors))
             .collect::<syn::Result<Vec<_>>>()?;
         let has_unknown = variants
             .iter()
@@ -287,7 +389,7 @@ impl WireType {
             wire_lifetime,
             tag,
             unknown,
-            opcodes,
+            operation_input,
             variants,
         }))
     }
@@ -335,22 +437,46 @@ impl Field {
             ));
         };
         let attributes = parse_field_wire_attributes(&field.attrs)?;
+        let value_ty = attributes
+            .computation
+            .is_some()
+            .then(|| computed_value_type(&field.ty))
+            .transpose()?;
+        let representation_ty = value_ty.as_ref().unwrap_or(&field.ty);
         let kind = match attributes.representation {
             WireAttribute::Custom(path) => FieldKind::Fixed(Codec::Custom(path)),
-            WireAttribute::Endian(big_endian) => {
-                FieldKind::Fixed(builtin_codec(&field.ty, Some(big_endian)).ok_or_else(|| {
+            WireAttribute::Endian(big_endian) => FieldKind::Fixed(
+                builtin_codec(representation_ty, Some(big_endian)).ok_or_else(|| {
                     syn::Error::new_spanned(
-                        &field.ty,
+                        representation_ty,
                         "wire endian attributes require a multi-byte integer field",
                     )
-                })?)
-            }
+                })?,
+            ),
             WireAttribute::Prefix(path) => FieldKind::Prefix(path),
             WireAttribute::Bytes(source) => FieldKind::Bytes {
                 source,
                 source_index: usize::MAX,
             },
             WireAttribute::Rest => FieldKind::Rest,
+            WireAttribute::None if attributes.computation.is_some() => {
+                match builtin_codec(representation_ty, None) {
+                    Some(codec) => FieldKind::Fixed(codec),
+                    None if is_multibyte_integer(representation_ty) => {
+                        return Err(syn::Error::new_spanned(
+                            representation_ty,
+                            "multi-byte integer fields require #[wire(be)] or #[wire(le)]",
+                        ));
+                    }
+                    None => FieldKind::Nested,
+                }
+            }
+            WireAttribute::None if is_computed_marker(&field.ty) => {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "Computed<T> fields require `#[wire(computed = len(field))]`, `#[wire(computed = callback(include(field, ...)))]`, or `#[wire(computed = callback(exclude(self)))]`",
+                ));
+            }
             WireAttribute::None => match builtin_codec(&field.ty, None) {
                 Some(codec) => FieldKind::Fixed(codec),
                 None if is_multibyte_integer(&field.ty) => {
@@ -362,7 +488,77 @@ impl Field {
                 None => FieldKind::Nested,
             },
         };
-
+        let computation = match attributes.computation {
+            Some(ComputationSyntax::Length(target)) => {
+                let value_ty = value_ty.expect("computed fields have a semantic type");
+                if attributes.position.is_some()
+                    || attributes.padding_before.is_some()
+                    || attributes.alignment_before.is_some()
+                    || attributes.operation_input.is_some()
+                {
+                    return Err(syn::Error::new_spanned(
+                        &name,
+                        "computed fields cannot declare geometry or operation-input attributes",
+                    ));
+                }
+                if !matches!(kind, FieldKind::Fixed(_)) {
+                    return Err(syn::Error::new_spanned(
+                        &value_ty,
+                        "computed fields require a fixed representation; select an explicit fixed codec for nominal semantic types",
+                    ));
+                }
+                Some(Computation {
+                    value_ty,
+                    operation: ComputationOperation::Length,
+                    bytes: ComputationByteSelection::Include(vec![ComputationFieldPath {
+                        top_level: target,
+                        top_level_index: usize::MAX,
+                        nested: Vec::new(),
+                    }]),
+                })
+            }
+            Some(ComputationSyntax::Callback {
+                path: callback,
+                bytes,
+            }) => {
+                let value_ty = value_ty.expect("computed fields have a semantic type");
+                if attributes.position.is_some()
+                    || attributes.padding_before.is_some()
+                    || attributes.alignment_before.is_some()
+                    || attributes.operation_input.is_some()
+                {
+                    return Err(syn::Error::new_spanned(
+                        &name,
+                        "computed fields cannot declare geometry or operation-input attributes",
+                    ));
+                }
+                if !matches!(kind, FieldKind::Fixed(_)) {
+                    return Err(syn::Error::new_spanned(
+                        &value_ty,
+                        "computed fields require a fixed representation; select an explicit fixed codec for nominal semantic types",
+                    ));
+                }
+                let bytes = match bytes {
+                    ComputationBytes::Include(paths) => ComputationByteSelection::Include(
+                        paths
+                            .into_iter()
+                            .map(|path| ComputationFieldPath {
+                                top_level: path.top_level,
+                                top_level_index: usize::MAX,
+                                nested: path.nested,
+                            })
+                            .collect(),
+                    ),
+                    ComputationBytes::ExcludeSelf => ComputationByteSelection::ExcludeSelf,
+                };
+                Some(Computation {
+                    value_ty,
+                    operation: ComputationOperation::Callback(callback),
+                    bytes,
+                })
+            }
+            None => None,
+        };
         Ok(Self {
             name,
             ty: field.ty,
@@ -370,7 +566,9 @@ impl Field {
             position: attributes.position,
             padding_before: attributes.padding_before.unwrap_or(0),
             alignment_before: attributes.alignment_before,
-            uses_opcodes: attributes.uses_opcodes,
+            operation_input: attributes.operation_input,
+            validators: attributes.validators,
+            computation,
         })
     }
 }
@@ -379,7 +577,7 @@ impl Variant {
     fn parse(
         variant: syn::Variant,
         tag: &EnumTag,
-        dynamic_opcodes: bool,
+        operation_input: Option<&OperationInput>,
         selectors: &mut BTreeSet<SelectorKey>,
     ) -> syn::Result<Self> {
         let syn::Variant {
@@ -392,41 +590,53 @@ impl Variant {
         let attributes = parse_variant_attributes(&attrs)?;
         let body = parse_variant_body(fields)?;
 
-        let (selector, opcode) = if dynamic_opcodes {
+        let (selector, operation_selector) = if let Some(operation_input) = operation_input {
             if discriminant.is_some() {
                 return Err(syn::Error::new_spanned(
                     &name,
-                    "dynamic opcode variants use #[wire(opcode = Opcode::Variant)], not Rust discriminants",
+                    "dynamic operation variants use a named operation selector, not Rust discriminants",
                 ));
             }
             if attributes.byte_tag.is_some() || attributes.unknown {
                 return Err(syn::Error::new_spanned(
                     &name,
-                    "dynamic opcode variants cannot use byte tag selectors or #[wire(unknown)]",
+                    "dynamic operation variants cannot use byte tag selectors or #[wire(unknown)]",
                 ));
             }
-            let opcode = attributes.opcode.ok_or_else(|| {
+            let (binding, selector) = attributes.operation_selector.ok_or_else(|| {
                 syn::Error::new_spanned(
                     &name,
-                    "dynamic opcode variants require #[wire(opcode = Opcode::Variant)]",
+                    format!(
+                        "dynamic operation variants require #[wire({} = Selector::Variant)]",
+                        operation_input.name
+                    ),
                 )
             })?;
-            let key = opcode.to_token_stream().to_string();
-            if !selectors.insert(SelectorKey::Opcode(key)) {
+            if binding != operation_input.name {
                 return Err(syn::Error::new_spanned(
-                    &opcode,
-                    "opcode selector duplicates an earlier variant",
+                    &binding,
+                    format!(
+                        "`{}` is not the declared operation input `{}`",
+                        binding, operation_input.name
+                    ),
                 ));
             }
-            (VariantSelector::Dynamic, Some(opcode))
+            let key = selector.to_token_stream().to_string();
+            if !selectors.insert(SelectorKey::Operation(key)) {
+                return Err(syn::Error::new_spanned(
+                    &selector,
+                    "operation selector duplicates an earlier variant",
+                ));
+            }
+            (VariantSelector::Dynamic, Some(selector))
         } else if attributes.unknown {
             if discriminant.is_some()
                 || attributes.byte_tag.is_some()
-                || attributes.opcode.is_some()
+                || attributes.operation_selector.is_some()
             {
                 return Err(syn::Error::new_spanned(
                     &name,
-                    "#[wire(unknown)] cannot also declare a discriminant, tag, or opcode selector",
+                    "#[wire(unknown)] cannot also declare a discriminant, tag, or operation selector",
                 ));
             }
             validate_unknown_variant(&name, body.as_ref(), tag)?;
@@ -438,10 +648,10 @@ impl Variant {
             }
             (VariantSelector::Unknown, None)
         } else {
-            if let Some(opcode) = attributes.opcode {
+            if let Some((binding, _)) = attributes.operation_selector {
                 return Err(syn::Error::new_spanned(
-                    opcode,
-                    "#[wire(opcode = ...)] requires an enum with `opcodes = OpcodeTable`",
+                    binding,
+                    "operation selectors require an enum operation input",
                 ));
             }
             match tag {
@@ -524,7 +734,7 @@ impl Variant {
         Ok(Self {
             name,
             selector,
-            opcode,
+            operation_selector,
             body,
         })
     }
@@ -574,184 +784,199 @@ fn validate_unknown_variant(name: &Ident, body: Option<&Type>, tag: &EnumTag) ->
     }
 }
 
-struct VariantAttributes {
-    opcode: Option<Path>,
-    byte_tag: Option<syn::LitByteStr>,
-    unknown: bool,
-}
+fn validate_computations(fields: &mut [Field]) -> syn::Result<Vec<usize>> {
+    for index in 0..fields.len() {
+        let Some(mut computation) = fields[index].computation.take() else {
+            continue;
+        };
 
-fn parse_variant_attributes(attributes: &[Attribute]) -> syn::Result<VariantAttributes> {
-    let mut result = VariantAttributes {
-        opcode: None,
-        byte_tag: None,
-        unknown: false,
-    };
-    for attribute in attributes
-        .iter()
-        .filter(|attribute| attribute.path().is_ident("wire"))
-    {
-        attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("opcode") {
-                if result.opcode.is_some() {
-                    return Err(meta.error("duplicate variant opcode selector"));
-                }
-                result.opcode = Some(meta.value()?.parse()?);
-                Ok(())
-            } else if meta.path.is_ident("tag") {
-                if result.byte_tag.is_some() {
-                    return Err(meta.error("duplicate variant byte tag selector"));
-                }
-                let literal: Lit = meta.value()?.parse()?;
-                let Lit::ByteStr(literal) = literal else {
+        if let ComputationByteSelection::Include(paths) = &mut computation.bytes {
+            let mut selected = BTreeSet::new();
+            for path in paths {
+                if path.top_level == fields[index].name {
                     return Err(syn::Error::new_spanned(
-                        literal,
-                        "variant byte tag selectors must be byte string literals",
+                        &path.top_level,
+                        "computed byte selections cannot include the computed field itself",
                     ));
-                };
-                result.byte_tag = Some(literal);
-                Ok(())
-            } else if meta.path.is_ident("unknown") && meta.input.is_empty() {
-                if result.unknown {
-                    return Err(meta.error("duplicate #[wire(unknown)] selector"));
                 }
-                result.unknown = true;
-                Ok(())
-            } else {
-                Err(meta.error(
-                    "unsupported Wire enum variant option; expected `tag = b\"...\"`, `unknown`, or `opcode = Path`",
-                ))
+                let top_level_index = fields
+                    .iter()
+                    .position(|field| field.name == path.top_level)
+                    .ok_or_else(|| {
+                        syn::Error::new_spanned(
+                            &path.top_level,
+                            "computed byte selection must name a field in the same struct",
+                        )
+                    })?;
+                if !path.nested.is_empty()
+                    && !matches!(fields[top_level_index].kind, FieldKind::Nested)
+                {
+                    return Err(syn::Error::new_spanned(
+                        &path.top_level,
+                        "nested computed byte paths require a nested wire field",
+                    ));
+                }
+                path.top_level_index = top_level_index;
+                let path_key = std::iter::once(path.top_level.to_string())
+                    .chain(path.nested.iter().map(ToString::to_string))
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if !selected.insert(path_key) {
+                    return Err(syn::Error::new_spanned(
+                        &path.top_level,
+                        "computed byte selection duplicates an earlier field path",
+                    ));
+                }
             }
-        })?;
+        }
+
+        if matches!(computation.operation, ComputationOperation::Length) {
+            let ComputationByteSelection::Include(paths) = &computation.bytes else {
+                unreachable!("length computations include one byte field");
+            };
+            let target = &paths[0];
+            if target.top_level_index <= index {
+                return Err(syn::Error::new_spanned(
+                    &target.top_level,
+                    "computed length target must be a later byte field",
+                ));
+            }
+            match &fields[target.top_level_index].kind {
+                FieldKind::Bytes { source_index, .. } if *source_index == index => {}
+                FieldKind::Rest => {}
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &target.top_level,
+                        "computed length target must be a later #[wire(bytes = source)] or #[wire(rest)] byte field controlled by this field",
+                    ));
+                }
+            }
+        }
+        fields[index].computation = Some(computation);
     }
-    Ok(result)
+
+    computation_order(fields)
 }
 
-enum WireAttribute {
-    None,
-    Endian(bool),
-    Custom(Path),
-    Prefix(Path),
-    Bytes(Ident),
-    Rest,
-}
-
-struct FieldWireAttributes {
-    representation: WireAttribute,
-    padding_before: Option<usize>,
-    alignment_before: Option<usize>,
-    position: Option<FieldPosition>,
-    uses_opcodes: bool,
-}
-
-fn parse_field_wire_attributes(attributes: &[Attribute]) -> syn::Result<FieldWireAttributes> {
-    let mut result = FieldWireAttributes {
-        representation: WireAttribute::None,
-        padding_before: None,
-        alignment_before: None,
-        position: None,
-        uses_opcodes: false,
-    };
-    for attribute in attributes
+fn computation_order(fields: &[Field]) -> syn::Result<Vec<usize>> {
+    let computed: Vec<_> = fields
         .iter()
-        .filter(|attribute| attribute.path().is_ident("wire"))
-    {
-        let mut saw_option = false;
-        attribute.parse_nested_meta(|meta| {
-            saw_option = true;
-            if meta.path.is_ident("at") {
-                if result.position.is_some() {
-                    return Err(meta.error("duplicate `at`"));
-                }
-                let expression: Expr = meta.value()?.parse()?;
-                result.position = Some(match expression {
-                    Expr::Path(path) if path.path.get_ident().is_some() => {
-                        FieldPosition::Source(path.path.get_ident().expect("checked").clone())
-                    }
-                    Expr::Lit(literal) => {
-                        let Lit::Int(value) = literal.lit else {
-                            return Err(syn::Error::new_spanned(
-                                literal,
-                                "`at` expects a byte position or an earlier unsigned field",
-                            ));
-                        };
-                        FieldPosition::Static(value.base10_parse()?)
-                    }
-                    expression => {
-                        return Err(syn::Error::new_spanned(
-                            expression,
-                            "`at` expects a byte position or an earlier unsigned field",
-                        ));
-                    }
-                });
-                Ok(())
-            } else if meta.path.is_ident("pad_before") {
-                if result.padding_before.is_some() {
-                    return Err(meta.error("duplicate `pad_before`"));
-                }
-                result.padding_before = Some(parse_nonzero_usize(&meta, "pad_before")?);
-                Ok(())
-            } else if meta.path.is_ident("align_before") {
-                if result.alignment_before.is_some() {
-                    return Err(meta.error("duplicate `align_before`"));
-                }
-                result.alignment_before = Some(parse_nonzero_usize(&meta, "align_before")?);
-                Ok(())
-            } else if meta.path.is_ident("opcodes") && meta.input.is_empty() {
-                if result.uses_opcodes {
-                    return Err(meta.error("duplicate `opcodes`"));
-                }
-                result.uses_opcodes = true;
-                Ok(())
+        .enumerate()
+        .filter_map(|(index, field)| field.computation.as_ref().map(|_| index))
+        .collect();
+    let mut remaining = computed.clone();
+    let mut ordered = Vec::with_capacity(computed.len());
+
+    while !remaining.is_empty() {
+        let before = remaining.len();
+        remaining.retain(|&index| {
+            let computation = fields[index].computation.as_ref().expect("computed index");
+            let ready = computation_dependencies(computation, &computed, index)
+                .all(|dependency| ordered.contains(&dependency));
+            if ready {
+                ordered.push(index);
+                false
             } else {
-                if !matches!(result.representation, WireAttribute::None) {
-                    return Err(meta.error("only one wire representation strategy is allowed per field"));
-                }
-                if meta.path.is_ident("be") {
-                    result.representation = WireAttribute::Endian(true);
-                    Ok(())
-                } else if meta.path.is_ident("le") {
-                    result.representation = WireAttribute::Endian(false);
-                    Ok(())
-                } else if meta.path.is_ident("codec") {
-                    result.representation = WireAttribute::Custom(meta.value()?.parse()?);
-                    Ok(())
-                } else if meta.path.is_ident("prefix") {
-                    result.representation = WireAttribute::Prefix(meta.value()?.parse()?);
-                    Ok(())
-                } else if meta.path.is_ident("bytes") {
-                    result.representation = WireAttribute::Bytes(meta.value()?.parse()?);
-                    Ok(())
-                } else if meta.path.is_ident("rest") {
-                    result.representation = WireAttribute::Rest;
-                    Ok(())
-                } else {
-                    Err(meta.error(
-                        "expected `be`, `le`, `codec = Path`, `prefix = Path`, `bytes = source_field`, `rest`, `at = N`, `at = source_field`, `pad_before = N`, `align_before = N`, or `opcodes`",
-                    ))
-                }
+                true
             }
-        })?;
-        if !saw_option {
+        });
+        if remaining.len() == before {
             return Err(syn::Error::new_spanned(
-                attribute,
-                "#[wire(...)] requires at least one field option",
+                &fields[remaining[0]].name,
+                "computed byte selections form a dependency cycle",
             ));
         }
     }
-    Ok(result)
+    Ok(ordered)
 }
 
-fn parse_nonzero_usize(meta: &syn::meta::ParseNestedMeta<'_>, name: &str) -> syn::Result<usize> {
-    let literal: syn::LitInt = meta.value()?.parse()?;
-    let value = literal.base10_parse::<usize>()?;
-    if value == 0 {
-        Err(syn::Error::new_spanned(
-            literal,
-            format!("`{name}` must be nonzero"),
-        ))
-    } else {
-        Ok(value)
+fn computation_dependencies<'a>(
+    computation: &'a Computation,
+    computed: &'a [usize],
+    own_index: usize,
+) -> impl Iterator<Item = usize> + 'a {
+    computed.iter().copied().filter(move |&candidate| {
+        candidate != own_index
+            && match &computation.bytes {
+                ComputationByteSelection::Include(paths) => {
+                    paths.iter().any(|path| path.top_level_index == candidate)
+                }
+                ComputationByteSelection::ExcludeSelf => true,
+            }
+    })
+}
+
+fn is_computed_marker(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    path.qself.is_none()
+        && path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Computed")
+}
+
+fn computed_value_type(ty: &Type) -> syn::Result<Type> {
+    let Type::Path(path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "computed fields must have type Computed<T>",
+        ));
+    };
+    let Some(marker) = path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "computed fields must have type Computed<T>",
+        ));
+    };
+    if path.qself.is_some() || marker.ident != "Computed" {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "computed fields must have type Computed<T>",
+        ));
     }
+    let syn::PathArguments::AngleBracketed(arguments) = &marker.arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "computed fields must have type Computed<T>",
+        ));
+    };
+    if arguments.args.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "computed fields must have exactly one semantic type argument",
+        ));
+    }
+    let Some(syn::GenericArgument::Type(value_ty)) = arguments.args.first() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "computed fields must have exactly one semantic type argument",
+        ));
+    };
+    syn::parse2(value_ty.to_token_stream()).map_err(|_| {
+        syn::Error::new_spanned(
+            value_ty,
+            "computed fields must have exactly one semantic type argument",
+        )
+    })
+}
+
+fn is_unsigned_builtin_codec(codec: &str) -> bool {
+    matches!(
+        codec,
+        "U8" | "BeU16"
+            | "LeU16"
+            | "BeU24"
+            | "LeU24"
+            | "BeU32"
+            | "LeU32"
+            | "BeU64"
+            | "LeU64"
+            | "BeU128"
+            | "LeU128"
+    )
 }
 
 fn validate_byte_fields(fields: &mut [Field], wire_lifetime: Option<&Lifetime>) -> syn::Result<()> {
@@ -777,23 +1002,17 @@ fn validate_byte_fields(fields: &mut [Field], wire_lifetime: Option<&Lifetime>) 
                     "byte length source must name an earlier field in the same struct",
                 )
             })?;
-        let valid_source = match &fields[source_index].kind {
-            FieldKind::Fixed(Codec::Builtin(codec)) => matches!(
-                *codec,
-                "U8" | "BeU16"
-                    | "LeU16"
-                    | "BeU32"
-                    | "LeU32"
-                    | "BeU64"
-                    | "LeU64"
-                    | "BeU128"
-                    | "LeU128"
-            ),
-            FieldKind::Prefix(_) => is_unsigned_integer(&fields[source_index].ty),
-            FieldKind::Fixed(Codec::OwnedBytes(_) | Codec::Custom(_))
-            | FieldKind::Nested
-            | FieldKind::Bytes { .. }
-            | FieldKind::Rest => false,
+        let valid_source = if fields[source_index].computation.is_some() {
+            true
+        } else {
+            match &fields[source_index].kind {
+                FieldKind::Fixed(Codec::Builtin(codec)) => is_unsigned_builtin_codec(codec),
+                FieldKind::Prefix(_) => is_unsigned_integer(&fields[source_index].ty),
+                FieldKind::Fixed(Codec::OwnedBytes(_) | Codec::Custom(_))
+                | FieldKind::Nested
+                | FieldKind::Bytes { .. }
+                | FieldKind::Rest => false,
+            }
         };
         if !valid_source {
             return Err(syn::Error::new_spanned(
@@ -852,10 +1071,7 @@ fn validate_positions(fields: &mut [Field]) -> syn::Result<()> {
                 "position source must be a built-in unsigned integer field",
             ));
         };
-        if !matches!(
-            *codec,
-            "U8" | "BeU16" | "LeU16" | "BeU32" | "LeU32" | "BeU64" | "LeU64" | "BeU128" | "LeU128"
-        ) {
+        if !is_unsigned_builtin_codec(codec) {
             return Err(syn::Error::new_spanned(
                 &source,
                 "position source must be a built-in unsigned integer field",
@@ -870,110 +1086,6 @@ fn validate_positions(fields: &mut [Field]) -> syn::Result<()> {
         fields[index].position = Some(FieldPosition::Source(source));
     }
     Ok(())
-}
-
-fn reject_wire_attributes(attributes: &[Attribute], message: &str) -> syn::Result<()> {
-    if let Some(attribute) = attributes
-        .iter()
-        .find(|attribute| attribute.path().is_ident("wire"))
-    {
-        Err(syn::Error::new_spanned(attribute, message))
-    } else {
-        Ok(())
-    }
-}
-
-struct EnumAttributes {
-    tag: Option<EnumTag>,
-    unknown: Option<UnknownPolicy>,
-    opcodes: Option<Path>,
-    opcode_error: Option<Path>,
-}
-
-struct StructAttributes {
-    opcodes: Option<Path>,
-    bitfield: Option<TagCodec>,
-}
-
-fn parse_struct_attributes(attributes: &[Attribute]) -> syn::Result<StructAttributes> {
-    let mut opcodes = None;
-    let mut bitfield_type = None;
-    let mut endian = None;
-    let mut reserved_zero = false;
-    for attribute in attributes
-        .iter()
-        .filter(|attribute| attribute.path().is_ident("wire"))
-    {
-        attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("opcodes") {
-                if opcodes.is_some() {
-                    return Err(meta.error("duplicate struct opcode input"));
-                }
-                opcodes = Some(meta.value()?.parse()?);
-                return Ok(());
-            }
-            if meta.path.is_ident("bitfield") {
-                if bitfield_type.is_some() {
-                    return Err(meta.error("duplicate bitfield storage type"));
-                }
-                bitfield_type = Some(meta.value()?.parse::<Type>()?);
-                return Ok(());
-            }
-            if meta.path.is_ident("be") || meta.path.is_ident("le") {
-                if endian.is_some() {
-                    return Err(meta.error("duplicate bitfield byte order"));
-                }
-                endian = Some(meta.path.is_ident("be"));
-                return Ok(());
-            }
-            if meta.path.is_ident("reserved") {
-                if reserved_zero {
-                    return Err(meta.error("duplicate reserved-bit policy"));
-                }
-                let policy: Ident = meta.value()?.parse()?;
-                if policy != "zero" {
-                    return Err(syn::Error::new_spanned(
-                        policy,
-                        "unsupported reserved-bit policy; use `reserved = zero`",
-                    ));
-                }
-                reserved_zero = true;
-                return Ok(());
-            }
-            Err(meta.error(
-                "unsupported Wire struct option; expected `opcodes = OpcodeTable` or bitfield options",
-            ))
-        })?;
-    }
-
-    let bitfield = match bitfield_type {
-        Some(ty) => {
-            if opcodes.is_some() {
-                return Err(syn::Error::new_spanned(
-                    ty,
-                    "bitfields cannot declare opcode inputs",
-                ));
-            }
-            if !reserved_zero {
-                return Err(syn::Error::new_spanned(
-                    ty,
-                    "bitfields require an explicit reserved-bit policy; add `reserved = zero`",
-                ));
-            }
-            Some(parse_bitfield_storage(&ty, endian)?)
-        }
-        None => {
-            if endian.is_some() || reserved_zero {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "bitfield byte order and reserved-bit policy require `bitfield = unsigned_type`",
-                ));
-            }
-            None
-        }
-    };
-
-    Ok(StructAttributes { opcodes, bitfield })
 }
 
 fn parse_bitfield_storage(ty: &Type, endian: Option<bool>) -> syn::Result<TagCodec> {
@@ -1183,84 +1295,37 @@ fn unsigned_integer_bits(ty: &Type) -> Option<u32> {
     }
 }
 
-fn validate_opcode_fields(fields: &[Field], opcodes: Option<&Path>) -> syn::Result<()> {
+fn validate_operation_fields(
+    fields: &[Field],
+    operation_input: Option<&OperationInput>,
+) -> syn::Result<()> {
     for field in fields {
-        if !field.uses_opcodes {
+        let Some(binding) = &field.operation_input else {
             continue;
-        }
-        if opcodes.is_none() {
+        };
+        let Some(input) = operation_input else {
             return Err(syn::Error::new_spanned(
-                &field.name,
-                "#[wire(opcodes)] requires #[wire(opcodes = OpcodeTable)] on the struct",
+                binding,
+                format!("#[wire({binding})] requires a matching operation input declaration"),
+            ));
+        };
+        if binding != &input.name {
+            return Err(syn::Error::new_spanned(
+                binding,
+                format!(
+                    "`{binding}` is not the declared operation input `{}`",
+                    input.name
+                ),
             ));
         }
         if !matches!(field.kind, FieldKind::Nested) {
             return Err(syn::Error::new_spanned(
                 &field.name,
-                "#[wire(opcodes)] is valid only on nested wire fields",
+                "operation input bindings are valid only on nested wire fields",
             ));
         }
     }
     Ok(())
-}
-
-fn parse_enum_attributes(attributes: &[Attribute]) -> syn::Result<EnumAttributes> {
-    let mut result = EnumAttributes {
-        tag: None,
-        unknown: None,
-        opcodes: None,
-        opcode_error: None,
-    };
-    for attribute in attributes
-        .iter()
-        .filter(|attribute| attribute.path().is_ident("wire"))
-    {
-        attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("tag") {
-                if result.tag.is_some() {
-                    return Err(meta.error("duplicate enum tag codec"));
-                }
-                let representation: Type = meta.value()?.parse()?;
-                result.tag = Some(parse_enum_tag(representation)?);
-                return Ok(());
-            }
-            if meta.path.is_ident("unknown") {
-                if result.unknown.is_some() {
-                    return Err(meta.error("duplicate enum unknown policy"));
-                }
-                let policy: Ident = meta.value()?.parse()?;
-                result.unknown = Some(if policy == "reject" {
-                    UnknownPolicy::Reject
-                } else if policy == "preserve" {
-                    UnknownPolicy::Preserve
-                } else {
-                    return Err(syn::Error::new_spanned(
-                        policy,
-                        "unsupported unknown policy; use `unknown = reject` or `unknown = preserve`",
-                    ));
-                });
-                return Ok(());
-            }
-            if meta.path.is_ident("opcodes") {
-                if result.opcodes.is_some() {
-                    return Err(meta.error("duplicate enum opcode input"));
-                }
-                result.opcodes = Some(meta.value()?.parse()?);
-                return Ok(());
-            }
-            if meta.path.is_ident("opcode_error") {
-                if result.opcode_error.is_some() {
-                    return Err(meta.error("duplicate enum opcode error"));
-                }
-                result.opcode_error = Some(meta.value()?.parse()?);
-                return Ok(());
-            }
-            Err(meta.error(
-                "unsupported Wire enum option; expected `tag`, `unknown`, `opcodes`, or `opcode_error`",
-            ))
-        })?;
-    }
-    Ok(result)
 }
 
 fn parse_enum_tag(representation: Type) -> syn::Result<EnumTag> {
@@ -1318,54 +1383,71 @@ fn parse_tag_codec(path: Path) -> syn::Result<TagCodec> {
     };
     match segment.ident.to_string().as_str() {
         "U8" => Ok(TagCodec {
-            codec: "U8",
+            codec: "U8".into(),
+            builtin: true,
             ty: "u8",
             max: u8::MAX as u128,
         }),
         "BeU16" => Ok(TagCodec {
-            codec: "BeU16",
+            codec: "BeU16".into(),
+            builtin: true,
             ty: "u16",
             max: u16::MAX as u128,
         }),
         "LeU16" => Ok(TagCodec {
-            codec: "LeU16",
+            codec: "LeU16".into(),
+            builtin: true,
             ty: "u16",
             max: u16::MAX as u128,
         }),
         "BeU32" => Ok(TagCodec {
-            codec: "BeU32",
+            codec: "BeU32".into(),
+            builtin: true,
             ty: "u32",
             max: u32::MAX as u128,
         }),
         "LeU32" => Ok(TagCodec {
-            codec: "LeU32",
+            codec: "LeU32".into(),
+            builtin: true,
             ty: "u32",
             max: u32::MAX as u128,
         }),
         "BeU64" => Ok(TagCodec {
-            codec: "BeU64",
+            codec: "BeU64".into(),
+            builtin: true,
             ty: "u64",
             max: u64::MAX as u128,
         }),
         "LeU64" => Ok(TagCodec {
-            codec: "LeU64",
+            codec: "LeU64".into(),
+            builtin: true,
             ty: "u64",
             max: u64::MAX as u128,
         }),
         "BeU128" => Ok(TagCodec {
-            codec: "BeU128",
+            codec: "BeU128".into(),
+            builtin: true,
             ty: "u128",
             max: u128::MAX,
         }),
         "LeU128" => Ok(TagCodec {
-            codec: "LeU128",
+            codec: "LeU128".into(),
+            builtin: true,
             ty: "u128",
             max: u128::MAX,
         }),
-        _ => Err(syn::Error::new_spanned(
-            path,
-            "Wire enum tags must use a built-in unsigned fixed integer codec",
-        )),
+        "I8" | "BeI16" | "LeI16" | "BeI32" | "LeI32" | "BeI64" | "LeI64" | "BeI128" | "LeI128" => {
+            Err(syn::Error::new_spanned(
+                path,
+                "Wire enum tags must use an unsigned fixed codec",
+            ))
+        }
+        codec => Ok(TagCodec {
+            codec: codec.to_owned(),
+            builtin: false,
+            ty: "u8",
+            max: u8::MAX as u128,
+        }),
     }
 }
 
@@ -1461,8 +1543,11 @@ fn is_borrowed_byte_slice(ty: &Type, wire_lifetime: Option<&Lifetime>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use syn::Type;
+
     use super::{
-        Codec, EnumTag, FieldKind, FieldPosition, UnknownPolicy, VariantSelector, WireType,
+        Codec, ComputationByteSelection, ComputationOperation, EnumTag, FieldKind, FieldPosition,
+        UnknownPolicy, VariantSelector, WireType,
     };
 
     fn parse(source: &str) -> syn::Result<WireType> {
@@ -1571,7 +1656,7 @@ mod tests {
             "#[wire(tag = [u8; WIDTH], unknown = reject)] enum Op { #[wire(tag = b\"OK\")] A }",
             "#[wire(tag = U8, unknown = reject)] enum Op { #[wire(tag = b\"A\")] A = 1 }",
             "#[wire(tag = U8, unknown = reject)] enum Op { #[wire(unknown)] Other([u8; 1]) }",
-            "#[wire(tag = [u8; 2], opcodes = OpcodeTable, opcode_error = OpcodeError, unknown = reject)] enum Op { #[wire(opcode = Opcode::Ok)] Ok }",
+            "#[wire(tag = [u8; 2], table = OpcodeTable, table_error = OpcodeError, unknown = reject)] enum Op { #[wire(table = Opcode::Ok)] Ok }",
         ] {
             assert!(parse(source).is_err(), "{source}");
         }
@@ -1665,43 +1750,115 @@ mod tests {
     }
 
     #[test]
-    fn accepts_named_opcode_inputs_and_rejects_mixed_dispatch() {
+    fn accepts_named_operation_inputs_and_rejects_mixed_dispatch() {
         let WireType::Enum(model) = parse(
-            "#[wire(tag = U8, opcodes = OpcodeTable, opcode_error = OpcodeError, unknown = reject)] enum Op { #[wire(opcode = Opcode::Ping)] Ping(Body), #[wire(opcode = Opcode::Halt)] Halt }",
+            "#[wire(tag = U8, opcodes = Opcodes, opcodes_error = OpcodeMapError, unknown = reject)] enum MappedOperation { #[wire(opcodes = Opcode::Ping)] Ping(Ping), #[wire(opcodes = Opcode::Halt)] Halt }",
         )
         .unwrap()
         else {
             panic!()
         };
-        assert!(model.opcodes.is_some());
+        assert!(
+            model
+                .operation_input
+                .as_ref()
+                .is_some_and(|input| input.name == "opcodes")
+        );
+
+        let WireType::Enum(model) = parse(
+            "#[wire(tag = U8, table = OpcodeTable, table_error = OpcodeError, unknown = reject)] enum Op { #[wire(table = Opcode::Ping)] Ping(Body), #[wire(table = Opcode::Halt)] Halt }",
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        let input = model.operation_input.as_ref().expect("operation input");
+        assert!(input.name == "table");
+        assert!(input.error.is_some());
         assert!(
             model
                 .variants
                 .iter()
-                .all(|variant| variant.opcode.is_some())
+                .all(|variant| variant.operation_selector.is_some())
         );
 
         let WireType::Struct(model) = parse(
-            "#[wire(opcodes = OpcodeTable)] struct Packet { lead: u8, #[wire(opcodes)] operation: Op }",
+            "#[wire(table = OpcodeTable)] struct Packet { lead: u8, #[wire(table)] first: Op, #[wire(table)] second: Op }",
         )
         .unwrap()
         else {
             panic!()
         };
-        assert!(model.opcodes.is_some());
-        assert!(model.fields[1].uses_opcodes);
+        assert!(model.operation_input.is_some());
+        assert!(model.fields[1].operation_input.is_some());
+        assert!(model.fields[2].operation_input.is_some());
 
         for source in [
-            "#[wire(tag = U8, opcodes = OpcodeTable, unknown = reject)] enum Op { #[wire(opcode = Opcode::Ping)] Ping }",
-            "#[wire(tag = U8, opcode_error = OpcodeError, unknown = reject)] enum Op { Ping = 1 }",
-            "#[wire(tag = U8, opcodes = OpcodeTable, opcode_error = OpcodeError, unknown = reject)] enum Op { Ping = 1 }",
-            "#[wire(tag = U8, unknown = reject)] enum Op { #[wire(opcode = Opcode::Ping)] Ping = 1 }",
-            "#[wire(tag = U8, opcodes = OpcodeTable, opcode_error = OpcodeError, unknown = reject)] enum Op { Ping }",
-            "#[wire(tag = U8, opcodes = OpcodeTable, opcode_error = OpcodeError, unknown = reject)] enum Op { #[wire(opcode = Opcode::Ping)] A, #[wire(opcode = Opcode::Ping)] B }",
-            "struct Packet { #[wire(opcodes)] operation: Op }",
-            "#[wire(opcodes = OpcodeTable)] struct Packet { #[wire(opcodes)] value: u8 }",
+            "#[wire(tag = U8, table = OpcodeTable, unknown = reject)] enum Op { #[wire(table = Opcode::Ping)] Ping }",
+            "#[wire(tag = U8, table_error = OpcodeError, unknown = reject)] enum Op { Ping = 1 }",
+            "#[wire(tag = U8, table = OpcodeTable, table_error = OpcodeError, unknown = reject)] enum Op { Ping = 1 }",
+            "#[wire(tag = U8, unknown = reject)] enum Op { #[wire(table = Opcode::Ping)] Ping = 1 }",
+            "#[wire(tag = U8, table = OpcodeTable, table_error = OpcodeError, unknown = reject)] enum Op { Ping }",
+            "#[wire(tag = U8, table = OpcodeTable, table_error = OpcodeError, unknown = reject)] enum Op { #[wire(table = Opcode::Ping)] A, #[wire(table = Opcode::Ping)] B }",
+            "struct Packet { #[wire(table)] operation: Op }",
+            "#[wire(table = OpcodeTable)] struct Packet { #[wire(table)] value: u8 }",
+            "#[wire(table = OpcodeTable, table_error = OpcodeError)] struct Packet { #[wire(table)] operation: Op }",
+            "#[wire(table = OpcodeTable)] struct Packet { #[wire(other)] operation: Op }",
+            "#[wire(tag = U8, table = OpcodeTable, other_error = OpcodeError, unknown = reject)] enum Op { #[wire(table = Opcode::Ping)] Ping }",
+            "#[wire(tag = U8, table = OpcodeTable, table_error = OpcodeError, other = OtherTable, unknown = reject)] enum Op { #[wire(table = Opcode::Ping)] Ping }",
+            "#[wire(tag = U8, view = OpcodeTable, unknown = reject)] enum Op { #[wire(view = Opcode::Ping)] Ping }",
+            "#[wire(tag = U8, cursor = OpcodeTable, unknown = reject)] enum Op { #[wire(cursor = Opcode::Ping)] Ping }",
+            "#[wire(builder = OpcodeTable)] struct Packet { #[wire(builder)] operation: Op }",
         ] {
             assert!(parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn accepts_ordered_struct_validators_with_one_human_error_type() {
+        let WireType::Struct(model) = parse(
+            "#[wire(error = PacketError, validate = validate_model_first, validate = validate_model_second)] struct Packet { #[wire(validate = validate_field_first, validate = validate_field_second)] value: u8 }",
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+
+        assert_eq!(model.validators.len(), 2);
+        assert!(model.validators[0].is_ident("validate_model_first"));
+        assert!(model.validators[1].is_ident("validate_model_second"));
+        assert!(model.validation_error.is_some());
+        assert_eq!(model.fields[0].validators.len(), 2);
+        assert!(model.fields[0].validators[0].is_ident("validate_field_first"));
+        assert!(model.fields[0].validators[1].is_ident("validate_field_second"));
+
+        let WireType::Struct(model) =
+            parse("#[wire(error = ParentError)] struct Parent { child: Child }").unwrap()
+        else {
+            panic!()
+        };
+        assert!(model.validation_error.is_some());
+    }
+
+    #[test]
+    fn rejects_incomplete_or_unsupported_struct_validator_contracts() {
+        for source in [
+            "#[wire(validate = validate_model)] struct Packet { value: u8 }",
+            "struct Packet { #[wire(validate = validate_field)] value: u8 }",
+            "#[wire(error = PacketError)] struct Packet { value: u8 }",
+            "#[wire(error = FirstError, error = SecondError, validate = validate_model)] struct Packet { value: u8 }",
+            "#[wire(bitfield = u8, reserved = zero, error = FlagsError, validate = validate_flags)] struct Flags { #[wire(bit = 0)] enabled: bool }",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+
+        for source in [
+            "#[wire(table = OpcodeTable, error = PacketError, validate = validate_model)] struct Packet { #[wire(table)] operation: Op }",
+            "#[wire(table = OpcodeTable, error = PacketError)] struct Packet { #[wire(table, validate = validate_field)] operation: Op }",
+        ] {
+            if let Err(error) = parse(source) {
+                panic!("{source}: {error}");
+            }
         }
     }
 
@@ -1745,5 +1902,104 @@ mod tests {
     #[test]
     fn rejects_container_attributes_on_structs() {
         assert!(parse("#[wire(tag = U8, unknown = reject)] struct Packet { value: u8 }").is_err());
+    }
+    #[test]
+    fn accepts_computed_lengths_and_rejects_invalid_computed_contracts() {
+        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, #[wire(bytes = length)] payload: &'wire [u8], kind: u8 }").unwrap() else { panic!() };
+        assert!(matches!(
+            model.fields[0].computation.as_ref().map(|computation| &computation.value_ty),
+            Some(Type::Path(path)) if path.path.is_ident("u8")
+        ));
+        assert!(matches!(
+            model.fields[0].kind,
+            FieldKind::Fixed(Codec::Builtin("U8"))
+        ));
+        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = len(payload), be)] length: Computed<u16>, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
+        assert!(matches!(
+            model.fields[0].kind,
+            FieldKind::Fixed(Codec::Builtin("BeU16"))
+        ));
+        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = len(payload), codec = BeU24)] length: Computed<u32>, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
+        assert!(matches!(
+            model.fields[0].kind,
+            FieldKind::Fixed(Codec::Custom(_))
+        ));
+        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = len(payload), codec = LengthCodec)] length: Computed<PayloadLength>, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
+        assert!(matches!(
+            model.fields[0].computation.as_ref().map(|computation| &computation.value_ty),
+            Some(Type::Path(path)) if path.path.is_ident("PayloadLength")
+        ));
+        assert!(matches!(
+            model.fields[0].kind,
+            FieldKind::Fixed(Codec::Custom(_))
+        ));
+        let WireType::Struct(model) = parse("#[wire(table = Table)] struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, #[wire(bytes = length)] payload: &'wire [u8], #[wire(table)] selected: Selected }").unwrap() else { panic!() };
+        assert!(model.operation_input.is_some());
+        assert!(model.fields[0].computation.is_some());
+        for source in [
+            "struct Packet { length: Computed<u8> }",
+            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<U8>, #[wire(bytes = length)] payload: &'wire [u8] }",
+            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u16>, #[wire(bytes = length)] payload: &'wire [u8] }",
+            "struct Packet<'wire> { #[wire(computed = len(payload), be)] length: Computed<u8>, #[wire(bytes = length)] payload: &'wire [u8] }",
+            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, payload: &'wire [u8] }",
+            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, #[wire(bytes = other)] payload: &'wire [u8], other: u8 }",
+            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, #[wire(bytes = length)] payload: &'wire [u8], prepare: u8 }",
+            "#[wire(table = Table)] struct Packet { #[wire(computed = checksum(exclude(self)))] checksum: Computed<u8>, table: u8, #[wire(table)] selected: Selected }",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn accepts_callback_computations_and_rejects_invalid_byte_selections() {
+        let WireType::Struct(model) = parse(
+            "struct Packet { #[wire(computed = checksum(include(header, payload.inner)))] checksum: Computed<u8>, header: u8, payload: Payload }",
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        let computation = model.fields[0].computation.as_ref().expect("computation");
+        assert!(matches!(
+            &computation.operation,
+            ComputationOperation::Callback(path) if path.is_ident("checksum")
+        ));
+        let ComputationByteSelection::Include(paths) = &computation.bytes else {
+            panic!("include selection")
+        };
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].top_level == "header" && paths[0].nested.is_empty());
+        assert!(paths[1].top_level == "payload" && paths[1].nested[0] == "inner");
+
+        let WireType::Struct(model) = parse(
+            "struct Packet { head: u8, #[wire(computed = crate::checksum(exclude(self)))] checksum: Computed<u8>, payload: Payload }",
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            model.fields[1]
+                .computation
+                .as_ref()
+                .map(|computation| &computation.bytes),
+            Some(ComputationByteSelection::ExcludeSelf)
+        ));
+
+        for source in [
+            "struct Packet { #[wire(computed = checksum)] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { #[wire(bytes(include(payload)))] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { #[wire(computed = len(payload), bytes(include(payload)))] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(include()))] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(exclude(payload)))] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(include(missing)))] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(include(checksum)))] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(include(payload, payload)))] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(include(payload), exclude(self)))] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { #[wire(computed = first(include(second)))] first: Computed<u8>, #[wire(computed = second(include(first)))] second: Computed<u8> }",
+            "struct Packet { #[wire(computed = first(exclude(self)))] first: Computed<u8>, #[wire(computed = second(exclude(self)))] second: Computed<u8> }",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
     }
 }

@@ -2,7 +2,10 @@
 //! Self-delimiting field coverage for `#[derive(Wire)]`.
 
 use core::num::NonZeroUsize;
-use wire_repr::{EncodePlan, PrefixCodec, PrefixExtent, PreparedLayout, Wire};
+use wire_repr::{
+    ByteSegment, ByteSink, ByteSource, ByteSourceCursor, PrefixCodec, PrefixExtent, PreparedLayout,
+    Wire,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TinyDecodeError {
@@ -19,13 +22,24 @@ struct TinyPlan {
     len: usize,
 }
 
-impl EncodePlan for TinyPlan {
-    fn encoded_len(&self) -> usize {
+impl ByteSource for TinyPlan {
+    fn byte_len(&self) -> usize {
         self.len
     }
 
-    fn write_into(&self, output: &mut [u8]) {
-        output.copy_from_slice(&self.bytes[..self.len]);
+    fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+        sink.write(&self.bytes[..self.len]);
+    }
+}
+
+impl ByteSourceCursor for TinyPlan {
+    type Segments<'source>
+        = core::iter::Once<ByteSegment<'source>>
+    where
+        Self: 'source;
+
+    fn segments(&self) -> Self::Segments<'_> {
+        core::iter::once(ByteSegment::Bytes(&self.bytes[..self.len]))
     }
 }
 
@@ -76,13 +90,24 @@ struct Packet {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BorrowedPlan<'value>(&'value [u8]);
 
-impl EncodePlan for BorrowedPlan<'_> {
-    fn encoded_len(&self) -> usize {
+impl ByteSource for BorrowedPlan<'_> {
+    fn byte_len(&self) -> usize {
         self.0.len()
     }
 
-    fn write_into(&self, output: &mut [u8]) {
-        output.copy_from_slice(self.0);
+    fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+        sink.write(self.0);
+    }
+}
+
+impl ByteSourceCursor for BorrowedPlan<'_> {
+    type Segments<'source>
+        = core::iter::Once<ByteSegment<'source>>
+    where
+        Self: 'source;
+
+    fn segments(&self) -> Self::Segments<'_> {
+        core::iter::once(ByteSegment::Bytes(self.0))
     }
 }
 
