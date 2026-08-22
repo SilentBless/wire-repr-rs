@@ -175,7 +175,6 @@ fn checksum(source: &impl ByteSourceCursor) -> u8 {
 struct Packet<'wire> {
     #[wire(computed = checksum(exclude(self)))]
     checksum: u8,
-    #[wire(computed = wire_repr::computation::len(payload))]
     length: u8,
     #[wire(bytes = length)]
     payload: &'wire [u8],
@@ -197,5 +196,9 @@ Computed selections also define compile-time dependencies; derive rejects self-i
 missing or duplicate paths, and cycles. Views select exact stored bytes, while plans select
 canonical prepared bytes. Computations are infallible derivations; preparation
 checked-converts their results into the stored field type.
+
+[`computation::len`] is an ordinary generic callback helper for semantic slice lengths. A
+source referenced by `#[wire(bytes = length)]` is instead derived canonically from the bounded
+payload extent and cannot also declare a computation.
 
 For custom field codecs and exact planning contracts, see [`codec`].

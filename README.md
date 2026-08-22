@@ -269,7 +269,6 @@ fn checksum(source: &impl ByteSourceCursor) -> u8 {
 struct Packet<'wire> {
     #[wire(computed = checksum(exclude(self)))]
     checksum: u8,
-    #[wire(computed = wire_repr::computation::len(payload))]
     length: u8,
     #[wire(bytes = length)]
     payload: &'wire [u8],
@@ -281,6 +280,11 @@ without relying on declaration order and cycles are rejected by the derive. Comp
 infallible derivations; preparation checked-converts their results into the stored field type.
 Reading still returns the stored computed value. If stored-value consistency matters, validate
 it separately against the exact-source view selection.
+
+`wire_repr::computation::len` is a generic slice-length helper using this same callback path;
+it has no macro privileges and can be replaced by an ordinary function. A field referenced by
+`#[wire(bytes = length)]` is different: the framing relation derives `length` canonically from
+the payload extent during preparation, so that source cannot also declare a computation.
 
 ## 🧪 Real formats
 

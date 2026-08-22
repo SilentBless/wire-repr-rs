@@ -84,9 +84,12 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         })
         .collect();
     let has_computed = fields.iter().any(|field| field.computation.is_some());
+    let has_builder = has_computed || controlled_by.iter().any(Option::is_some);
     let prepare_fields: Vec<_> = fields
         .iter()
-        .filter(|field| field.computation.is_none())
+        .enumerate()
+        .filter(|(index, field)| field.computation.is_none() && controlled_by[*index].is_none())
+        .map(|(_, field)| field)
         .collect();
     let prepare_field_names: Vec<_> = prepare_fields.iter().map(|field| &field.name).collect();
     let prepare_field_parameters: Vec<_> = prepare_fields
@@ -99,9 +102,10 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         .collect();
     let prepare_destructure: Vec<_> = fields
         .iter()
-        .map(|field| {
+        .enumerate()
+        .map(|(index, field)| {
             let field_name = &field.name;
-            if field.computation.is_some() {
+            if field.computation.is_some() || controlled_by[index].is_some() {
                 quote!(#field_name: _)
             } else {
                 quote!(#field_name)
@@ -109,12 +113,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         })
         .collect();
     let prepare_helper = format_ident!("__wire_repr_prepare_fields");
-    let ignored_prepare_fields: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .filter(|(index, field)| field.computation.is_none() && controlled_by[*index].is_some())
-        .map(|(_, field)| &field.name)
-        .collect();
+
     let has_bytes = controlled_by.iter().any(Option::is_some) || has_computed;
     let position_sources: Vec<_> = fields
         .iter()
@@ -1222,7 +1221,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             }
         }
     });
-    let encode_missing_variant = has_computed.then(|| {
+    let encode_missing_variant = has_builder.then(|| {
         quote! {
             /// A caller-owned builder field was not supplied.
             MissingField {
@@ -1231,7 +1230,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             },
         }
     });
-    let encode_missing_arm = has_computed.then(|| {
+    let encode_missing_arm = has_builder.then(|| {
         quote! {
             Self::MissingField { field } => write!(formatter, "missing required field `{field}`"),
         }
@@ -1271,7 +1270,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         }
     });
     let preparation_body = quote! {
-        #(let _ = #ignored_prepare_fields;)*
         #(#prepare_steps)*
         #(#early_computation_steps)*
         let mut encoded_len = 0usize;
@@ -1319,7 +1317,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         }
     };
 
-    let builder = has_computed.then(|| {
+    let builder = has_builder.then(|| {
         let builder_name = format_ident!("{name}Builder");
         let (builder_decl_generics, builder_type, builder_plan_type, builder_error_type) =
             if let Some(lifetime) = wire_lifetime.as_ref() {
@@ -1337,7 +1335,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     quote!(#encode_error),
                 )
             };
-        let builder_fields = fields.iter().filter(|field| field.computation.is_none()).map(|field| {
+        let builder_fields = prepare_fields.iter().map(|field| {
             let field_name = &field.name;
             let ty = match (&field.kind, wire_lifetime.as_ref()) {
                 (FieldKind::Bytes { .. } | FieldKind::Rest, Some(lifetime)) => quote!(&#lifetime [u8]),
@@ -1345,7 +1343,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             };
             quote!(#field_name: ::core::option::Option<#ty>)
         });
-        let setters = fields.iter().filter(|field| field.computation.is_none()).map(|field| {
+        let setters = prepare_fields.iter().map(|field| {
             let field_name = &field.name;
             let ty = match (&field.kind, wire_lifetime.as_ref()) {
                 (FieldKind::Bytes { .. } | FieldKind::Rest, Some(lifetime)) => quote!(&#lifetime [u8]),
@@ -1359,7 +1357,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 }
             }
         });
-        let missing = fields.iter().filter(|field| field.computation.is_none()).map(|field| { let field_name=&field.name; let label=field_name.to_string(); quote!(let #field_name = builder.#field_name.ok_or(#encode_error::MissingField { field: #label })?;) });
+        let missing = prepare_fields.iter().map(|field| { let field_name=&field.name; let label=field_name.to_string(); quote!(let #field_name = builder.#field_name.ok_or(#encode_error::MissingField { field: #label })?;) });
         if let (Some(operation_input_ty), Some(operation_name)) =
             (operation_input_ty, operation_name)
         {
@@ -1420,7 +1418,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         }
     });
 
-    let builder_method = has_computed.then(|| {
+    let builder_method = has_builder.then(|| {
         let builder_name = format_ident!("{name}Builder");
         let builder_type = if let Some(lifetime) = wire_lifetime.as_ref() {
             quote!(#builder_name<#lifetime>)
@@ -1429,7 +1427,9 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         };
         let builder_empty_fields = fields
             .iter()
-            .filter(|field| field.computation.is_none())
+            .enumerate()
+            .filter(|(index, field)| field.computation.is_none() && controlled_by[*index].is_none())
+            .map(|(_, field)| field)
             .map(|field| {
                 let name = &field.name;
                 quote!(#name: ::core::option::Option::None)

@@ -3,11 +3,10 @@
 
 use wire_repr::{ByteSourceCursor, FixedCodec, PreparedLayout, Wire};
 
-/// A packet with a computed bounded payload length.
+/// A packet with a bounded payload length.
 #[derive(Wire)]
 pub struct Packet<'wire> {
-    /// Payload byte count.
-    #[wire(computed = wire_repr::computation::len(payload))]
+    /// Payload byte count derived from the payload extent.
     pub length: u8,
     /// Borrowed payload.
     #[wire(bytes = length)]
@@ -16,36 +15,36 @@ pub struct Packet<'wire> {
     pub kind: u8,
 }
 
-/// A big-endian computed 16-bit length.
+/// A big-endian derived 16-bit length.
 #[derive(Wire)]
 pub struct BigEndianPacket<'wire> {
-    /// Payload byte count.
-    #[wire(computed = wire_repr::computation::len(payload), be)]
+    /// Payload byte count derived from the payload extent.
+    #[wire(be)]
     pub length: u16,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
 }
 
-/// A little-endian computed 16-bit length.
+/// A little-endian derived 16-bit length.
 #[derive(Wire)]
 pub struct LittleEndianPacket<'wire> {
-    /// Payload byte count.
-    #[wire(computed = wire_repr::computation::len(payload), le)]
+    /// Payload byte count derived from the payload extent.
+    #[wire(le)]
     pub length: u16,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
 }
 
-/// A computed field with an explicitly selected 24-bit representation.
+/// A computed semantic length with an explicitly selected 24-bit representation.
 #[derive(Wire)]
 pub struct Qualified<'wire> {
     /// Payload byte count.
     #[wire(computed = wire_repr::computation::len(payload), codec = wire_repr::BeU24)]
     pub length: u32,
-    /// Borrowed payload.
-    #[wire(bytes = length)]
+    /// Remaining payload bytes.
+    #[wire(rest)]
     pub payload: &'wire [u8],
 }
 
@@ -86,14 +85,14 @@ impl FixedCodec for PayloadLengthCodec {
     }
 }
 
-/// A computed field whose semantic value is a nominal type.
+/// A computed semantic length whose value is a nominal type.
 #[derive(Wire)]
 pub struct NominalPacket<'wire> {
     /// Payload byte count.
     #[wire(computed = wire_repr::computation::len(payload), codec = PayloadLengthCodec)]
     pub length: PayloadLength,
-    /// Borrowed payload.
-    #[wire(bytes = length)]
+    /// Remaining payload bytes.
+    #[wire(rest)]
     pub payload: &'wire [u8],
 }
 
@@ -118,11 +117,10 @@ pub struct NestedTail<'wire> {
     pub data: &'wire [u8],
 }
 
-/// A computed parent retaining a borrowed nested semantic input.
+/// A bounded parent retaining a borrowed nested semantic input.
 #[derive(Wire)]
 pub struct NestedPacket<'wire> {
-    /// Payload byte count.
-    #[wire(computed = wire_repr::computation::len(payload))]
+    /// Payload byte count derived from the payload extent.
     pub length: u8,
     /// Borrowed payload.
     #[wire(bytes = length)]
@@ -427,12 +425,14 @@ pub struct CallbackEnvelope {
     pub selected: CallbackOperation,
 }
 
-/// A borrowed computed builder whose length must be prepared before geometry.
+/// A borrowed bounded payload with a computed table-selected checksum.
 #[derive(Wire)]
 #[wire(table = CallbackTable)]
 pub struct CallbackPayload<'wire> {
-    /// Payload byte count.
-    #[wire(computed = wire_repr::computation::len(payload))]
+    /// Sum of the selected operation's physical bytes.
+    #[wire(computed = byte_sum(include(selected)))]
+    pub checksum: u8,
+    /// Payload byte count derived from the payload extent.
     pub length: u8,
     /// Borrowed payload.
     #[wire(bytes = length)]
@@ -443,7 +443,7 @@ pub struct CallbackPayload<'wire> {
 }
 
 #[test]
-fn builder_computes_u8_length_and_round_trips() {
+fn bounded_byte_preparation_derives_u8_length_and_round_trips() {
     let payload = [1, 2, 3];
     let plan = Packet::builder()
         .payload(&payload)
@@ -462,7 +462,7 @@ fn builder_computes_u8_length_and_round_trips() {
 }
 
 #[test]
-fn direct_prepare_ignores_the_caller_supplied_computed_value() {
+fn direct_prepare_derives_the_caller_supplied_length_from_payload_extent() {
     let payload = [1, 2, 3];
     let plan = Packet {
         length: u8::MAX,
@@ -480,7 +480,7 @@ fn direct_prepare_ignores_the_caller_supplied_computed_value() {
 }
 
 #[test]
-fn computed_u16_uses_selected_byte_order_and_raw_getter() {
+fn derived_u16_uses_selected_byte_order_and_raw_getter() {
     let payload = [1, 2, 3];
     let mut big = [0; 5];
     let (written, _) = BigEndianPacket::builder()
@@ -553,11 +553,15 @@ fn computed_custom_codec_preserves_a_nominal_semantic_type() {
 }
 
 #[test]
-fn builder_reports_conversion_failure_and_preserves_short_output() {
+fn bounded_byte_preparation_reports_conversion_failure_and_preserves_short_output() {
     let oversized = [0; 256];
     assert!(matches!(
         Packet::builder().payload(&oversized).kind(1).prepare(),
-        Err(PacketEncodeError::ComputedValueNotRepresentable { field: "length" })
+        Err(PacketEncodeError::LengthNotRepresentable {
+            field: "payload",
+            source: "length",
+            length: 256
+        })
     ));
 
     let payload = [1, 2, 3];
@@ -662,7 +666,7 @@ fn parsing_exposes_encoded_count_without_recomputing() {
 }
 
 #[test]
-fn computed_builder_retains_nested_borrowed_inputs() {
+fn bounded_preparation_retains_nested_borrowed_inputs() {
     let payload = [1, 2];
     let data = [4, 5];
     let mut output = [0; 6];
@@ -809,9 +813,9 @@ fn table_bound_fixed_builder_computes_selected_nested_bytes_and_drops_table() {
 }
 
 #[test]
-fn table_bound_borrowed_builder_computes_length_before_geometry_and_is_atomic() {
+fn table_bound_borrowed_builder_combines_computation_with_canonical_framing() {
     let payload = [7, 8];
-    let mut short = [0xa5; 4];
+    let mut short = [0xa5; 5];
     {
         let table = CallbackTable { tag: 0x31 };
         assert!(
@@ -823,7 +827,7 @@ fn table_bound_borrowed_builder_computes_length_before_geometry_and_is_atomic() 
                 .is_err()
         );
     }
-    assert_eq!(short, [0xa5; 4]);
+    assert_eq!(short, [0xa5; 5]);
 
     let plan = {
         let table = CallbackTable { tag: 0x31 };
@@ -834,11 +838,11 @@ fn table_bound_borrowed_builder_computes_length_before_geometry_and_is_atomic() 
             .prepare()
             .unwrap()
     };
-    assert_eq!(plan.encoded_len(), 5);
+    assert_eq!(plan.encoded_len(), 6);
 
-    let mut output = [0; 5];
+    let mut output = [0; 6];
     let (written, suffix) = plan.commit_into(&mut output).unwrap();
-    assert_eq!(written.as_bytes(), &[2, 7, 8, 0x31, 4]);
+    assert_eq!(written.as_bytes(), &[0x35, 2, 7, 8, 0x31, 4]);
     assert_eq!(suffix, &mut []);
 
     let table = CallbackTable { tag: 0x31 };
@@ -846,6 +850,7 @@ fn table_bound_borrowed_builder_computes_length_before_geometry_and_is_atomic() 
         .table(&table)
         .without_trailing()
         .unwrap();
+    assert_eq!(view.checksum(), 0x35);
     assert_eq!(view.length(), 2);
     assert_eq!(view.payload(), payload);
     assert_eq!(view.selected().ping().unwrap().value(), 4);

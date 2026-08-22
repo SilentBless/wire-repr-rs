@@ -182,13 +182,14 @@ and logical ranges are lazy adaptors over that representation.
 
 `#[wire(computed = ...)]` declares a physical stored value that is omitted from builder input
 and prepared canonically during encoding. The declared field keeps its ordinary semantic
-type; a caller-supplied value on the direct struct path is ignored. `len(field)` derives a
-byte length. Computations are infallible derivations; preparation checked-converts each
-result into the field's semantic type and reports an unrepresentable result before creating
-the plan. A callback such as
+type; a caller-supplied value on the direct struct path is ignored. `computation::len` is an
+ordinary generic helper for semantic slice lengths. Computations are infallible derivations;
+preparation checked-converts each result into the field's semantic type and reports an
+unrepresentable result before creating the plan. A callback such as
 `checksum(exclude(self))` receives only the selected prepared physical source. The selection
 is also its compile-time read-set: computed dependencies are prepared topologically, while
-self-inclusion, duplicate paths, missing fields, and dependency cycles are derive errors.
+self-inclusion, missing fields, and dependency cycles are derive errors. Duplicate paths use
+the same set semantics as ordinary byte selections.
 Declaration order remains physical order, not computation order.
 
 On read, the generated getter returns the stored decoded `T`; it does not silently recompute

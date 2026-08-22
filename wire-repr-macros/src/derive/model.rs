@@ -247,18 +247,30 @@ impl WireType {
         validate_positions(&mut fields)?;
         validate_operation_fields(&fields, operation_input.as_ref())?;
         let computation_order = validate_computations(&mut fields)?;
-        if fields.iter().any(|field| field.computation.is_some()) {
+        let controlled_sources: BTreeSet<_> = fields
+            .iter()
+            .filter_map(|field| match field.kind {
+                FieldKind::Bytes { source_index, .. } => Some(source_index),
+                _ => None,
+            })
+            .collect();
+        let has_builder = !controlled_sources.is_empty()
+            || fields.iter().any(|field| field.computation.is_some());
+        if has_builder {
             let reserved = operation_input
                 .as_ref()
                 .map(|input| input.name.to_string())
                 .into_iter()
                 .chain(["prepare".to_owned(), "build_into".to_owned()]);
-            if let Some(field) = fields.iter().find(|field| {
-                field.computation.is_none() && reserved.clone().any(|method| field.name == method)
+            if let Some(field) = fields.iter().enumerate().find_map(|(index, field)| {
+                (field.computation.is_none()
+                    && !controlled_sources.contains(&index)
+                    && reserved.clone().any(|method| field.name == method))
+                .then_some(field)
             }) {
                 return Err(syn::Error::new_spanned(
                     &field.name,
-                    "computed builders reserve operation-input, `prepare`, and `build_into` method names",
+                    "derived builders reserve operation-input, `prepare`, and `build_into` method names",
                 ));
             }
         }
@@ -954,17 +966,19 @@ fn validate_byte_fields(fields: &mut [Field], wire_lifetime: Option<&Lifetime>) 
                     "byte length source must name an earlier field in the same struct",
                 )
             })?;
-        let valid_source = if fields[source_index].computation.is_some() {
-            true
-        } else {
-            match &fields[source_index].kind {
-                FieldKind::Fixed(Codec::Builtin(codec)) => is_unsigned_builtin_codec(codec),
-                FieldKind::Prefix(_) => is_unsigned_integer(&fields[source_index].ty),
-                FieldKind::Fixed(Codec::OwnedBytes(_) | Codec::Custom(_))
-                | FieldKind::Nested
-                | FieldKind::Bytes { .. }
-                | FieldKind::Rest => false,
-            }
+        if fields[source_index].computation.is_some() {
+            return Err(syn::Error::new_spanned(
+                &source,
+                "a computed field cannot be a byte length source because `bytes` owns framing geometry",
+            ));
+        }
+        let valid_source = match &fields[source_index].kind {
+            FieldKind::Fixed(Codec::Builtin(codec)) => is_unsigned_builtin_codec(codec),
+            FieldKind::Prefix(_) => is_unsigned_integer(&fields[source_index].ty),
+            FieldKind::Fixed(Codec::OwnedBytes(_) | Codec::Custom(_))
+            | FieldKind::Nested
+            | FieldKind::Bytes { .. }
+            | FieldKind::Rest => false,
         };
         if !valid_source {
             return Err(syn::Error::new_spanned(
@@ -1702,6 +1716,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_computed_byte_length_sources() {
+        let source = "struct Packet<'wire> { #[wire(computed = count())] length: u8, #[wire(bytes = length)] payload: &'wire [u8] }";
+        let Err(error) = parse(source) else {
+            panic!("accepted conflicting framing source: {source}");
+        };
+        assert!(error.to_string().contains(
+            "a computed field cannot be a byte length source because `bytes` owns framing geometry"
+        ));
+    }
+
+    #[test]
     fn accepts_named_operation_inputs_and_rejects_mixed_dispatch() {
         let WireType::Enum(model) = parse(
             "#[wire(tag = U8, opcodes = Opcodes, opcodes_error = OpcodeMapError, unknown = reject)] enum MappedOperation { #[wire(opcodes = Opcode::Ping)] Ping(Ping), #[wire(opcodes = Opcode::Halt)] Halt }",
@@ -1856,46 +1881,19 @@ mod tests {
         assert!(parse("#[wire(tag = U8, unknown = reject)] struct Packet { value: u8 }").is_err());
     }
     #[test]
-    fn accepts_computed_lengths_and_rejects_invalid_computed_contracts() {
-        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload))] length: u8, #[wire(bytes = length)] payload: &'wire [u8], kind: u8 }").unwrap() else { panic!() };
+    fn accepts_computed_semantic_fields() {
+        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload))] length: u8, #[wire(rest)] payload: &'wire [u8] }").unwrap() else { panic!() };
         assert!(matches!(
-            model.fields[0].computation.as_ref().map(|computation| &computation.value_ty),
+            model.fields[0]
+                .computation
+                .as_ref()
+                .map(|computation| &computation.value_ty),
             Some(Type::Path(path)) if path.path.is_ident("u8")
         ));
         assert!(matches!(
             model.fields[0].kind,
             FieldKind::Fixed(Codec::Builtin("U8"))
         ));
-        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload), be)] length: u16, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
-        assert!(matches!(
-            model.fields[0].kind,
-            FieldKind::Fixed(Codec::Builtin("BeU16"))
-        ));
-        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload), codec = BeU24)] length: u32, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
-        assert!(matches!(
-            model.fields[0].kind,
-            FieldKind::Fixed(Codec::Custom(_))
-        ));
-        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload), codec = LengthCodec)] length: PayloadLength, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
-        assert!(matches!(
-            model.fields[0].computation.as_ref().map(|computation| &computation.value_ty),
-            Some(Type::Path(path)) if path.path.is_ident("PayloadLength")
-        ));
-        assert!(matches!(
-            model.fields[0].kind,
-            FieldKind::Fixed(Codec::Custom(_))
-        ));
-        let WireType::Struct(model) = parse("#[wire(table = Table)] struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload))] length: u8, #[wire(bytes = length)] payload: &'wire [u8], #[wire(table)] selected: Selected }").unwrap() else { panic!() };
-        assert!(model.operation_input.is_some());
-        assert!(model.fields[0].computation.is_some());
-        for source in [
-            "struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload))] length: U8, #[wire(bytes = length)] payload: &'wire [u8] }",
-            "struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload))] length: u16, #[wire(bytes = length)] payload: &'wire [u8] }",
-            "struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload), be)] length: u8, #[wire(bytes = length)] payload: &'wire [u8] }",
-            "#[wire(table = Table)] struct Packet { #[wire(computed = checksum(exclude(self)))] checksum: u8, table: u8, #[wire(table)] selected: Selected }",
-        ] {
-            assert!(parse(source).is_err(), "{source}");
-        }
     }
 
     #[test]

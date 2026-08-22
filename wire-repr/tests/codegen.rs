@@ -65,9 +65,9 @@ struct PositionedPacket {
 struct ComputedPacket<'wire> {
     #[wire(computed = wire_repr::computation::len(payload))]
     length: u8,
-    #[wire(bytes = length)]
-    payload: &'wire [u8],
     kind: u8,
+    #[wire(rest)]
+    payload: &'wire [u8],
 }
 
 #[derive(Debug)]
@@ -450,17 +450,17 @@ pub fn handwritten_nested_prepared_selection(
     output.copy_from_slice(&member.to_be_bytes());
 }
 
-/// Encodes a computed bounded payload through generated preparation and commit.
+/// Encodes a computed payload length through generated preparation and commit.
 #[inline(never)]
 pub fn generated_computed_encode(payload: &[u8], output: &mut [u8]) -> usize {
     ComputedPacket::builder()
-        .payload(payload)
         .kind(9)
+        .payload(payload)
         .build_into(output)
         .map_or(0, |(written, _)| written.as_bytes().len())
 }
 
-/// Encodes the computed bounded payload directly after preflight.
+/// Encodes the computed payload length directly after preflight.
 #[inline(never)]
 pub fn handwritten_computed_encode(payload: &[u8], output: &mut [u8]) -> usize {
     let Ok(length) = u8::try_from(payload.len()) else {
@@ -471,8 +471,8 @@ pub fn handwritten_computed_encode(payload: &[u8], output: &mut [u8]) -> usize {
         return 0;
     }
     output[0] = length;
-    output[1..1 + payload.len()].copy_from_slice(payload);
-    output[1 + payload.len()] = 9;
+    output[1] = 9;
+    output[2..required].copy_from_slice(payload);
     required
 }
 
@@ -697,7 +697,7 @@ fn generated_request_and_plan_layouts_stay_bounded() {
         &[0x7f]
     );
 
-    let computed_builder = ComputedPacket::builder().payload(&[1, 2]).kind(9);
+    let computed_builder = ComputedPacket::builder().kind(9).payload(&[1, 2]);
     assert!(size_of_val(&computed_builder) <= 32);
     let computed_plan = computed_builder.prepare().unwrap();
     assert!(size_of_val(&computed_plan) <= 48);

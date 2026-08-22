@@ -218,11 +218,10 @@ fn source_position_marker_uses_each_plan_runtime_geometry() {
     assert_eq!(long_payload, [0xab, 0xcd]);
 }
 
-/// A dynamic representation with a computed payload length.
+/// A dynamic representation with a payload-derived length.
 #[derive(Wire)]
 pub struct DynamicSelection<'wire> {
-    /// Computed payload length.
-    #[wire(computed = wire_repr::computation::len(payload))]
+    /// Payload length derived from the payload extent.
     pub length: u8,
     /// Borrowed payload.
     #[wire(bytes = length)]
@@ -265,8 +264,7 @@ pub struct NestedSelection {
 /// A dynamic representation with a stored gap before borrowed bytes.
 #[derive(Wire)]
 pub struct DynamicPaddedSelection<'wire> {
-    /// Computed payload length.
-    #[wire(computed = wire_repr::computation::len(payload))]
+    /// Payload length derived from the payload extent.
     pub length: u8,
     /// Payload placed after physical padding and alignment.
     #[wire(bytes = length, pad_before = 2, align_before = 4)]
@@ -350,7 +348,7 @@ pub struct PositionedSelectionParent {
 }
 
 #[test]
-fn computed_dynamic_plan_selects_top_level_spans_in_wire_order() {
+fn dynamic_plan_selects_top_level_spans_in_wire_order() {
     let payload = [2, 3, 4];
     let plan = DynamicSelection::builder()
         .payload(&payload)
