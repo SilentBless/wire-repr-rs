@@ -2,6 +2,7 @@
 
 mod builder;
 mod fixed;
+mod plan;
 mod selection;
 
 use super::super::model::{
@@ -218,12 +219,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let encode_lifetime_arm = wire_lifetime
         .as_ref()
         .map(|_| quote!(Self::__WireLifetime(value, _) => match *value {},));
-    let plan_lifetime_field = wire_lifetime
-        .as_ref()
-        .map(|lifetime| quote!(__wire_repr_lifetime: ::core::marker::PhantomData<&#lifetime ()>,));
-    let plan_lifetime_init = wire_lifetime
-        .as_ref()
-        .map(|_| quote!(__wire_repr_lifetime: ::core::marker::PhantomData,));
     let custom_validation_error = validation_error;
     let generated_validation_error = custom_validation_error.is_none() && has_nested;
     let validation_error = format_ident!("{name}ValidationError");
@@ -327,35 +322,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         )
     };
 
-    let plan_field_types: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| match &field.kind {
-            FieldKind::Fixed(codec) => {
-                let codec = codec_tokens(codec, runtime);
-                quote!(<#codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>)
-            }
-            FieldKind::Nested => {
-                let ty = &field.ty;
-                if field.operation_input.is_some() {
-                    let child_plan = nested_plan_paths[index]
-                        .as_ref()
-                        .expect("operation-backed nested fields have generated plan paths");
-                    quote!(#child_plan)
-                } else {
-                    quote!(<#ty as #runtime::WireEncode>::Plan<'__wire_repr_value>)
-                }
-            }
-            FieldKind::Prefix(codec) => {
-                quote!(<#codec as #runtime::PrefixCodec>::Plan<'__wire_repr_value>)
-            }
-            FieldKind::Bytes { .. } | FieldKind::Rest => quote!(&'__wire_repr_value [u8]),
-        })
-        .collect();
-    let plan_fields = plans
-        .iter()
-        .zip(&plan_field_types)
-        .map(|(plan, ty)| quote!(#plan: #ty));
     let selection = selection::render(selection::Input {
         name: &name,
         vis: &vis,
@@ -374,7 +340,24 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         field_proxy,
         declaration: selection_declaration,
     } = selection;
-    let gap_fields = gap_names.iter().map(|gap| quote!(#gap: usize));
+    let plan_output = plan::render(plan::Input {
+        vis: &vis,
+        wire_lifetime: wire_lifetime.as_ref(),
+        fields: &fields,
+        plans: &plans,
+        gaps: &gaps,
+        gap_names: &gap_names,
+        nested_plan_paths: &nested_plan_paths,
+        plan: &plan,
+        plan_decl_generics: &plan_decl_generics,
+        plan_decl_where: &plan_decl_where,
+        plan_impl_generics: &plan_impl_generics,
+        plan_impl_type: &plan_impl_type,
+        field_proxy: &field_proxy,
+        runtime,
+    });
+    let plan_declaration = plan_output.declaration;
+    let plan_lifetime_init = plan_output.lifetime_init;
     let view_fields: Vec<_> = fields
         .iter()
         .enumerate()
@@ -899,57 +882,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             }
         })
         .collect();
-    let emit_steps = fields
-        .iter()
-        .zip(&plans)
-        .zip(&gaps)
-        .map(|((field, plan), gap)| {
-            let padding = gap
-                .as_ref()
-                .map(|gap| quote!(#runtime::ByteSink::fill(sink, 0, self.#gap);));
-            let emit = match field.kind {
-                FieldKind::Fixed(_)
-                | FieldKind::Prefix(_)
-                | FieldKind::Bytes { .. }
-                | FieldKind::Rest => quote! {
-                    #runtime::ByteSource::emit_to(&self.#plan, sink);
-                },
-                FieldKind::Nested => quote! {
-                    #runtime::ByteSource::emit_to(&self.#plan, sink);
-                },
-            };
-            quote! {
-                #padding
-                #emit
-            }
-        });
-    let plan_cursor_bounds = plan_field_types
-        .iter()
-        .map(|ty| quote!(#ty: #runtime::ByteSourceCursor));
-    let mut plan_segment_types = Vec::new();
-    let mut plan_segment_values = Vec::new();
-    for ((plan, ty), gap) in plans.iter().zip(&plan_field_types).zip(&gaps) {
-        if let Some(gap) = gap {
-            plan_segment_types
-                .push(quote!(::core::iter::Once<#runtime::ByteSegment<'__wire_repr_source>>));
-            plan_segment_values.push(quote!(::core::iter::once(#runtime::ByteSegment::Rest {
-                byte: 0,
-                len: self.#gap,
-            })));
-        }
-        plan_segment_types
-            .push(quote!(<#ty as #runtime::ByteSourceCursor>::Segments<'__wire_repr_source>));
-        plan_segment_values.push(quote!(#runtime::ByteSourceCursor::segments(&self.#plan)));
-    }
-    let plan_segments_type = plan_segment_types
-        .into_iter()
-        .reduce(|left, right| quote!(::core::iter::Chain<#left, #right>))
-        .expect("wire structs have fields");
-    let plan_segments_value = plan_segment_values
-        .into_iter()
-        .reduce(|left, right| quote!(::core::iter::Iterator::chain(#left, #right)))
-        .expect("wire structs have fields");
-
     let decode_position_variants = has_positions.then(|| {
         quote! {
             /// A decoded position does not fit this platform's address space.
@@ -1366,42 +1298,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         #validation_impl
 
         #selection_declaration
-        /// A prepared encoding for this wire representation.
-        #vis struct #plan #plan_decl_generics #plan_decl_where { #(#plan_fields,)* #(#gap_fields,)* #plan_lifetime_field encoded_len: usize }
-        impl #plan_impl_generics #plan_impl_type {
-            /// Returns the exact encoded byte count.
-            #[must_use]
-            #vis const fn encoded_len(&self) -> usize { self.encoded_len }
-            /// Returns a byte-selection root for this prepared representation.
-            #[must_use]
-            #vis fn bytes(&self) -> #runtime::ByteSelection<'_, Self, #field_proxy<#runtime::RootScope>> {
-                #runtime::ByteSelection::new(self, #field_proxy::__wire_repr_new())
-            }
-        }
-        impl #plan_impl_generics #runtime::ByteSource for #plan_impl_type {
-            #[inline(always)]
-            fn byte_len(&self) -> usize { self.encoded_len }
-            #[inline(always)]
-            fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) { #(#emit_steps)* }
-        }
-        impl #plan_impl_generics #runtime::ByteSourceCursor for #plan_impl_type
-        where
-            #(#plan_cursor_bounds,)*
-        {
-            type Segments<'__wire_repr_source> = #plan_segments_type where Self: '__wire_repr_source;
-            #[inline(always)]
-            fn segments(&self) -> Self::Segments<'_> { #plan_segments_value }
-        }
-        impl #plan_impl_generics #runtime::PreparedLayout for #plan_impl_type {
-            type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
-            fn commit_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(Self::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::OutputTooShortError> {
-                let required = self.encoded_len;
-                if output.len() < required { return Err(#runtime::OutputTooShortError { required, available: output.len() }); }
-                let (bytes, suffix) = output.split_at_mut(required);
-                #runtime::ByteSource::write_into(&self, bytes);
-                Ok((#runtime::Written::new(bytes), suffix))
-            }
-        }
+        #plan_declaration
 
         #builder_declaration
         #inherent_impl
