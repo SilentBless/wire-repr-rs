@@ -166,7 +166,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
             let decode_source = position_sources[index]
                 .then(|| {
                     let codec = match &field.kind {
-                        FieldKind::Fixed(codec) => codec_tokens(&codec, runtime),
+                        FieldKind::Fixed(codec) => codec_tokens(codec, runtime),
                         _ => unreachable!(),
                     };
                     quote!(let #field_name = <#codec as #runtime::FixedCodec>::decode(#raw);)
@@ -174,7 +174,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
                 .or_else(|| {
                     controlled_by[index].and_then(|_| match &field.kind {
                         FieldKind::Fixed(codec) => {
-                            let codec = codec_tokens(&codec, runtime);
+                            let codec = codec_tokens(codec, runtime);
                             Some(quote!(let #field_name = <#codec as #runtime::FixedCodec>::decode(#raw);))
                         }
                         FieldKind::Prefix(_) => None,
@@ -183,7 +183,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
                 });
             let decode = match &field.kind {
                 FieldKind::Fixed(codec) => {
-                    let codec = codec_tokens(&codec, runtime);
+                    let codec = codec_tokens(codec, runtime);
                     quote! {
                         let width = <#codec as #runtime::FixedCodec>::WIDTH;
                         let available = remaining.len();
