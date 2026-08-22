@@ -75,6 +75,8 @@ pub(super) struct Computation {
     pub(super) callback: Path,
     /// Ordered callback arguments and their physical read sets.
     pub(super) arguments: Vec<ComputationArgument>,
+    /// Whether preparing this computation requires the representation's physical geometry.
+    pub(super) requires_geometry: bool,
 }
 
 pub(super) enum ComputationArgument {
@@ -244,9 +246,9 @@ impl WireType {
             _ => {}
         }
         validate_byte_fields(&mut fields, wire_lifetime.as_ref())?;
-        validate_positions(&mut fields)?;
         validate_operation_fields(&fields, operation_input.as_ref())?;
         let computation_order = validate_computations(&mut fields)?;
+        validate_positions(&mut fields)?;
         let controlled_sources: BTreeSet<_> = fields
             .iter()
             .filter_map(|field| match field.kind {
@@ -555,10 +557,11 @@ impl Field {
                             })
                         }
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 Some(Computation {
                     value_ty,
                     callback,
+                    requires_geometry: false,
                     arguments,
                 })
             }
@@ -831,7 +834,32 @@ fn validate_computations(fields: &mut [Field]) -> syn::Result<Vec<usize>> {
         fields[index].computation = Some(computation);
     }
 
-    computation_order(fields)
+    let order = computation_order(fields)?;
+    let has_geometry = fields.iter().any(|field| {
+        field.position.is_some() || field.padding_before != 0 || field.alignment_before.is_some()
+    });
+    for &index in &order {
+        let computation = fields[index].computation.as_ref().expect("computed index");
+        let requires_geometry =
+            computation.arguments.iter().any(|argument| {
+                matches!(
+                    argument,
+                    ComputationArgument::Bytes(ComputationByteSelection::Exclude(_))
+                ) && has_geometry
+            }) || computation_dependencies(computation, &order, index).any(|dependency| {
+                fields[dependency]
+                    .computation
+                    .as_ref()
+                    .expect("computed dependency")
+                    .requires_geometry
+            });
+        fields[index]
+            .computation
+            .as_mut()
+            .expect("computed index")
+            .requires_geometry = requires_geometry;
+    }
+    Ok(order)
 }
 
 fn validate_computation_selection(
@@ -1041,6 +1069,16 @@ fn validate_positions(fields: &mut [Field]) -> syn::Result<()> {
             return Err(syn::Error::new_spanned(
                 &source,
                 "position source must be a built-in unsigned integer field",
+            ));
+        }
+        if fields[source_index]
+            .computation
+            .as_ref()
+            .is_some_and(|computation| computation.requires_geometry)
+        {
+            return Err(syn::Error::new_spanned(
+                &source,
+                "a computed position source cannot depend on physical geometry that its position controls",
             ));
         }
         if !controlled_sources.insert(source_index) {
@@ -1678,6 +1716,65 @@ mod tests {
         ] {
             assert!(parse(source).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn schedules_semantic_computed_position_sources_before_geometry() {
+        let WireType::Struct(model) = parse(
+            "struct Packet { lead: u8, #[wire(computed = offset(lead))] offset: u8, #[wire(at = offset)] payload: u8 }",
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            model.fields[2].position,
+            Some(FieldPosition::Source(ref source)) if source == "offset"
+        ));
+        assert!(
+            !model.fields[1]
+                .computation
+                .as_ref()
+                .expect("computed offset")
+                .requires_geometry
+        );
+
+        let WireType::Struct(model) = parse(
+            "struct Packet { #[wire(computed = offset())] offset: u8, #[wire(at = offset)] payload: u8 }",
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert!(
+            !model.fields[0]
+                .computation
+                .as_ref()
+                .expect("computed offset")
+                .requires_geometry
+        );
+    }
+
+    #[test]
+    fn rejects_computed_position_sources_that_require_physical_geometry() {
+        let accepted = "struct Packet { #[wire(computed = offset(include(marker)))] offset: u8, marker: u8, #[wire(at = offset)] payload: u8 }";
+        assert!(parse(accepted).is_ok());
+
+        let source = "struct Packet { #[wire(computed = offset(exclude(marker)))] offset: u8, marker: u8, #[wire(at = offset)] payload: u8 }";
+        let Err(error) = parse(source) else {
+            panic!("accepted computed geometry cycle: {source}");
+        };
+        assert!(error.to_string().contains(
+            "a computed position source cannot depend on physical geometry that its position controls"
+        ));
+
+        let transitive = "struct Packet { #[wire(computed = checksum(exclude(offset)))] checksum: u8, #[wire(computed = offset(include(checksum)))] offset: u8, #[wire(at = offset)] payload: u8 }";
+        let Err(error) = parse(transitive) else {
+            panic!("accepted transitive computed geometry cycle: {transitive}");
+        };
+        assert!(error.to_string().contains(
+            "a computed position source cannot depend on physical geometry that its position controls"
+        ));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 #![deny(missing_docs, unsafe_code)]
 //! Forward field-position coverage.
 
-use wire_repr::{PreparedLayout, Wire};
+use wire_repr::{ByteSourceCursor, PreparedLayout, Wire};
 
 /// A packet whose payload begins at an explicitly encoded forward position.
 #[derive(Debug, Eq, PartialEq, Wire)]
@@ -27,6 +27,38 @@ pub struct DynamicFixedPosition {
     /// Value at the encoded absolute position.
     #[wire(at = value_offset, be)]
     pub value: u16,
+}
+
+fn semantic_offset(lead: &u8) -> usize {
+    usize::from(*lead)
+}
+
+fn selected_offset(source: &impl ByteSourceCursor) -> usize {
+    source.byte_len() + 3
+}
+
+/// A positioned payload whose offset is computed from an ordinary semantic input.
+#[derive(Debug, Eq, PartialEq, Wire)]
+pub struct ComputedPosition {
+    /// Semantic input that determines the canonical payload offset.
+    pub lead: u8,
+    /// Canonical payload position derived from `lead`.
+    #[wire(computed = semantic_offset(lead))]
+    pub payload_offset: u8,
+    /// Payload at the computed absolute position.
+    #[wire(at = payload_offset)]
+    pub payload: u8,
+}
+
+/// A positioned payload whose offset is computed from available field bytes.
+#[derive(Debug, Eq, PartialEq, Wire)]
+pub struct SelectedComputedPosition {
+    /// Canonical payload position derived before parent geometry.
+    #[wire(computed = selected_offset(include(payload)))]
+    pub payload_offset: u8,
+    /// Payload at the computed absolute position.
+    #[wire(at = payload_offset)]
+    pub payload: u8,
 }
 
 /// A field with a fixed forward position.
@@ -159,4 +191,68 @@ fn dynamic_fixed_positions_retain_validated_field_spans() {
 
     let copied = view;
     assert_eq!(copied.value(), 0x1234);
+}
+
+#[test]
+fn computed_position_sources_are_canonical_before_geometry() {
+    let plan = ComputedPosition::builder()
+        .lead(4)
+        .payload(9)
+        .prepare()
+        .unwrap();
+    assert_eq!(plan.encoded_len(), 5);
+    let mut output = [0xa5; 6];
+    let (written, suffix) = plan.commit_into(&mut output).unwrap();
+    assert_eq!(written.as_bytes(), &[4, 4, 0, 0, 9]);
+    assert_eq!(suffix, &mut [0xa5]);
+
+    let view = ComputedPosition::view(written.as_bytes())
+        .without_trailing()
+        .unwrap();
+    assert_eq!(view.lead(), 4);
+    assert_eq!(view.payload_offset(), 4);
+    assert_eq!(view.payload(), 9);
+
+    let direct = ComputedPosition {
+        lead: 4,
+        payload_offset: 99,
+        payload: 9,
+    }
+    .prepare()
+    .unwrap();
+    let mut direct_output = [0; 5];
+    let (direct_written, suffix) = direct.commit_into(&mut direct_output).unwrap();
+    assert_eq!(direct_written.as_bytes(), &[4, 4, 0, 0, 9]);
+    assert!(suffix.is_empty());
+
+    let mut constant = [0; 5];
+    let (written, suffix) = SelectedComputedPosition::builder()
+        .payload(7)
+        .build_into(&mut constant)
+        .unwrap();
+    assert_eq!(written.as_bytes(), &[4, 0, 0, 0, 7]);
+    assert!(suffix.is_empty());
+    assert_eq!(
+        SelectedComputedPosition::view(written.as_bytes())
+            .without_trailing()
+            .unwrap()
+            .payload(),
+        7
+    );
+}
+
+#[test]
+fn computed_position_sources_report_backward_positions_during_preparation() {
+    let error = match ComputedPosition::builder().lead(1).payload(9).prepare() {
+        Err(error) => error,
+        Ok(_) => panic!("a backward computed position should fail during preparation"),
+    };
+    assert!(matches!(
+        error,
+        ComputedPositionEncodeError::PositionBeforeCursor {
+            field: "payload",
+            position: 1,
+            cursor: 2,
+        }
+    ));
 }

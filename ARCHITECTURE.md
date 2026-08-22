@@ -192,6 +192,11 @@ self-inclusion, missing fields, and dependency cycles are derive errors. Duplica
 the same set semantics as ordinary byte selections.
 Declaration order remains physical order, not computation order.
 
+A computed source for dynamic `at` placement is prepared before geometry when its callback
+uses semantic arguments or field plans already available at that stage. A selection that needs
+the parent geometry cannot derive the source controlling that geometry, so derive rejects the
+cycle.
+
 On read, the generated getter returns the stored decoded `T`; it does not silently recompute
 or reject it. Cross-byte consistency remains ordinary model validation over the exact-source
 view selection, keeping derivation and validation separate.

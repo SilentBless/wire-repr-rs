@@ -948,6 +948,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             let plan = &plans[index];
             let variant = &variants[index];
             let source_ty = &computation.value_ty;
+            let field_name = &field.name;
             let field_label = field.name.to_string();
             let callback = &computation.callback;
             let mut callback_preparation = Vec::new();
@@ -970,21 +971,18 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     }
                 })
                 .collect();
-            let needs_geometry = computation
-                .arguments
-                .iter()
-                .any(|argument| matches!(argument, ComputationArgument::Bytes(_)));
+            let requires_geometry = computation.requires_geometry;
             let step = quote! {
                 #(#callback_preparation)*
-                let source_value = <#source_ty>::try_from(#callback(#(#callback_arguments),*)).map_err(|_| {
+                let #field_name = <#source_ty>::try_from(#callback(#(#callback_arguments),*)).map_err(|_| {
                     #encode_error::ComputedValueNotRepresentable {
                         field: #field_label,
                     }
                 })?;
-                let #plan = <#codec as #runtime::FixedCodec>::plan(source_value)
+                let #plan = <#codec as #runtime::FixedCodec>::plan(#field_name)
                     .map_err(#encode_error::#variant)?;
             };
-            (needs_geometry, step)
+            (requires_geometry, step)
         })
         .collect();
     let early_computation_steps: Vec<_> = computation_steps
