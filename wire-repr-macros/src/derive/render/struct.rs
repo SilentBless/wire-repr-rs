@@ -1,5 +1,6 @@
 //! Struct derive rendering.
 
+mod builder;
 mod fixed;
 
 use super::super::model::{
@@ -1297,130 +1298,23 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         }
     };
 
-    let builder = has_builder.then(|| {
-        let builder_name = format_ident!("{name}Builder");
-        let (builder_decl_generics, builder_type, builder_plan_type, builder_error_type) =
-            if let Some(lifetime) = wire_lifetime.as_ref() {
-                (
-                    quote!(<#lifetime>),
-                    quote!(#builder_name<#lifetime>),
-                    quote!(#plan<#lifetime, #lifetime>),
-                    quote!(#encode_error<#lifetime>),
-                )
-            } else {
-                (
-                    quote!(),
-                    quote!(#builder_name),
-                    quote!(#plan<'static>),
-                    quote!(#encode_error),
-                )
-            };
-        let builder_fields = prepare_fields.iter().map(|field| {
-            let field_name = &field.name;
-            let ty = match (&field.kind, wire_lifetime.as_ref()) {
-                (FieldKind::Bytes { .. } | FieldKind::Rest, Some(lifetime)) => quote!(&#lifetime [u8]),
-                _ => { let ty = &field.ty; quote!(#ty) }
-            };
-            quote!(#field_name: ::core::option::Option<#ty>)
-        });
-        let setters = prepare_fields.iter().map(|field| {
-            let field_name = &field.name;
-            let ty = match (&field.kind, wire_lifetime.as_ref()) {
-                (FieldKind::Bytes { .. } | FieldKind::Rest, Some(lifetime)) => quote!(&#lifetime [u8]),
-                _ => { let ty = &field.ty; quote!(#ty) }
-            };
-            quote! {
-                #[doc = concat!("Sets the `", stringify!(#field_name), "` field.")]
-                #vis fn #field_name(mut self, value: #ty) -> Self {
-                    self.#field_name = Some(value);
-                    self
-                }
-            }
-        });
-        let missing = prepare_fields.iter().map(|field| { let field_name=&field.name; let label=field_name.to_string(); quote!(let #field_name = builder.#field_name.ok_or(#encode_error::MissingField { field: #label })?;) });
-        if let (Some(operation_input_ty), Some(operation_name)) =
-            (operation_input_ty, operation_name)
-        {
-            let request_name = format_ident!("{name}Builder{}Request", operation_name);
-            let request_decl_generics = if let Some(lifetime) = wire_lifetime.as_ref() {
-                quote!(<#lifetime, '__wire_repr_operation>)
-            } else {
-                quote!(<'__wire_repr_operation>)
-            };
-            let request_type = if let Some(lifetime) = wire_lifetime.as_ref() {
-                quote!(#request_name<#lifetime, '_>)
-            } else {
-                quote!(#request_name<'_>)
-            };
-            quote! {
-                /// A no-allocation builder for this computed wire representation.
-                #vis struct #builder_name #builder_decl_generics { #(#builder_fields,)* }
-                #[doc(hidden)]
-                #vis struct #request_name #request_decl_generics {
-                    builder: #builder_type,
-                    #operation_name: &'__wire_repr_operation #operation_input_ty,
-                }
-                impl #builder_decl_generics #builder_type {
-                    #(#setters)*
-                    /// Binds the schema-named input for encoding.
-                    #[must_use]
-                    #vis fn #operation_name(self, #operation_name: &#operation_input_ty) -> #request_type {
-                        #request_name { builder: self, #operation_name }
-                    }
-                }
-                #[allow(missing_docs)]
-                impl #request_decl_generics #request_name #request_decl_generics {
-                    /// Prepares this encoding after checking all caller-owned fields.
-                    #vis fn prepare(self) -> Result<#builder_plan_type, #builder_error_type> {
-                        let Self { builder, #operation_name } = self;
-                        #(#missing)*
-                        <#self_type>::#prepare_helper(#(#prepare_field_names,)* #operation_name)
-                    }
-                    /// Prepares and atomically writes this encoding into `output`.
-                    #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#builder_error_type>> {
-                        let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?;
-                        #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output)
-                    }
-                }
-            }
-        } else {
-            quote! {
-                /// A no-allocation builder for this computed wire representation.
-                #vis struct #builder_name #builder_decl_generics { #(#builder_fields,)* }
-                impl #builder_decl_generics #builder_type {
-                    #(#setters)*
-                    /// Prepares this encoding after checking all caller-owned fields.
-                    #vis fn prepare(self) -> Result<#builder_plan_type, #builder_error_type> { let builder = self; #(#missing)* <#self_type>::#prepare_helper(#(#prepare_field_names),*) }
-                    /// Prepares and atomically writes this encoding into `output`.
-                    #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#builder_error_type>> { let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?; #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output) }
-                }
-            }
-        }
+    let builder = builder::render(builder::Input {
+        has_builder,
+        name: &name,
+        vis: &vis,
+        wire_lifetime: wire_lifetime.as_ref(),
+        operation_input_ty,
+        operation_name,
+        prepare_fields: &prepare_fields,
+        prepare_field_names: &prepare_field_names,
+        plan: &plan,
+        encode_error: &encode_error,
+        self_type: &self_type,
+        prepare_helper: &prepare_helper,
+        runtime,
     });
-
-    let builder_method = has_builder.then(|| {
-        let builder_name = format_ident!("{name}Builder");
-        let builder_type = if let Some(lifetime) = wire_lifetime.as_ref() {
-            quote!(#builder_name<#lifetime>)
-        } else {
-            quote!(#builder_name)
-        };
-        let builder_empty_fields = fields
-            .iter()
-            .enumerate()
-            .filter(|(index, field)| field.computation.is_none() && controlled_by[*index].is_none())
-            .map(|(_, field)| field)
-            .map(|field| {
-                let name = &field.name;
-                quote!(#name: ::core::option::Option::None)
-            });
-        quote! {
-            /// Starts a no-allocation builder for this computed representation.
-            #vis fn builder() -> #builder_type {
-                #builder_name { #(#builder_empty_fields,)* }
-            }
-        }
-    });
+    let builder_declaration = builder.declaration;
+    let builder_method = builder.method;
 
     let inherent_impl = if operation_input_ty.is_some() {
         let operation_name = operation_name.expect("operation input");
@@ -1677,7 +1571,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             }
         }
 
-        #builder
+        #builder_declaration
         #inherent_impl
         impl #impl_generics #runtime::WireViewType for #self_type {
             type DecodeError<'__wire_repr_view> = #association_error_type;
