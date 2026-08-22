@@ -4,6 +4,7 @@ mod builder;
 mod fixed;
 mod plan;
 mod selection;
+mod view;
 
 use super::super::model::{
     Codec, ComputationArgument, ComputationByteSelection, Field, FieldKind, FieldPosition,
@@ -340,6 +341,23 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         field_proxy,
         declaration: selection_declaration,
     } = selection;
+    let view_declaration = view::render(view::Input {
+        vis: &vis,
+        fields: &fields,
+        labels: &labels,
+        variants: &variants,
+        controlled_by: &controlled_by,
+        position_sources: &position_sources,
+        nested_view_paths: &nested_view_paths,
+        view: &view,
+        decode_error: &decode_error,
+        view_error_type: &view_error_type,
+        operation_input_ty,
+        operation_parse: operation_parse.as_ref(),
+        field_proxy: &field_proxy,
+        runtime,
+    })
+    .declaration;
     let plan_output = plan::render(plan::Input {
         vis: &vis,
         wire_lifetime: wire_lifetime.as_ref(),
@@ -358,251 +376,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     });
     let plan_declaration = plan_output.declaration;
     let plan_lifetime_init = plan_output.lifetime_init;
-    let view_fields: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            let stored = format_ident!("field_{index}");
-            match field.kind {
-                FieldKind::Nested => {
-                    let child_view = nested_view_paths[index]
-                        .as_ref()
-                        .expect("nested fields have generated view paths");
-                    quote!(#stored: #child_view<'__wire_repr_wire>)
-                }
-                FieldKind::Fixed(_)
-                | FieldKind::Prefix(_)
-                | FieldKind::Bytes { .. }
-                | FieldKind::Rest => {
-                    quote!(#stored: &'__wire_repr_wire [u8])
-                }
-            }
-        })
-        .collect();
-    let view_initializers: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            let stored = format_ident!("field_{index}");
-            let name = &field.name;
-            match field.kind {
-                FieldKind::Fixed(_) => {
-                    let raw = format_ident!("raw_{index}");
-                    quote!(#stored: #raw)
-                }
-                FieldKind::Prefix(_) => {
-                    let raw = format_ident!("raw_{index}");
-                    quote!(#stored: #raw)
-                }
-                FieldKind::Nested | FieldKind::Bytes { .. } | FieldKind::Rest => {
-                    quote!(#stored: #name)
-                }
-            }
-        })
-        .collect();
-    let decode_steps: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .zip(&labels)
-        .zip(&variants)
-        .map(|(((index, field), label), variant)| {
-            let field_name = &field.name;
-            let raw = format_ident!("raw_{index}");
-            let geometry = if let Some(position) = &field.position {
-                let (position, conversion) = match position {
-                    FieldPosition::Static(position) => (quote!(#position), quote!()),
-                    FieldPosition::Source(source) => (
-                        quote!(position),
-                        quote! {
-                            let position = usize::try_from(#source).map_err(|_| {
-                                #decode_error::PositionNotRepresentable {
-                                    field: #label,
-                                    value: #source as u128,
-                                }
-                            })?;
-                        },
-                    ),
-                };
-                quote! {
-                    #conversion
-                    let represented = input.len() - remaining.len();
-                    if #position < represented {
-                        return Err(#decode_error::PositionBeforeCursor {
-                            field: #label,
-                            position: #position,
-                            cursor: represented,
-                        });
-                    }
-                    let gap = #position - represented;
-                    let available = remaining.len();
-                    let Some((_, suffix)) = remaining.split_at_checked(gap) else {
-                        return Err(#decode_error::InputTooShort {
-                            field: #label,
-                            required: gap,
-                            available,
-                        });
-                    };
-                    remaining = suffix;
-                }
-            } else if field.padding_before == 0 && field.alignment_before.is_none() {
-                quote!()
-            } else {
-                let padding = field.padding_before;
-                let alignment = match field.alignment_before {
-                    Some(boundary) => quote!(Some(#boundary)),
-                    None => quote!(None::<usize>),
-                };
-                quote! {
-                    let represented = input.len() - remaining.len();
-                    let padded = represented.checked_add(#padding).ok_or(
-                        #decode_error::GeometryOverflow { field: #label },
-                    )?;
-                    let alignment_padding = match #alignment {
-                        Some(boundary) => {
-                            let remainder = padded % boundary;
-                            if remainder == 0 { 0 } else { boundary - remainder }
-                        }
-                        None => 0,
-                    };
-                    let gap = #padding.checked_add(alignment_padding).ok_or(
-                        #decode_error::GeometryOverflow { field: #label },
-                    )?;
-                    let available = remaining.len();
-                    let Some((_, suffix)) = remaining.split_at_checked(gap) else {
-                        return Err(#decode_error::InputTooShort {
-                            field: #label,
-                            required: gap,
-                            available,
-                        });
-                    };
-                    remaining = suffix;
-                }
-            };
-            let decode_source = position_sources[index]
-                .then(|| {
-                    let codec = match &field.kind {
-                        FieldKind::Fixed(codec) => codec_tokens(codec, runtime),
-                        _ => unreachable!(),
-                    };
-                    quote!(let #field_name = <#codec as #runtime::FixedCodec>::decode(#raw);)
-                })
-                .or_else(|| {
-                    controlled_by[index].and_then(|_| match &field.kind {
-                        FieldKind::Fixed(codec) => {
-                            let codec = codec_tokens(codec, runtime);
-                            Some(quote!(let #field_name = <#codec as #runtime::FixedCodec>::decode(#raw);))
-                        }
-                        FieldKind::Prefix(_) => None,
-                        _ => unreachable!(),
-                    })
-                });
-            let decode = match &field.kind {
-                FieldKind::Fixed(codec) => {
-                    let codec = codec_tokens(codec, runtime);
-                    quote! {
-                        let width = <#codec as #runtime::FixedCodec>::WIDTH;
-                        let available = remaining.len();
-                        let Some((#raw, suffix)) = remaining.split_at_checked(width) else {
-                            return Err(#decode_error::InputTooShort { field: #label, required: width, available });
-                        };
-                        #decode_source
-                        remaining = suffix;
-                    }
-                }
-                FieldKind::Nested => {
-                    let child_view = nested_view_paths[index]
-                        .as_ref()
-                        .expect("nested fields have generated view paths");
-                    if let Some(operation) = &field.operation_input {
-                        let parse = format_ident!("__wire_repr_parse_with_{operation}");
-                        quote! {
-                            let (#field_name, suffix) = #child_view::#parse(remaining, operation)
-                                .map_err(#decode_error::#variant)?;
-                            remaining = suffix;
-                        }
-                    } else {
-                        quote! {
-                            let (#field_name, suffix) = <#child_view<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::parse_view(remaining)
-                                .map_err(#decode_error::#variant)?;
-                            remaining = suffix;
-                        }
-                    }
-                }
-                FieldKind::Prefix(codec) => {
-                    let decode_source = controlled_by[index].is_some().then(|| quote! {
-                        let #field_name = <#codec as #runtime::PrefixCodec>::decode(#raw);
-                    });
-                    quote! {
-                        let extent = <#codec as #runtime::PrefixCodec>::validate_prefix(remaining)
-                            .map_err(#decode_error::#variant)?;
-                        let required = extent.encoded_len().get();
-                        let available = remaining.len();
-                        let Some((#raw, suffix)) = extent.split_input(remaining) else {
-                            return Err(#decode_error::InputTooShort {
-                                field: #label,
-                                required,
-                                available,
-                            });
-                        };
-                        #decode_source
-                        remaining = suffix;
-                    }
-                },
-                FieldKind::Bytes { source, .. } => quote! {
-                    let required = usize::try_from(#source).map_err(|_| {
-                        #decode_error::LengthNotRepresentable {
-                            field: #label,
-                        }
-                    })?;
-                    let available = remaining.len();
-                    let Some((#field_name, suffix)) = remaining.split_at_checked(required) else {
-                        return Err(#decode_error::InputTooShort {
-                            field: #label,
-                            required,
-                            available,
-                        });
-                    };
-                    remaining = suffix;
-                },
-                FieldKind::Rest => quote! {
-                    let #field_name = remaining;
-                    remaining = &[];
-                },
-            };
-            quote! { #geometry #decode }
-        })
-        .collect();
-    let getters = fields.iter().enumerate().map(|(index, field)| {
-        let field_name = &field.name;
-        let label = &labels[index];
-        let stored = format_ident!("field_{index}");
-        let (return_type, value) = match &field.kind {
-            FieldKind::Fixed(codec) => {
-                let codec_tokens = codec_tokens(codec, runtime);
-                match codec {
-                    Codec::OwnedBytes(length) => (quote!(&'__wire_repr_wire [u8; #length]), quote!(match <&'__wire_repr_wire [u8; #length]>::try_from(self.#stored) { Ok(bytes) => bytes, Err(_) => unreachable!("validated fixed byte array has its declared width"), })),
-                    _ if field.computation.is_some() => {
-                        let value_ty = &field.computation.as_ref().expect("checked").value_ty;
-                        (quote!(#value_ty), quote!(<#codec_tokens as #runtime::FixedCodec>::decode(self.#stored)))
-                    }
-                    _ => (quote!(<#codec_tokens as #runtime::FixedCodec>::Value<'__wire_repr_wire>), quote!(<#codec_tokens as #runtime::FixedCodec>::decode(self.#stored))),
-                }
-            }
-            FieldKind::Nested => {
-                let child_view = nested_view_paths[index]
-                    .as_ref()
-                    .expect("nested fields have generated view paths");
-                (quote!(#child_view<'__wire_repr_wire>), quote!(self.#stored))
-            }
-            FieldKind::Prefix(codec) => (quote!(<#codec as #runtime::PrefixCodec>::Value<'__wire_repr_wire>), quote!(<#codec as #runtime::PrefixCodec>::decode(self.#stored))),
-            FieldKind::Bytes { .. } | FieldKind::Rest => (quote!(&'__wire_repr_wire [u8]), quote!(self.#stored)),
-        };
-        quote! {
-            #[doc = concat!("Returns the decoded `", #label, "` field.")]
-            #[must_use]
-            #vis fn #field_name(&self) -> #return_type { #value }
-        }
-    });
     let decode_variants =
         fields
             .iter()
@@ -1036,40 +809,6 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         })
     };
 
-    let operation_view_helper = if operation_input_ty.is_some() {
-        quote! {
-            #[doc(hidden)]
-            #vis fn #operation_parse(
-                input: &'__wire_repr_wire [u8],
-                operation: &#operation_input_ty,
-            ) -> Result<(Self, &'__wire_repr_wire [u8]), #view_error_type> {
-                let mut remaining = input;
-                #(#decode_steps)*
-                let represented = &input[..input.len() - remaining.len()];
-                Ok((Self { bytes: represented, #(#view_initializers,)* }, remaining))
-            }
-        }
-    } else {
-        quote!()
-    };
-    let view_impl = if operation_input_ty.is_some() {
-        quote!()
-    } else {
-        quote! {
-            impl<'__wire_repr_wire> #runtime::WireView<'__wire_repr_wire> for #view<'__wire_repr_wire> {
-                type DecodeError = #view_error_type;
-                fn parse_view(input: &'__wire_repr_wire [u8]) -> Result<(Self, &'__wire_repr_wire [u8]), Self::DecodeError> {
-                    let mut remaining = input;
-                    #(#decode_steps)*
-                    let represented = &input[..input.len() - remaining.len()];
-                    Ok((Self { bytes: represented, #(#view_initializers,)* }, remaining))
-                }
-                fn trailing_bytes_error(represented: usize, input: usize) -> Self::DecodeError { #decode_error::TrailingBytes { expected: represented, actual: input } }
-                fn as_bytes(&self) -> &'__wire_repr_wire [u8] { self.bytes }
-            }
-        }
-    };
-
     let builder = builder::render(builder::Input {
         has_builder,
         name: &name,
@@ -1265,35 +1004,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         }
         impl ::core::error::Error for #encode_error_impl_type {}
 
-        /// A bytes-backed validated read view for this wire representation.
-        #[derive(Clone, Copy, Debug)]
-        #vis struct #view<'__wire_repr_wire> { bytes: &'__wire_repr_wire [u8], #(#view_fields,)* }
-        impl<'__wire_repr_wire> #view<'__wire_repr_wire> {
-            /// Returns this view's exact represented bytes.
-            #[must_use]
-            #vis const fn as_bytes(&self) -> &'__wire_repr_wire [u8] { self.bytes }
-            /// Returns a byte-selection root for this exact source representation.
-            #[must_use]
-            #vis fn bytes(&self) -> #runtime::ByteSelection<'_, Self, #field_proxy<#runtime::RootScope>> {
-                #runtime::ByteSelection::new(self, #field_proxy::__wire_repr_new())
-            }
-            #(#getters)*
-            #operation_view_helper
-        }
-        #view_impl
-        impl<'__wire_repr_wire> #runtime::ByteSource for #view<'__wire_repr_wire> {
-            #[inline(always)]
-            fn byte_len(&self) -> usize { self.as_bytes().len() }
-            #[inline(always)]
-            fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) { sink.write(self.as_bytes()); }
-        }
-        impl<'__wire_repr_wire> #runtime::ByteSourceCursor for #view<'__wire_repr_wire> {
-            type Segments<'__wire_repr_source> = ::core::iter::Once<#runtime::ByteSegment<'__wire_repr_source>> where Self: '__wire_repr_source;
-            #[inline(always)]
-            fn segments(&self) -> Self::Segments<'_> {
-                ::core::iter::once(#runtime::ByteSegment::Bytes(self.as_bytes()))
-            }
-        }
+        #view_declaration
         #generated_validation_error_decl
         #validation_impl
 
