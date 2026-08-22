@@ -165,7 +165,7 @@ Generated plans and views expose typed physical-byte selections. The result rema
 streaming source rather than a hidden contiguous buffer:
 
 ```rust
-use wire_repr::{ByteSource, ByteSourceCursor, Computed, Wire};
+use wire_repr::{ByteSource, ByteSourceCursor, Wire};
 
 fn checksum(source: &impl ByteSourceCursor) -> u8 {
     source.bytes().fold(0, u8::wrapping_add)
@@ -174,9 +174,9 @@ fn checksum(source: &impl ByteSourceCursor) -> u8 {
 #[derive(Wire)]
 struct Packet<'wire> {
     #[wire(computed = checksum(exclude(self)))]
-    checksum: Computed<u8>,
-    #[wire(computed = len(payload))]
-    length: Computed<u8>,
+    checksum: u8,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    length: u8,
     #[wire(bytes = length)]
     payload: &'wire [u8],
 }
@@ -195,6 +195,7 @@ assert_eq!(represented, [3, 1, 2, 3]);
 Selectors are evaluated in physical wire order and support nested field projections.
 Computed selections also define compile-time dependencies; derive rejects self-inclusion,
 missing or duplicate paths, and cycles. Views select exact stored bytes, while plans select
-canonical prepared bytes.
+canonical prepared bytes. Computations are infallible derivations; preparation
+checked-converts their results into the stored field type.
 
 For custom field codecs and exact planning contracts, see [`codec`].

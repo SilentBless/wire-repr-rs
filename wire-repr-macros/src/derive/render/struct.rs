@@ -3,8 +3,8 @@
 mod fixed;
 
 use super::super::model::{
-    Codec, Computation, ComputationByteSelection, ComputationOperation, Field, FieldKind,
-    FieldPosition, WireStruct,
+    Codec, ComputationArgument, ComputationByteSelection, Field, FieldKind, FieldPosition,
+    WireStruct,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -41,6 +41,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let operation_prepare = operation_input
         .as_ref()
         .map(|input| format_ident!("__wire_repr_prepare_with_{}", input.name));
+    let operation_value = format_ident!("__wire_repr_operation");
     let view_input_request = format_ident!("{name}ViewInputRequest");
     let direct_view_request = format_ident!("{name}ViewRequest");
     let unchecked_view_request = format_ident!("{name}UncheckedViewRequest");
@@ -83,6 +84,37 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         })
         .collect();
     let has_computed = fields.iter().any(|field| field.computation.is_some());
+    let prepare_fields: Vec<_> = fields
+        .iter()
+        .filter(|field| field.computation.is_none())
+        .collect();
+    let prepare_field_names: Vec<_> = prepare_fields.iter().map(|field| &field.name).collect();
+    let prepare_field_parameters: Vec<_> = prepare_fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.name;
+            let ty = &field.ty;
+            quote!(#field_name: #ty)
+        })
+        .collect();
+    let prepare_destructure: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.name;
+            if field.computation.is_some() {
+                quote!(#field_name: _)
+            } else {
+                quote!(#field_name)
+            }
+        })
+        .collect();
+    let prepare_helper = format_ident!("__wire_repr_prepare_fields");
+    let ignored_prepare_fields: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .filter(|(index, field)| field.computation.is_none() && controlled_by[*index].is_some())
+        .map(|(_, field)| &field.name)
+        .collect();
     let has_bytes = controlled_by.iter().any(Option::is_some) || has_computed;
     let position_sources: Vec<_> = fields
         .iter()
@@ -855,11 +887,11 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     let bytes_name = &bytes_field.name;
                     let bytes_label = bytes_name.to_string();
                     quote! {
-                        let source_value = <#source_ty>::try_from(self.#bytes_name.len()).map_err(|_| {
+                        let source_value = <#source_ty>::try_from(#bytes_name.len()).map_err(|_| {
                             #encode_error::LengthNotRepresentable {
                                 field: #bytes_label,
                                 source: #source_label,
-                                length: self.#bytes_name.len(),
+                                length: #bytes_name.len(),
                             }
                         })?;
                         let #plan = <#codec as #runtime::FixedCodec>::plan(source_value)
@@ -868,14 +900,14 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 }
                 (FieldKind::Fixed(codec), None) => {
                     let codec = codec_tokens(codec, runtime);
-                    quote!(let #plan = <#codec as #runtime::FixedCodec>::plan(self.#field_name).map_err(#encode_error::#variant)?;)
+                    quote!(let #plan = <#codec as #runtime::FixedCodec>::plan(#field_name).map_err(#encode_error::#variant)?;)
                 }
                 (FieldKind::Nested, _) => {
                     let ty = &field.ty;
                     if field.operation_input.is_some() {
-                        quote!(let #plan = <#ty>::#operation_prepare(self.#field_name, operation).map_err(#encode_error::#variant)?;)
+                        quote!(let #plan = <#ty>::#operation_prepare(#field_name, #operation_value).map_err(#encode_error::#variant)?;)
                     } else {
-                        quote!(let #plan = <#ty as #runtime::WireEncode>::prepare(self.#field_name).map_err(#encode_error::#variant)?;)
+                        quote!(let #plan = <#ty as #runtime::WireEncode>::prepare(#field_name).map_err(#encode_error::#variant)?;)
                     }
                 }
                 (FieldKind::Prefix(codec), Some(bytes_index)) => {
@@ -885,11 +917,11 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     let bytes_name = &bytes_field.name;
                     let bytes_label = bytes_name.to_string();
                     quote! {
-                        let source_value = <#source_ty>::try_from(self.#bytes_name.len()).map_err(|_| {
+                        let source_value = <#source_ty>::try_from(#bytes_name.len()).map_err(|_| {
                             #encode_error::LengthNotRepresentable {
                                 field: #bytes_label,
                                 source: #source_label,
-                                length: self.#bytes_name.len(),
+                                length: #bytes_name.len(),
                             }
                         })?;
                         let #plan = <#codec as #runtime::PrefixCodec>::plan(source_value)
@@ -897,10 +929,10 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     }
                 }
                 (FieldKind::Prefix(codec), None) => {
-                    quote!(let #plan = <#codec as #runtime::PrefixCodec>::plan(self.#field_name).map_err(#encode_error::#variant)?;)
+                    quote!(let #plan = <#codec as #runtime::PrefixCodec>::plan(#field_name).map_err(#encode_error::#variant)?;)
                 }
                 (FieldKind::Bytes { .. } | FieldKind::Rest, _) => {
-                    quote!(let #plan = self.#field_name;)
+                    quote!(let #plan = #field_name;)
                 }
             })
         })
@@ -917,51 +949,52 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             let plan = &plans[index];
             let variant = &variants[index];
             let source_ty = &computation.value_ty;
-            let bytes_name = format_ident!("__wire_repr_computed_bytes_{index}");
-            let source = computation_source(computation, index, &fields, &plans, &gaps, runtime);
-            let value = match &computation.operation {
-                ComputationOperation::Length => {
-                    let ComputationByteSelection::Include(paths) = &computation.bytes else {
-                        unreachable!("length computation selection")
-                    };
-                    let target = &fields[paths[0].top_level_index].name;
-                    let target_label = target.to_string();
-                    let source_label = field.name.to_string();
-                    quote! {
-                        let length = #runtime::ByteSource::byte_len(&#bytes_name);
-                        let source_value = <#source_ty>::try_from(length).map_err(|_| {
-                            #encode_error::LengthNotRepresentable {
-                                field: #target_label,
-                                source: #source_label,
-                                length,
-                            }
-                        })?;
+            let field_label = field.name.to_string();
+            let callback = &computation.callback;
+            let mut callback_preparation = Vec::new();
+            let callback_arguments: Vec<_> = computation
+                .arguments
+                .iter()
+                .enumerate()
+                .map(|(argument_index, argument)| match argument {
+                    ComputationArgument::Semantic { index, .. } => {
+                        let name = &fields[*index].name;
+                        quote!(&#name)
                     }
-                }
-                ComputationOperation::Callback(callback) => {
-                    quote!(let source_value: #source_ty = #callback(&#bytes_name);)
-                }
+                    ComputationArgument::Bytes(selection) => {
+                        let bytes_name = format_ident!(
+                            "__wire_repr_computed_bytes_{index}_{argument_index}"
+                        );
+                        let source = computation_source(selection, index, &fields, &plans, &gaps, runtime);
+                        callback_preparation.push(quote!(let #bytes_name = #source;));
+                        quote!(&#bytes_name)
+                    }
+                })
+                .collect();
+            let needs_geometry = computation
+                .arguments
+                .iter()
+                .any(|argument| matches!(argument, ComputationArgument::Bytes(_)));
+            let step = quote! {
+                #(#callback_preparation)*
+                let source_value = <#source_ty>::try_from(#callback(#(#callback_arguments),*)).map_err(|_| {
+                    #encode_error::ComputedValueNotRepresentable {
+                        field: #field_label,
+                    }
+                })?;
+                let #plan = <#codec as #runtime::FixedCodec>::plan(source_value)
+                    .map_err(#encode_error::#variant)?;
             };
-            (
-                matches!(computation.operation, ComputationOperation::Length),
-                quote! {
-                    let #bytes_name = #source;
-                    #value
-                    let #plan = <#codec as #runtime::FixedCodec>::plan(source_value)
-                        .map_err(#encode_error::#variant)?;
-                },
-            )
+            (needs_geometry, step)
         })
         .collect();
-    let (early_computation_steps, computation_steps): (Vec<_>, Vec<_>) =
-        computation_steps.into_iter().partition(|(early, _)| *early);
-    let early_computation_steps: Vec<_> = early_computation_steps
-        .into_iter()
-        .map(|(_, step)| step)
+    let early_computation_steps: Vec<_> = computation_steps
+        .iter()
+        .filter_map(|(needs_geometry, step)| (!needs_geometry).then_some(step))
         .collect();
     let computation_steps: Vec<_> = computation_steps
-        .into_iter()
-        .map(|(_, step)| step)
+        .iter()
+        .filter_map(|(needs_geometry, step)| needs_geometry.then_some(step))
         .collect();
     let early_computation_steps = &early_computation_steps;
     let computation_steps = &computation_steps;
@@ -991,10 +1024,10 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 let field_start = match position {
                     FieldPosition::Static(position) => quote!(#position),
                     FieldPosition::Source(source) => quote! {
-                        usize::try_from(self.#source).map_err(|_| {
+                        usize::try_from(#source).map_err(|_| {
                             #encode_error::PositionNotRepresentable {
                                 field: #label,
-                                value: self.#source as u128,
+                                value: #source as u128,
                             }
                         })?
                     },
@@ -1203,6 +1236,22 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             Self::MissingField { field } => write!(formatter, "missing required field `{field}`"),
         }
     });
+    let encode_computed_value_variant = has_computed.then(|| {
+        quote! {
+            /// A computed value does not fit the destination field's semantic type.
+            ComputedValueNotRepresentable {
+                /// The computed destination field.
+                field: &'static str,
+            },
+        }
+    });
+    let encode_computed_value_arm = has_computed.then(|| {
+        quote! {
+            Self::ComputedValueNotRepresentable { field } => {
+                write!(formatter, "computed value does not fit field `{field}`")
+            }
+        }
+    });
     let encode_length_variant = has_bytes.then(|| {
         quote! {
             /// A byte field's length is not representable by its source field.
@@ -1221,6 +1270,20 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             write!(formatter, "field `{field}` has {length} bytes, which do not fit in length field `{source}`")
         }
     });
+    let preparation_body = quote! {
+        #(let _ = #ignored_prepare_fields;)*
+        #(#prepare_steps)*
+        #(#early_computation_steps)*
+        let mut encoded_len = 0usize;
+        #(#geometry_steps)*
+        #(#computation_steps)*
+        Ok(#plan {
+            #(#plans,)*
+            #(#gap_names,)*
+            #plan_lifetime_init
+            encoded_len,
+        })
+    };
 
     let operation_view_helper = if operation_input_ty.is_some() {
         quote! {
@@ -1297,12 +1360,9 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             }
         });
         let missing = fields.iter().filter(|field| field.computation.is_none()).map(|field| { let field_name=&field.name; let label=field_name.to_string(); quote!(let #field_name = builder.#field_name.ok_or(#encode_error::MissingField { field: #label })?;) });
-        let initializers = fields.iter().map(|field| { let field_name=&field.name; if field.computation.is_some() { quote!(#field_name: #runtime::Computed::new()) } else { quote!(#field_name) } });
-        if let (Some(operation_input_ty), Some(operation_name), Some(operation_prepare)) = (
-            operation_input_ty,
-            operation_name,
-            operation_prepare.as_ref(),
-        ) {
+        if let (Some(operation_input_ty), Some(operation_name)) =
+            (operation_input_ty, operation_name)
+        {
             let request_name = format_ident!("{name}Builder{}Request", operation_name);
             let request_decl_generics = if let Some(lifetime) = wire_lifetime.as_ref() {
                 quote!(<#lifetime, '__wire_repr_operation>)
@@ -1336,7 +1396,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     #vis fn prepare(self) -> Result<#builder_plan_type, #builder_error_type> {
                         let Self { builder, #operation_name } = self;
                         #(#missing)*
-                        #name { #(#initializers,)* }.#operation_prepare(#operation_name)
+                        <#self_type>::#prepare_helper(#(#prepare_field_names,)* #operation_name)
                     }
                     /// Prepares and atomically writes this encoding into `output`.
                     #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#builder_error_type>> {
@@ -1352,7 +1412,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 impl #builder_decl_generics #builder_type {
                     #(#setters)*
                     /// Prepares this encoding after checking all caller-owned fields.
-                    #vis fn prepare(self) -> Result<#builder_plan_type, #builder_error_type> { let builder = self; #(#missing)* #name { #(#initializers,)* }.prepare() }
+                    #vis fn prepare(self) -> Result<#builder_plan_type, #builder_error_type> { let builder = self; #(#missing)* <#self_type>::#prepare_helper(#(#prepare_field_names),*) }
                     /// Prepares and atomically writes this encoding into `output`.
                     #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#builder_error_type>> { let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?; #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output) }
                 }
@@ -1431,7 +1491,23 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             }
             #[allow(missing_docs)] impl #operation_encode_generics #encode_request #operation_encode_generics { #vis fn prepare<'__wire_repr_value>(self) -> Result<#plan_type, #encode_error_type> where #self_type: '__wire_repr_value { <#self_type>::#operation_prepare(self.value, self.operation) } #vis fn build_into<'__wire_repr_value, '__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#encode_error_type>> where #self_type: '__wire_repr_value { let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?; #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output) } }
             #[allow(missing_docs)]
-            impl #impl_generics #self_type { #builder_method #vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #view_input_request<'__wire_repr_view> { #view_input_request { input } } #vis fn cursor<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #cursor_input_request<'__wire_repr_view> { #cursor_input_request { input } } #vis fn #operation_name(self, operation: &#operation_input_ty) -> #operation_encode_request_type { #encode_request { value: self, operation } } #[doc(hidden)] #vis fn #operation_prepare<'__wire_repr_value>(self, operation: &#operation_input_ty) -> Result<#plan_type, #encode_error_type> where Self: '__wire_repr_value { #(#prepare_steps)* #(#early_computation_steps)* let mut encoded_len = 0usize; #(#geometry_steps)* #(#computation_steps)* Ok(#plan { #(#plans,)* #(#gap_names,)* #plan_lifetime_init encoded_len }) } }
+            impl #impl_generics #self_type {
+                #builder_method
+                #vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #view_input_request<'__wire_repr_view> { #view_input_request { input } }
+                #vis fn cursor<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #cursor_input_request<'__wire_repr_view> { #cursor_input_request { input } }
+                #vis fn #operation_name(self, operation: &#operation_input_ty) -> #operation_encode_request_type { #encode_request { value: self, operation } }
+                #[doc(hidden)]
+                #vis fn #operation_prepare<'__wire_repr_value>(self, #operation_value: &#operation_input_ty) -> Result<#plan_type, #encode_error_type>
+                where Self: '__wire_repr_value {
+                    let Self { #(#prepare_destructure,)* } = self;
+                    Self::#prepare_helper(#(#prepare_field_names,)* #operation_value)
+                }
+                #[doc(hidden)]
+                fn #prepare_helper<'__wire_repr_value>(#(#prepare_field_parameters,)* #operation_value: &#operation_input_ty) -> Result<#plan_type, #encode_error_type>
+                where Self: '__wire_repr_value {
+                    #preparation_body
+                }
+            }
         }
     } else {
         quote! {
@@ -1440,6 +1516,11 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                 #view_signature { #view_request::new(input) }
                 #cursor_method
                 #builder_method
+                #[doc(hidden)]
+                fn #prepare_helper<'__wire_repr_value>(#(#prepare_field_parameters),*) -> Result<#plan_type, #encode_error_type>
+                where Self: '__wire_repr_value {
+                    #preparation_body
+                }
                 /// Consumes this value and prepares an atomic encoding.
                 #vis fn prepare<'__wire_repr_value>(self) -> Result<#plan_type, #encode_error_type> where Self: '__wire_repr_value { <Self as #runtime::WireEncode>::prepare(self) }
                 /// Consumes this value, prepares it, and commits it into `output`.
@@ -1455,7 +1536,10 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             impl #impl_generics #runtime::WireEncode for #self_type {
                 type EncodeError = #encode_error_type;
                 type Plan<'__wire_repr_value> = #plan_type where Self: '__wire_repr_value;
-                fn prepare<'__wire_repr_value>(self) -> Result<Self::Plan<'__wire_repr_value>, Self::EncodeError> where Self: '__wire_repr_value { #(#prepare_steps)* #(#early_computation_steps)* let mut encoded_len = 0usize; #(#geometry_steps)* #(#computation_steps)* Ok(#plan { #(#plans,)* #(#gap_names,)* #plan_lifetime_init encoded_len }) }
+                fn prepare<'__wire_repr_value>(self) -> Result<Self::Plan<'__wire_repr_value>, Self::EncodeError> where Self: '__wire_repr_value {
+                    let Self { #(#prepare_destructure,)* } = self;
+                    Self::#prepare_helper(#(#prepare_field_names),*)
+                }
             }
         }
     };
@@ -1514,6 +1598,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             #encode_lifetime_variant
             #encode_position_variants
             #encode_missing_variant
+            #encode_computed_value_variant
             #encode_length_variant
             #(#encode_variants)*
             /// The encoded length overflowed `usize`.
@@ -1525,6 +1610,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
                     #encode_lifetime_arm
                     #encode_position_arms
                     #encode_missing_arm
+                    #encode_computed_value_arm
                     #encode_length_arm
                     #(#encode_display_arms)*
                     Self::LengthOverflow => formatter.write_str("encoded representation length does not fit in usize"),
@@ -1623,7 +1709,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
 }
 
 fn computation_source(
-    computation: &Computation,
+    selection: &ComputationByteSelection,
     own_index: usize,
     fields: &[Field],
     plans: &[proc_macro2::Ident],
@@ -1631,14 +1717,35 @@ fn computation_source(
     runtime: &TokenStream,
 ) -> TokenStream {
     let mut components = Vec::new();
-    match &computation.bytes {
-        ComputationByteSelection::ExcludeSelf => {
+    match selection {
+        ComputationByteSelection::Exclude(paths) => {
             for (index, plan) in plans.iter().enumerate() {
                 if let Some(gap) = &gaps[index] {
                     components.push(quote!(#runtime::ByteSegment::Rest { byte: 0, len: #gap }));
                 }
-                if index != own_index {
+                if index == own_index {
+                    continue;
+                }
+                let selected: Vec<_> = paths
+                    .iter()
+                    .filter(|path| path.top_level_index == index)
+                    .collect();
+                if selected.iter().any(|path| path.nested.is_empty()) {
+                    continue;
+                }
+                if selected.is_empty() {
                     components.push(quote!(#runtime::__private::BorrowedSource::new(&#plan)));
+                } else {
+                    debug_assert!(matches!(fields[index].kind, FieldKind::Nested));
+                    let selector = selected
+                        .iter()
+                        .map(|path| {
+                            let nested = &path.nested;
+                            quote!(fields #(.#nested)*)
+                        })
+                        .reduce(|left, right| quote!(#left | #right))
+                        .expect("nonempty nested selection");
+                    components.push(quote!(#plan.bytes().exclude(|fields| #selector)));
                 }
             }
         }
@@ -1668,6 +1775,7 @@ fn computation_source(
             }
         }
     }
+    let _ = own_index;
     chain_sources(components, runtime)
 }
 

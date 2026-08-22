@@ -3,7 +3,7 @@
 
 use core::mem::{size_of, size_of_val};
 
-use wire_repr::{Computed, Wire};
+use wire_repr::Wire;
 
 /// A plain fixed representation for field selection.
 #[derive(Debug, Eq, PartialEq, Wire)]
@@ -222,8 +222,8 @@ fn source_position_marker_uses_each_plan_runtime_geometry() {
 #[derive(Wire)]
 pub struct DynamicSelection<'wire> {
     /// Computed payload length.
-    #[wire(computed = len(payload))]
-    pub length: Computed<u8>,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    pub length: u8,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
@@ -266,8 +266,8 @@ pub struct NestedSelection {
 #[derive(Wire)]
 pub struct DynamicPaddedSelection<'wire> {
     /// Computed payload length.
-    #[wire(computed = len(payload))]
-    pub length: Computed<u8>,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    pub length: u8,
     /// Payload placed after physical padding and alignment.
     #[wire(bytes = length, pad_before = 2, align_before = 4)]
     pub payload: &'wire [u8],

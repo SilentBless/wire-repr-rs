@@ -68,13 +68,20 @@ pub(super) enum WireAttribute {
 }
 
 pub(super) enum ComputationSyntax {
-    Length(Ident),
-    Callback { path: Path, bytes: ComputationBytes },
+    Callback {
+        path: Path,
+        arguments: Vec<ComputationArgument>,
+    },
+}
+
+pub(super) enum ComputationArgument {
+    Semantic(Ident),
+    Bytes(ComputationBytes),
 }
 
 pub(super) enum ComputationBytes {
     Include(Vec<ComputationFieldPath>),
-    ExcludeSelf,
+    Exclude(Vec<ComputationFieldPath>),
 }
 
 pub(super) struct ComputationFieldPath {
@@ -86,84 +93,73 @@ fn parse_computation(expression: Expr) -> syn::Result<ComputationSyntax> {
     let Expr::Call(call) = expression else {
         return Err(syn::Error::new_spanned(
             expression,
-            "computed fields require `computed = len(field)`, `computed = callback(include(field, ...))`, or `computed = callback(exclude(self))`",
+            "computed fields require `computed = callback(arg, include(field, ...), exclude(field, ...))`",
         ));
     };
-    let Expr::Path(function) = call.func.as_ref() else {
+    let syn::ExprCall { func, args, .. } = call;
+    let Expr::Path(function) = *func else {
         return Err(syn::Error::new_spanned(
-            &call.func,
+            func,
             "computed callbacks must be function paths",
         ));
     };
-    if function.path.is_ident("len") {
-        let Some(Expr::Path(target)) = call.args.first() else {
-            return Err(syn::Error::new_spanned(call, "`len` requires one field"));
-        };
-        let Some(target) = target.path.get_ident() else {
-            return Err(syn::Error::new_spanned(target, "`len` requires one field"));
-        };
-        if call.args.len() != 1 {
-            return Err(syn::Error::new_spanned(call, "`len` requires one field"));
-        }
-        return Ok(ComputationSyntax::Length(target.clone()));
-    }
-    if function.qself.is_some() || call.args.len() != 1 {
+    if function.qself.is_some() {
         return Err(syn::Error::new_spanned(
-            call,
-            "computed callbacks require one `include(...)` or `exclude(self)` selection",
+            function,
+            "computed callbacks must be function paths",
         ));
     }
-    let bytes = parse_computation_bytes(call.args.first().expect("one argument"))?;
-    let Expr::Path(function) = *call.func else {
-        unreachable!("checked above")
-    };
+    let arguments = args
+        .iter()
+        .map(parse_computation_argument)
+        .collect::<syn::Result<Vec<_>>>()?;
     Ok(ComputationSyntax::Callback {
         path: function.path,
-        bytes,
+        arguments,
     })
+}
+
+fn parse_computation_argument(expression: &Expr) -> syn::Result<ComputationArgument> {
+    if let Expr::Path(path) = expression {
+        if let (None, Some(name)) = (&path.qself, path.path.get_ident()) {
+            return Ok(ComputationArgument::Semantic(name.clone()));
+        }
+        return Err(syn::Error::new_spanned(
+            path,
+            "computed semantic arguments must be top-level field names",
+        ));
+    }
+    parse_computation_bytes(expression).map(ComputationArgument::Bytes)
 }
 
 fn parse_computation_bytes(expression: &Expr) -> syn::Result<ComputationBytes> {
     let Expr::Call(call) = expression else {
         return Err(syn::Error::new_spanned(
             expression,
-            "expected `include(field, ...)` or `exclude(self)`",
+            "computed arguments must be top-level field names, `include(field, ...)`, or `exclude(field, ...)`",
         ));
     };
     let Expr::Path(mode) = call.func.as_ref() else {
         return Err(syn::Error::new_spanned(
             &call.func,
-            "expected `include(field, ...)` or `exclude(self)`",
+            "computed byte selections require `include(field, ...)` or `exclude(field, ...)`",
         ));
     };
-    if mode.path.is_ident("exclude") {
-        if call.args.len() == 1
-            && matches!(call.args.first(), Some(Expr::Path(path)) if path.path.is_ident("self"))
-        {
-            return Ok(ComputationBytes::ExcludeSelf);
-        }
-        return Err(syn::Error::new_spanned(
-            call,
-            "`exclude(...)` accepts only `self`",
-        ));
-    }
-    if !mode.path.is_ident("include") {
+    let selection = if mode.path.is_ident("include") {
+        ComputationBytes::Include
+    } else if mode.path.is_ident("exclude") {
+        ComputationBytes::Exclude
+    } else {
         return Err(syn::Error::new_spanned(
             mode,
-            "expected `include(field, ...)` or `exclude(self)`",
+            "computed byte selections require `include(field, ...)` or `exclude(field, ...)`",
         ));
-    }
-    if call.args.is_empty() {
-        return Err(syn::Error::new_spanned(
-            call,
-            "`include(...)` requires at least one field path",
-        ));
-    }
+    };
     call.args
         .iter()
         .map(parse_computation_field_path)
         .collect::<syn::Result<Vec<_>>>()
-        .map(ComputationBytes::Include)
+        .map(selection)
 }
 
 fn parse_computation_field_path(expression: &Expr) -> syn::Result<ComputationFieldPath> {
@@ -317,7 +313,7 @@ pub(super) fn parse_field_wire_attributes(
                     Ok(())
                 } else {
                     Err(meta.error(
-                        "expected `be`, `le`, `codec = Path`, `prefix = Path`, `bytes = source_field`, `rest`, `computed = len(field)`, `validate = path`, `at = N`, `at = source_field`, `pad_before = N`, `align_before = N`, or a declared operation input binding",
+                        "expected `be`, `le`, `codec = Path`, `prefix = Path`, `bytes = source_field`, `rest`, `computed = callback(arguments...)`, `validate = path`, `at = N`, `at = source_field`, `pad_before = N`, `align_before = N`, or a declared operation input binding",
                     ))
                 }
             }

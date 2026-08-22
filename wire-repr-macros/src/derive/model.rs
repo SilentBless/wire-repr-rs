@@ -11,9 +11,9 @@ use syn::{
 };
 
 use syntax::{
-    ComputationBytes, ComputationSyntax, WireAttribute, parse_enum_attributes,
-    parse_field_wire_attributes, parse_struct_attributes, parse_variant_attributes,
-    reject_wire_attributes,
+    ComputationArgument as ComputationArgumentSyntax, ComputationBytes, ComputationSyntax,
+    WireAttribute, parse_enum_attributes, parse_field_wire_attributes, parse_struct_attributes,
+    parse_variant_attributes, reject_wire_attributes,
 };
 
 pub(super) enum WireType {
@@ -72,18 +72,19 @@ pub(super) struct Field {
 pub(super) struct Computation {
     /// Raw semantic value encoded for this computed field.
     pub(super) value_ty: Type,
-    pub(super) operation: ComputationOperation,
-    pub(super) bytes: ComputationByteSelection,
+    pub(super) callback: Path,
+    /// Ordered callback arguments and their physical read sets.
+    pub(super) arguments: Vec<ComputationArgument>,
 }
 
-pub(super) enum ComputationOperation {
-    Length,
-    Callback(Path),
+pub(super) enum ComputationArgument {
+    Semantic { name: Ident, index: usize },
+    Bytes(ComputationByteSelection),
 }
 
 pub(super) enum ComputationByteSelection {
     Include(Vec<ComputationFieldPath>),
-    ExcludeSelf,
+    Exclude(Vec<ComputationFieldPath>),
 }
 
 pub(super) struct ComputationFieldPath {
@@ -440,9 +441,9 @@ impl Field {
         let value_ty = attributes
             .computation
             .is_some()
-            .then(|| computed_value_type(&field.ty))
+            .then(|| syn::parse2(field.ty.to_token_stream()))
             .transpose()?;
-        let representation_ty = value_ty.as_ref().unwrap_or(&field.ty);
+        let representation_ty = &field.ty;
         let kind = match attributes.representation {
             WireAttribute::Custom(path) => FieldKind::Fixed(Codec::Custom(path)),
             WireAttribute::Endian(big_endian) => FieldKind::Fixed(
@@ -471,12 +472,6 @@ impl Field {
                     None => FieldKind::Nested,
                 }
             }
-            WireAttribute::None if is_computed_marker(&field.ty) => {
-                return Err(syn::Error::new_spanned(
-                    &field.ty,
-                    "Computed<T> fields require `#[wire(computed = len(field))]`, `#[wire(computed = callback(include(field, ...)))]`, or `#[wire(computed = callback(exclude(self)))]`",
-                ));
-            }
             WireAttribute::None => match builtin_codec(&field.ty, None) {
                 Some(codec) => FieldKind::Fixed(codec),
                 None if is_multibyte_integer(&field.ty) => {
@@ -489,37 +484,9 @@ impl Field {
             },
         };
         let computation = match attributes.computation {
-            Some(ComputationSyntax::Length(target)) => {
-                let value_ty = value_ty.expect("computed fields have a semantic type");
-                if attributes.position.is_some()
-                    || attributes.padding_before.is_some()
-                    || attributes.alignment_before.is_some()
-                    || attributes.operation_input.is_some()
-                {
-                    return Err(syn::Error::new_spanned(
-                        &name,
-                        "computed fields cannot declare geometry or operation-input attributes",
-                    ));
-                }
-                if !matches!(kind, FieldKind::Fixed(_)) {
-                    return Err(syn::Error::new_spanned(
-                        &value_ty,
-                        "computed fields require a fixed representation; select an explicit fixed codec for nominal semantic types",
-                    ));
-                }
-                Some(Computation {
-                    value_ty,
-                    operation: ComputationOperation::Length,
-                    bytes: ComputationByteSelection::Include(vec![ComputationFieldPath {
-                        top_level: target,
-                        top_level_index: usize::MAX,
-                        nested: Vec::new(),
-                    }]),
-                })
-            }
             Some(ComputationSyntax::Callback {
                 path: callback,
-                bytes,
+                arguments,
             }) => {
                 let value_ty = value_ty.expect("computed fields have a semantic type");
                 if attributes.position.is_some()
@@ -538,23 +505,49 @@ impl Field {
                         "computed fields require a fixed representation; select an explicit fixed codec for nominal semantic types",
                     ));
                 }
-                let bytes = match bytes {
-                    ComputationBytes::Include(paths) => ComputationByteSelection::Include(
-                        paths
-                            .into_iter()
-                            .map(|path| ComputationFieldPath {
-                                top_level: path.top_level,
-                                top_level_index: usize::MAX,
-                                nested: path.nested,
+                let arguments = arguments
+                    .into_iter()
+                    .map(|argument| match argument {
+                        ComputationArgumentSyntax::Semantic(name) => {
+                            ComputationArgument::Semantic {
+                                name,
+                                index: usize::MAX,
+                            }
+                        }
+                        ComputationArgumentSyntax::Bytes(bytes) => {
+                            ComputationArgument::Bytes(match bytes {
+                                ComputationBytes::Include(paths) => {
+                                    ComputationByteSelection::Include(
+                                        paths
+                                            .into_iter()
+                                            .map(|path| ComputationFieldPath {
+                                                top_level: path.top_level,
+                                                top_level_index: usize::MAX,
+                                                nested: path.nested,
+                                            })
+                                            .collect(),
+                                    )
+                                }
+                                ComputationBytes::Exclude(paths) => {
+                                    ComputationByteSelection::Exclude(
+                                        paths
+                                            .into_iter()
+                                            .map(|path| ComputationFieldPath {
+                                                top_level: path.top_level,
+                                                top_level_index: usize::MAX,
+                                                nested: path.nested,
+                                            })
+                                            .collect(),
+                                    )
+                                }
                             })
-                            .collect(),
-                    ),
-                    ComputationBytes::ExcludeSelf => ComputationByteSelection::ExcludeSelf,
-                };
+                        }
+                    })
+                    .collect();
                 Some(Computation {
                     value_ty,
-                    operation: ComputationOperation::Callback(callback),
-                    bytes,
+                    callback,
+                    arguments,
                 })
             }
             None => None,
@@ -789,66 +782,37 @@ fn validate_computations(fields: &mut [Field]) -> syn::Result<Vec<usize>> {
         let Some(mut computation) = fields[index].computation.take() else {
             continue;
         };
-
-        if let ComputationByteSelection::Include(paths) = &mut computation.bytes {
-            let mut selected = BTreeSet::new();
-            for path in paths {
-                if path.top_level == fields[index].name {
-                    return Err(syn::Error::new_spanned(
-                        &path.top_level,
-                        "computed byte selections cannot include the computed field itself",
-                    ));
+        for argument in &mut computation.arguments {
+            match argument {
+                ComputationArgument::Semantic {
+                    name,
+                    index: argument_index,
+                } => {
+                    let resolved = fields
+                        .iter()
+                        .position(|field| field.name == *name)
+                        .ok_or_else(|| {
+                            syn::Error::new_spanned(
+                                &*name,
+                                "computed semantic argument must name a field in the same struct",
+                            )
+                        })?;
+                    if resolved == index || fields[resolved].computation.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            name,
+                            "computed semantic arguments cannot name computed fields",
+                        ));
+                    }
+                    if fields[resolved].operation_input.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            name,
+                            "computed semantic arguments cannot name operation-table fields",
+                        ));
+                    }
+                    *argument_index = resolved;
                 }
-                let top_level_index = fields
-                    .iter()
-                    .position(|field| field.name == path.top_level)
-                    .ok_or_else(|| {
-                        syn::Error::new_spanned(
-                            &path.top_level,
-                            "computed byte selection must name a field in the same struct",
-                        )
-                    })?;
-                if !path.nested.is_empty()
-                    && !matches!(fields[top_level_index].kind, FieldKind::Nested)
-                {
-                    return Err(syn::Error::new_spanned(
-                        &path.top_level,
-                        "nested computed byte paths require a nested wire field",
-                    ));
-                }
-                path.top_level_index = top_level_index;
-                let path_key = std::iter::once(path.top_level.to_string())
-                    .chain(path.nested.iter().map(ToString::to_string))
-                    .collect::<Vec<_>>()
-                    .join(".");
-                if !selected.insert(path_key) {
-                    return Err(syn::Error::new_spanned(
-                        &path.top_level,
-                        "computed byte selection duplicates an earlier field path",
-                    ));
-                }
-            }
-        }
-
-        if matches!(computation.operation, ComputationOperation::Length) {
-            let ComputationByteSelection::Include(paths) = &computation.bytes else {
-                unreachable!("length computations include one byte field");
-            };
-            let target = &paths[0];
-            if target.top_level_index <= index {
-                return Err(syn::Error::new_spanned(
-                    &target.top_level,
-                    "computed length target must be a later byte field",
-                ));
-            }
-            match &fields[target.top_level_index].kind {
-                FieldKind::Bytes { source_index, .. } if *source_index == index => {}
-                FieldKind::Rest => {}
-                _ => {
-                    return Err(syn::Error::new_spanned(
-                        &target.top_level,
-                        "computed length target must be a later #[wire(bytes = source)] or #[wire(rest)] byte field controlled by this field",
-                    ));
+                ComputationArgument::Bytes(selection) => {
+                    validate_computation_selection(selection, index, fields)?;
                 }
             }
         }
@@ -856,6 +820,58 @@ fn validate_computations(fields: &mut [Field]) -> syn::Result<Vec<usize>> {
     }
 
     computation_order(fields)
+}
+
+fn validate_computation_selection(
+    selection: &mut ComputationByteSelection,
+    own_index: usize,
+    fields: &[Field],
+) -> syn::Result<()> {
+    let is_include = matches!(selection, ComputationByteSelection::Include(_));
+    let paths = match selection {
+        ComputationByteSelection::Include(paths) | ComputationByteSelection::Exclude(paths) => {
+            paths
+        }
+    };
+    for path in paths.iter_mut() {
+        let top_level_index = if path.top_level == "self" {
+            own_index
+        } else {
+            fields
+                .iter()
+                .position(|field| field.name == path.top_level)
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        &path.top_level,
+                        "computed byte selection must name a field in the same struct",
+                    )
+                })?
+        };
+        if is_include && top_level_index == own_index {
+            return Err(syn::Error::new_spanned(
+                &path.top_level,
+                "computed byte selections cannot include the computed field itself",
+            ));
+        }
+        if !path.nested.is_empty() && !matches!(fields[top_level_index].kind, FieldKind::Nested) {
+            return Err(syn::Error::new_spanned(
+                &path.top_level,
+                "nested computed byte paths require a nested wire field",
+            ));
+        }
+        path.top_level_index = top_level_index;
+    }
+    if !is_include
+        && !paths
+            .iter()
+            .any(|path| path.top_level_index == own_index && path.nested.is_empty())
+    {
+        return Err(syn::Error::new_spanned(
+            &fields[own_index].name,
+            "computed exclusion arguments must exclude the current computed field",
+        ));
+    }
+    Ok(())
 }
 
 fn computation_order(fields: &[Field]) -> syn::Result<Vec<usize>> {
@@ -897,69 +913,15 @@ fn computation_dependencies<'a>(
 ) -> impl Iterator<Item = usize> + 'a {
     computed.iter().copied().filter(move |&candidate| {
         candidate != own_index
-            && match &computation.bytes {
-                ComputationByteSelection::Include(paths) => {
+            && computation.arguments.iter().any(|argument| match argument {
+                ComputationArgument::Semantic { .. } => false,
+                ComputationArgument::Bytes(ComputationByteSelection::Include(paths)) => {
                     paths.iter().any(|path| path.top_level_index == candidate)
                 }
-                ComputationByteSelection::ExcludeSelf => true,
-            }
-    })
-}
-
-fn is_computed_marker(ty: &Type) -> bool {
-    let Type::Path(path) = ty else {
-        return false;
-    };
-    path.qself.is_none()
-        && path
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "Computed")
-}
-
-fn computed_value_type(ty: &Type) -> syn::Result<Type> {
-    let Type::Path(path) = ty else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "computed fields must have type Computed<T>",
-        ));
-    };
-    let Some(marker) = path.path.segments.last() else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "computed fields must have type Computed<T>",
-        ));
-    };
-    if path.qself.is_some() || marker.ident != "Computed" {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "computed fields must have type Computed<T>",
-        ));
-    }
-    let syn::PathArguments::AngleBracketed(arguments) = &marker.arguments else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "computed fields must have type Computed<T>",
-        ));
-    };
-    if arguments.args.len() != 1 {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "computed fields must have exactly one semantic type argument",
-        ));
-    }
-    let Some(syn::GenericArgument::Type(value_ty)) = arguments.args.first() else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "computed fields must have exactly one semantic type argument",
-        ));
-    };
-    syn::parse2(value_ty.to_token_stream()).map_err(|_| {
-        syn::Error::new_spanned(
-            value_ty,
-            "computed fields must have exactly one semantic type argument",
-        )
+                ComputationArgument::Bytes(ComputationByteSelection::Exclude(paths)) => !paths
+                    .iter()
+                    .any(|path| path.top_level_index == candidate && path.nested.is_empty()),
+            })
     })
 }
 
@@ -1546,7 +1508,7 @@ mod tests {
     use syn::Type;
 
     use super::{
-        Codec, ComputationByteSelection, ComputationOperation, EnumTag, FieldKind, FieldPosition,
+        Codec, ComputationArgument, ComputationByteSelection, EnumTag, FieldKind, FieldPosition,
         UnknownPolicy, VariantSelector, WireType,
     };
 
@@ -1905,7 +1867,7 @@ mod tests {
     }
     #[test]
     fn accepts_computed_lengths_and_rejects_invalid_computed_contracts() {
-        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, #[wire(bytes = length)] payload: &'wire [u8], kind: u8 }").unwrap() else { panic!() };
+        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload))] length: u8, #[wire(bytes = length)] payload: &'wire [u8], kind: u8 }").unwrap() else { panic!() };
         assert!(matches!(
             model.fields[0].computation.as_ref().map(|computation| &computation.value_ty),
             Some(Type::Path(path)) if path.path.is_ident("u8")
@@ -1914,17 +1876,17 @@ mod tests {
             model.fields[0].kind,
             FieldKind::Fixed(Codec::Builtin("U8"))
         ));
-        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = len(payload), be)] length: Computed<u16>, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
+        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload), be)] length: u16, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
         assert!(matches!(
             model.fields[0].kind,
             FieldKind::Fixed(Codec::Builtin("BeU16"))
         ));
-        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = len(payload), codec = BeU24)] length: Computed<u32>, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
+        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload), codec = BeU24)] length: u32, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
         assert!(matches!(
             model.fields[0].kind,
             FieldKind::Fixed(Codec::Custom(_))
         ));
-        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = len(payload), codec = LengthCodec)] length: Computed<PayloadLength>, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
+        let WireType::Struct(model) = parse("struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload), codec = LengthCodec)] length: PayloadLength, #[wire(bytes = length)] payload: &'wire [u8] }").unwrap() else { panic!() };
         assert!(matches!(
             model.fields[0].computation.as_ref().map(|computation| &computation.value_ty),
             Some(Type::Path(path)) if path.path.is_ident("PayloadLength")
@@ -1933,18 +1895,14 @@ mod tests {
             model.fields[0].kind,
             FieldKind::Fixed(Codec::Custom(_))
         ));
-        let WireType::Struct(model) = parse("#[wire(table = Table)] struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, #[wire(bytes = length)] payload: &'wire [u8], #[wire(table)] selected: Selected }").unwrap() else { panic!() };
+        let WireType::Struct(model) = parse("#[wire(table = Table)] struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload))] length: u8, #[wire(bytes = length)] payload: &'wire [u8], #[wire(table)] selected: Selected }").unwrap() else { panic!() };
         assert!(model.operation_input.is_some());
         assert!(model.fields[0].computation.is_some());
         for source in [
-            "struct Packet { length: Computed<u8> }",
-            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<U8>, #[wire(bytes = length)] payload: &'wire [u8] }",
-            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u16>, #[wire(bytes = length)] payload: &'wire [u8] }",
-            "struct Packet<'wire> { #[wire(computed = len(payload), be)] length: Computed<u8>, #[wire(bytes = length)] payload: &'wire [u8] }",
-            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, payload: &'wire [u8] }",
-            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, #[wire(bytes = other)] payload: &'wire [u8], other: u8 }",
-            "struct Packet<'wire> { #[wire(computed = len(payload))] length: Computed<u8>, #[wire(bytes = length)] payload: &'wire [u8], prepare: u8 }",
-            "#[wire(table = Table)] struct Packet { #[wire(computed = checksum(exclude(self)))] checksum: Computed<u8>, table: u8, #[wire(table)] selected: Selected }",
+            "struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload))] length: U8, #[wire(bytes = length)] payload: &'wire [u8] }",
+            "struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload))] length: u16, #[wire(bytes = length)] payload: &'wire [u8] }",
+            "struct Packet<'wire> { #[wire(computed = wire_repr::computation::len(payload), be)] length: u8, #[wire(bytes = length)] payload: &'wire [u8] }",
+            "#[wire(table = Table)] struct Packet { #[wire(computed = checksum(exclude(self)))] checksum: u8, table: u8, #[wire(table)] selected: Selected }",
         ] {
             assert!(parse(source).is_err(), "{source}");
         }
@@ -1953,18 +1911,17 @@ mod tests {
     #[test]
     fn accepts_callback_computations_and_rejects_invalid_byte_selections() {
         let WireType::Struct(model) = parse(
-            "struct Packet { #[wire(computed = checksum(include(header, payload.inner)))] checksum: Computed<u8>, header: u8, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(include(header, payload.inner)))] checksum: u8, header: u8, payload: Payload }",
         )
         .unwrap()
         else {
             panic!()
         };
         let computation = model.fields[0].computation.as_ref().expect("computation");
-        assert!(matches!(
-            &computation.operation,
-            ComputationOperation::Callback(path) if path.is_ident("checksum")
-        ));
-        let ComputationByteSelection::Include(paths) = &computation.bytes else {
+        assert!(computation.callback.is_ident("checksum"));
+        let ComputationArgument::Bytes(ComputationByteSelection::Include(paths)) =
+            &computation.arguments[0]
+        else {
             panic!("include selection")
         };
         assert_eq!(paths.len(), 2);
@@ -1972,7 +1929,7 @@ mod tests {
         assert!(paths[1].top_level == "payload" && paths[1].nested[0] == "inner");
 
         let WireType::Struct(model) = parse(
-            "struct Packet { head: u8, #[wire(computed = crate::checksum(exclude(self)))] checksum: Computed<u8>, payload: Payload }",
+            "struct Packet { head: u8, #[wire(computed = crate::checksum(exclude(self)))] checksum: u8, payload: Payload }",
         )
         .unwrap()
         else {
@@ -1982,24 +1939,33 @@ mod tests {
             model.fields[1]
                 .computation
                 .as_ref()
-                .map(|computation| &computation.bytes),
-            Some(ComputationByteSelection::ExcludeSelf)
+                .map(|computation| &computation.arguments[0]),
+            Some(ComputationArgument::Bytes(ComputationByteSelection::Exclude(paths)))
+                if paths[0].top_level_index == 1
         ));
 
         for source in [
-            "struct Packet { #[wire(computed = checksum)] checksum: Computed<u8>, payload: Payload }",
-            "struct Packet { #[wire(bytes(include(payload)))] checksum: Computed<u8>, payload: Payload }",
-            "struct Packet { #[wire(computed = len(payload), bytes(include(payload)))] checksum: Computed<u8>, payload: Payload }",
-            "struct Packet { #[wire(computed = checksum(include()))] checksum: Computed<u8>, payload: Payload }",
-            "struct Packet { #[wire(computed = checksum(exclude(payload)))] checksum: Computed<u8>, payload: Payload }",
-            "struct Packet { #[wire(computed = checksum(include(missing)))] checksum: Computed<u8>, payload: Payload }",
-            "struct Packet { #[wire(computed = checksum(include(checksum)))] checksum: Computed<u8>, payload: Payload }",
-            "struct Packet { #[wire(computed = checksum(include(payload, payload)))] checksum: Computed<u8>, payload: Payload }",
-            "struct Packet { #[wire(computed = checksum(include(payload), exclude(self)))] checksum: Computed<u8>, payload: Payload }",
-            "struct Packet { #[wire(computed = first(include(second)))] first: Computed<u8>, #[wire(computed = second(include(first)))] second: Computed<u8> }",
-            "struct Packet { #[wire(computed = first(exclude(self)))] first: Computed<u8>, #[wire(computed = second(exclude(self)))] second: Computed<u8> }",
+            "struct Packet { #[wire(computed = checksum)] checksum: u8, payload: Payload }",
+            "struct Packet { #[wire(bytes(include(payload)))] checksum: u8, payload: Payload }",
+            "struct Packet { #[wire(computed = wire_repr::computation::len(payload), bytes(include(payload)))] checksum: u8, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(include(missing)))] checksum: u8, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(include(checksum)))] checksum: u8, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(exclude()))] checksum: u8, payload: Payload }",
+            "struct Packet { #[wire(computed = checksum(checksum))] checksum: u8, payload: Payload }",
+            "struct Packet { #[wire(computed = first(include(second)))] first: u8, #[wire(computed = second(include(first)))] second: u8 }",
+            "struct Packet { #[wire(computed = first(exclude(self)))] first: u8, #[wire(computed = second(exclude(self)))] second: u8 }",
         ] {
             assert!(parse(source).is_err(), "{source}");
         }
+        assert!(
+            parse(
+                "struct Packet { #[wire(computed = checksum())] checksum: u8, payload: Payload }"
+            )
+            .is_ok()
+        );
+        assert!(parse(
+            "struct Packet { #[wire(computed = checksum(include()))] checksum: u8, payload: Payload }"
+        )
+        .is_ok());
     }
 }

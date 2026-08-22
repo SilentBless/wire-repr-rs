@@ -2,45 +2,6 @@
 
 use crate::{OutputTooShortError, PreparedLayout};
 
-/// A zero-sized marker for a raw semantic wire value computed during encoding.
-pub struct Computed<T>(core::marker::PhantomData<fn() -> T>);
-
-impl<T> core::fmt::Debug for Computed<T> {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str("Computed")
-    }
-}
-
-impl<T> PartialEq for Computed<T> {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-impl<T> Eq for Computed<T> {}
-
-impl<T> Computed<T> {
-    /// Creates a computed marker.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(core::marker::PhantomData)
-    }
-}
-
-impl<T> Default for Computed<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> Copy for Computed<T> {}
-
-impl<T> Clone for Computed<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
 /// Associates a semantic wire value with its generated read view.
 #[doc(hidden)]
 pub trait WireViewType {

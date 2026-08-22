@@ -1,7 +1,7 @@
 #![deny(missing_docs, unsafe_code)]
 //! Public validated-view derive coverage.
 
-use wire_repr::{Computed, Wire};
+use wire_repr::Wire;
 
 /// Validation failure returned by [`Packet::view`].
 #[derive(Debug)]
@@ -372,8 +372,8 @@ fn computed_nonzero(value: u8) -> Result<(), ComputedValidationError> {
 #[wire(error = ComputedValidationError)]
 pub struct ComputedValidated<'wire> {
     /// Stored encoded payload length.
-    #[wire(computed = len(payload), validate = computed_nonzero)]
-    pub length: Computed<u8>,
+    #[wire(computed = wire_repr::computation::len(payload), validate = computed_nonzero)]
+    pub length: u8,
     /// Payload occupying the rest of the representation.
     #[wire(rest)]
     pub payload: &'wire [u8],

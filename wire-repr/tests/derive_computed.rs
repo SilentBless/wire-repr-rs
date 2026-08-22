@@ -1,26 +1,14 @@
 #![deny(missing_docs, unsafe_code)]
 //! Computed byte-length field coverage.
 
-use wire_repr::{ByteSourceCursor, Computed, FixedCodec, PreparedLayout, Wire};
-
-struct NoTraitBounds;
-
-#[test]
-fn computed_marker_has_no_value_trait_bounds() {
-    let marker = Computed::<NoTraitBounds>::new();
-    assert_eq!(marker, marker);
-    assert_eq!(format!("{marker:?}"), "Computed");
-
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<Computed<std::rc::Rc<()>>>();
-}
+use wire_repr::{ByteSourceCursor, FixedCodec, PreparedLayout, Wire};
 
 /// A packet with a computed bounded payload length.
 #[derive(Wire)]
 pub struct Packet<'wire> {
     /// Payload byte count.
-    #[wire(computed = len(payload))]
-    pub length: Computed<u8>,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    pub length: u8,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
@@ -32,8 +20,8 @@ pub struct Packet<'wire> {
 #[derive(Wire)]
 pub struct BigEndianPacket<'wire> {
     /// Payload byte count.
-    #[wire(computed = len(payload), be)]
-    pub length: Computed<u16>,
+    #[wire(computed = wire_repr::computation::len(payload), be)]
+    pub length: u16,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
@@ -43,8 +31,8 @@ pub struct BigEndianPacket<'wire> {
 #[derive(Wire)]
 pub struct LittleEndianPacket<'wire> {
     /// Payload byte count.
-    #[wire(computed = len(payload), le)]
-    pub length: Computed<u16>,
+    #[wire(computed = wire_repr::computation::len(payload), le)]
+    pub length: u16,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
@@ -54,8 +42,8 @@ pub struct LittleEndianPacket<'wire> {
 #[derive(Wire)]
 pub struct Qualified<'wire> {
     /// Payload byte count.
-    #[wire(computed = len(payload), codec = wire_repr::BeU24)]
-    pub length: Computed<u32>,
+    #[wire(computed = wire_repr::computation::len(payload), codec = wire_repr::BeU24)]
+    pub length: u32,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
@@ -102,8 +90,8 @@ impl FixedCodec for PayloadLengthCodec {
 #[derive(Wire)]
 pub struct NominalPacket<'wire> {
     /// Payload byte count.
-    #[wire(computed = len(payload), codec = PayloadLengthCodec)]
-    pub length: Computed<PayloadLength>,
+    #[wire(computed = wire_repr::computation::len(payload), codec = PayloadLengthCodec)]
+    pub length: PayloadLength,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
@@ -113,8 +101,8 @@ pub struct NominalPacket<'wire> {
 #[derive(Wire)]
 pub struct RestPacket<'wire> {
     /// Remainder byte count.
-    #[wire(computed = len(payload))]
-    pub length: Computed<u8>,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    pub length: u8,
     /// Remaining bytes.
     #[wire(rest)]
     pub payload: &'wire [u8],
@@ -134,8 +122,8 @@ pub struct NestedTail<'wire> {
 #[derive(Wire)]
 pub struct NestedPacket<'wire> {
     /// Payload byte count.
-    #[wire(computed = len(payload))]
-    pub length: Computed<u8>,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    pub length: u8,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
@@ -147,12 +135,110 @@ fn byte_sum(source: &impl ByteSourceCursor) -> u8 {
     source.bytes().fold(0u8, u8::wrapping_add)
 }
 
+fn byte_count(source: &impl ByteSourceCursor) -> usize {
+    source.byte_len()
+}
+
+fn oversized_count(_: &impl ByteSourceCursor) -> usize {
+    256
+}
+
+fn constant_count() -> usize {
+    7
+}
+
+fn semantic_count(value: &u8) -> usize {
+    usize::from(*value) + 1
+}
+
+fn ordered_count(
+    kind: &u8,
+    first: &impl ByteSourceCursor,
+    remaining: &impl ByteSourceCursor,
+) -> usize {
+    usize::from(*kind) * 100 + first.byte_len() * 10 + remaining.byte_len()
+}
+
+/// A computation receiving a semantic field by shared reference.
+#[derive(Wire)]
+pub struct SemanticCallback {
+    /// Derived from the semantic value.
+    #[wire(computed = semantic_count(value))]
+    pub count: u8,
+    /// Ordinary semantic input.
+    pub value: u8,
+}
+
+/// A computation with no callback arguments.
+#[derive(Wire)]
+pub struct NoArgumentCallback {
+    /// Constant computed value.
+    #[wire(computed = constant_count())]
+    pub count: u8,
+}
+
+/// An empty physical selection remains an ordinary callback argument.
+#[derive(Wire)]
+pub struct EmptyIncludeCallback {
+    /// Number of selected bytes.
+    #[wire(computed = byte_count(include()))]
+    pub count: u8,
+    /// Ordinary field omitted from the empty selection.
+    pub value: u8,
+}
+
+/// A computation with semantic and independently selected physical arguments.
+#[derive(Wire)]
+pub struct OrderedCallback {
+    /// Ordered callback result.
+    #[wire(computed = ordered_count(kind, include(first), exclude(self, second)))]
+    pub checksum: u8,
+    /// Semantic callback input.
+    pub kind: u8,
+    /// First physical selection.
+    pub first: u8,
+    /// Explicitly excluded physical field.
+    pub second: u8,
+    /// Remaining physical bytes included by the exclusion selection.
+    pub tail: u8,
+}
+
+/// Duplicate selectors are one physical set rather than an error.
+#[derive(Wire)]
+pub struct DuplicateSelection {
+    /// Count of the selected bytes.
+    #[wire(computed = byte_count(include(value, value)))]
+    pub count: u8,
+    /// One selected byte.
+    pub value: u8,
+}
+
+/// A callback-derived count converted into its computed destination type.
+#[derive(Wire)]
+pub struct CallbackCount {
+    /// Number of selected physical bytes.
+    #[wire(computed = byte_count(include(value)))]
+    pub count: u8,
+    /// The selected byte.
+    pub value: u8,
+}
+
+/// A callback whose result is not representable by its destination type.
+#[derive(Wire)]
+pub struct OversizedCallback {
+    /// Callback result converted into the computed destination type.
+    #[wire(computed = oversized_count(include(value)))]
+    pub count: u8,
+    /// The selected byte.
+    pub value: u8,
+}
+
 /// A fixed-only representation with a callback over owned fields.
 #[derive(Wire)]
 pub struct FixedCallback {
     /// Sum of the selected physical bytes.
     #[wire(computed = byte_sum(include(first, second)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
     /// First selected byte.
     pub first: u8,
     /// Second selected byte.
@@ -164,7 +250,7 @@ pub struct FixedCallback {
 pub struct FixedExcludeSelf {
     /// Sum of all physical bytes except this field.
     #[wire(computed = byte_sum(exclude(self)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
 }
 
 /// A checksum that depends on a later computed length field.
@@ -172,10 +258,10 @@ pub struct FixedExcludeSelf {
 pub struct Checksummed<'wire> {
     /// Sum of every physical byte except this field.
     #[wire(computed = byte_sum(exclude(self)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
     /// Payload byte count.
-    #[wire(computed = len(payload))]
-    pub length: Computed<u8>,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    pub length: u8,
     /// Remaining payload bytes.
     #[wire(rest)]
     pub payload: &'wire [u8],
@@ -186,10 +272,10 @@ pub struct Checksummed<'wire> {
 pub struct IncludedDependency<'wire> {
     /// Sum of the prepared partial checksum and payload.
     #[wire(computed = byte_sum(include(partial, payload)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
     /// Sum of the payload alone.
     #[wire(computed = byte_sum(include(payload)))]
-    pub partial: Computed<u8>,
+    pub partial: u8,
     /// Remaining payload bytes.
     #[wire(rest)]
     pub payload: &'wire [u8],
@@ -200,7 +286,7 @@ pub struct IncludedDependency<'wire> {
 pub struct NestedSelection<'wire> {
     /// Sum of the nested kind byte.
     #[wire(computed = byte_sum(include(tail.kind)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
     /// Nested representation.
     pub tail: NestedTail<'wire>,
 }
@@ -214,7 +300,7 @@ fn source_len(source: &impl ByteSourceCursor) -> u8 {
 pub struct PositionedChecksum<'wire> {
     /// Length of every physical byte except this field.
     #[wire(computed = source_len(exclude(self)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
     /// A positioned byte preceded by a generated gap.
     #[wire(at = 4)]
     pub marker: u8,
@@ -262,7 +348,7 @@ fn checksum_matches(view: &ValidatedChecksumView<'_>) -> Result<(), ChecksumErro
 #[allow(dead_code)]
 struct ValidatedChecksum<'wire> {
     #[wire(computed = byte_sum(exclude(self)))]
-    checksum: Computed<u8>,
+    checksum: u8,
     #[wire(rest)]
     payload: &'wire [u8],
 }
@@ -325,7 +411,7 @@ pub enum CallbackOperation {
 pub struct CallbackEnvelope {
     /// Checksum over the selected operation's exact physical bytes.
     #[wire(computed = byte_sum(include(selected)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
     /// Selected operation.
     #[wire(table)]
     pub selected: CallbackOperation,
@@ -336,8 +422,8 @@ pub struct CallbackEnvelope {
 #[wire(table = CallbackTable)]
 pub struct CallbackPayload<'wire> {
     /// Payload byte count.
-    #[wire(computed = len(payload))]
-    pub length: Computed<u8>,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    pub length: u8,
     /// Borrowed payload.
     #[wire(bytes = length)]
     pub payload: &'wire [u8],
@@ -363,6 +449,24 @@ fn builder_computes_u8_length_and_round_trips() {
     assert_eq!(parsed.length(), 3);
     assert_eq!(parsed.payload(), payload);
     assert_eq!(parsed.kind(), 7);
+}
+
+#[test]
+fn direct_prepare_ignores_the_caller_supplied_computed_value() {
+    let payload = [1, 2, 3];
+    let plan = Packet {
+        length: u8::MAX,
+        payload: &payload,
+        kind: 7,
+    }
+    .prepare()
+    .unwrap();
+    let mut output = [0; 5];
+
+    let (written, suffix) = plan.commit_into(&mut output).unwrap();
+
+    assert_eq!(written.as_bytes(), &[3, 1, 2, 3, 7]);
+    assert!(suffix.is_empty());
 }
 
 #[test]
@@ -434,11 +538,7 @@ fn computed_custom_codec_preserves_a_nominal_semantic_type() {
     let oversized = [0; 256];
     assert!(matches!(
         NominalPacket::builder().payload(&oversized).prepare(),
-        Err(NominalPacketEncodeError::LengthNotRepresentable {
-            field: "payload",
-            source: "length",
-            length: 256,
-        })
+        Err(NominalPacketEncodeError::ComputedValueNotRepresentable { field: "length" })
     ));
 }
 
@@ -447,11 +547,7 @@ fn builder_reports_conversion_failure_and_preserves_short_output() {
     let oversized = [0; 256];
     assert!(matches!(
         Packet::builder().payload(&oversized).kind(1).prepare(),
-        Err(PacketEncodeError::LengthNotRepresentable {
-            field: "payload",
-            source: "length",
-            length: 256
-        })
+        Err(PacketEncodeError::ComputedValueNotRepresentable { field: "length" })
     ));
 
     let payload = [1, 2, 3];
@@ -464,6 +560,80 @@ fn builder_reports_conversion_failure_and_preserves_short_output() {
             .is_err()
     );
     assert_eq!(short, [0xa5; 4]);
+}
+
+#[test]
+fn semantic_callback_receives_the_ordinary_field_by_reference() {
+    let mut output = [0; 2];
+    let (written, suffix) = SemanticCallback::builder()
+        .value(7)
+        .build_into(&mut output)
+        .unwrap();
+    assert_eq!(written.as_bytes(), &[8, 7]);
+    assert!(suffix.is_empty());
+}
+
+#[test]
+fn callbacks_accept_zero_arguments_and_empty_include_arguments() {
+    let mut constant = [0; 1];
+    let (written, suffix) = NoArgumentCallback::builder()
+        .build_into(&mut constant)
+        .unwrap();
+    assert_eq!(written.as_bytes(), &[7]);
+    assert!(suffix.is_empty());
+
+    let mut empty = [0; 2];
+    let (written, suffix) = EmptyIncludeCallback::builder()
+        .value(9)
+        .build_into(&mut empty)
+        .unwrap();
+    assert_eq!(written.as_bytes(), &[0, 9]);
+    assert!(suffix.is_empty());
+}
+
+#[test]
+fn callback_arguments_preserve_mixed_semantic_and_physical_order() {
+    let mut output = [0; 5];
+    let (written, suffix) = OrderedCallback::builder()
+        .kind(2)
+        .first(7)
+        .second(8)
+        .tail(9)
+        .build_into(&mut output)
+        .unwrap();
+    assert_eq!(written.as_bytes(), &[213, 2, 7, 8, 9]);
+    assert!(suffix.is_empty());
+}
+
+#[test]
+fn duplicate_physical_selectors_are_a_set() {
+    let mut output = [0; 2];
+    let (written, suffix) = DuplicateSelection::builder()
+        .value(7)
+        .build_into(&mut output)
+        .unwrap();
+    assert_eq!(written.as_bytes(), &[1, 7]);
+    assert!(suffix.is_empty());
+}
+
+#[test]
+fn callback_usize_result_converts_to_computed_destination_type() {
+    let mut output = [0; 2];
+    let (written, suffix) = CallbackCount::builder()
+        .value(7)
+        .build_into(&mut output)
+        .unwrap();
+
+    assert_eq!(written.as_bytes(), &[1, 7]);
+    assert!(suffix.is_empty());
+}
+
+#[test]
+fn callback_conversion_failure_identifies_the_computed_destination() {
+    assert!(matches!(
+        OversizedCallback::builder().value(7).prepare(),
+        Err(OversizedCallbackEncodeError::ComputedValueNotRepresentable { field: "count" })
+    ));
 }
 
 #[test]

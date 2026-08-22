@@ -2,7 +2,7 @@
 
 //! Public nominal bitfield view and prepared-write coverage.
 
-use wire_repr::{ByteSourceCursor, Computed, PreparedLayout, Wire};
+use wire_repr::{ByteSourceCursor, PreparedLayout, Wire};
 
 /// A nominal big-endian flags representation.
 #[derive(Debug, Eq, PartialEq, Wire)]
@@ -136,7 +136,7 @@ fn cursor_byte_sum(source: &impl ByteSourceCursor) -> u8 {
 pub struct BitfieldCursorChecksum<'wire> {
     /// Sum of the selected bitfield's physical bytes.
     #[wire(computed = cursor_byte_sum(include(flags)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
     /// Nominal bitfield selected by the checksum.
     pub flags: Flags,
     /// Retains the wire lifetime without adding bytes.

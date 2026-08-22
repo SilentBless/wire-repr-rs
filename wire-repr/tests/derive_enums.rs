@@ -2,7 +2,7 @@
 //! Static tagged enum derive coverage.
 
 use wire_repr::{
-    ByteSegment, ByteSink, ByteSource, ByteSourceCursor, Computed, FixedCodec, PreparedLayout, Wire,
+    ByteSegment, ByteSink, ByteSource, ByteSourceCursor, FixedCodec, PreparedLayout, Wire,
 };
 
 #[derive(Default)]
@@ -1135,7 +1135,7 @@ fn cursor_byte_sum(source: &impl ByteSourceCursor) -> u8 {
 pub struct EnumCursorChecksum<'wire> {
     /// Sum of the selected enum's physical bytes.
     #[wire(computed = cursor_byte_sum(include(operation)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
     /// Tagged operation selected by the checksum.
     pub operation: Operation,
     /// Retains the wire lifetime without adding bytes.
@@ -1148,7 +1148,7 @@ pub struct EnumCursorChecksum<'wire> {
 pub struct FragmentedEnumCursorChecksum<'wire> {
     /// Sum of the selected enum's physical bytes.
     #[wire(computed = cursor_byte_sum(include(operation)))]
-    pub checksum: Computed<u8>,
+    pub checksum: u8,
     /// Tagged operation selected by the checksum.
     pub operation: FragmentedOperation,
     /// Retains the wire lifetime without adding bytes.

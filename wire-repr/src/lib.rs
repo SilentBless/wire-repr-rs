@@ -7,6 +7,9 @@ extern crate self as wire_repr;
 /// Codec contracts and built-in codecs.
 pub mod codec;
 
+/// Helpers for computed wire fields.
+pub mod computation;
+
 mod selection;
 mod wire;
 
@@ -35,7 +38,7 @@ pub use selection::{
 };
 
 pub use wire::{
-    BuildIntoError, Computed, FixedValidatedViewSequenceError, FixedViewIterator,
-    FixedViewSequenceError, ValidatedViewCursor, ValidatedViewRequest, ViewCursor, ViewCursorError,
-    ViewRequest, WireEncode, WireView, WireViewType, WireViewValidation, Written,
+    BuildIntoError, FixedValidatedViewSequenceError, FixedViewIterator, FixedViewSequenceError,
+    ValidatedViewCursor, ValidatedViewRequest, ViewCursor, ViewCursorError, ViewRequest,
+    WireEncode, WireView, WireViewType, WireViewValidation, Written,
 };

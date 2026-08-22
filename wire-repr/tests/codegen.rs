@@ -1,7 +1,7 @@
 //! Release-codegen regression probes for the derive frontend.
 
 use core::{hint::black_box, mem::size_of_val};
-use wire_repr::{Computed, PreparedLayout, Wire};
+use wire_repr::{PreparedLayout, Wire};
 
 #[derive(Wire)]
 struct FixedPacket {
@@ -63,8 +63,8 @@ struct PositionedPacket {
 #[allow(dead_code)]
 #[derive(Wire)]
 struct ComputedPacket<'wire> {
-    #[wire(computed = len(payload))]
-    length: Computed<u8>,
+    #[wire(computed = wire_repr::computation::len(payload))]
+    length: u8,
     #[wire(bytes = length)]
     payload: &'wire [u8],
     kind: u8,
