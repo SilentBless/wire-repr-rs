@@ -34,5 +34,23 @@ class FailFastMetadataTests(unittest.TestCase):
         self.assertEqual(FAIL_FAST.diagnostic_messages(diagnostic), ["outer", "inner"])
 
 
+class FailFastDiscoveryTests(unittest.TestCase):
+    def test_discovery_recurses_and_case_names_include_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixtures = Path(directory)
+            nested = fixtures / "computed" / "cycle.rs"
+            nested.parent.mkdir()
+            nested.write_text("//! error: rejected\n")
+            (fixtures / "root.rs").write_text("//! error: rejected\n")
+            (fixtures / "computed" / "note.txt").write_text("not a fixture\n")
+
+            discovered = FAIL_FAST.discover_fixtures(fixtures)
+
+            self.assertEqual(
+                [path.relative_to(fixtures).as_posix() for path in discovered],
+                ["computed/cycle.rs", "root.rs"],
+            )
+            self.assertEqual(FAIL_FAST.case_name(nested, fixtures), "computed_cycle")
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,14 @@ ERROR = re.compile(r"^//! error:\s*(?P<fragment>\S(?:.*\S)?)\s*$")
 METADATA = re.compile(r"^//!\s*(?P<key>[A-Za-z][A-Za-z0-9_-]*):")
 
 
+def discover_fixtures(directory: Path) -> list[Path]:
+    return sorted(path for path in directory.rglob("*.rs") if path.is_file())
+
+
+def case_name(path: Path, directory: Path) -> str:
+    return "_".join(path.relative_to(directory).with_suffix("").parts)
+
+
 def expected_errors(path: Path) -> tuple[str, ...]:
     fragments: list[str] = []
     for line_number, line in enumerate(path.read_text().splitlines(), 1):
@@ -49,8 +57,9 @@ def diagnostic_messages(value: dict[str, object]) -> list[str]:
     return messages
 
 
-def compile_case(root: Path, path: Path, toolchain: str) -> list[str]:
-    case_root = root / "target" / "fail-fast" / "cases" / path.stem
+def compile_case(root: Path, path: Path, directory: Path, toolchain: str) -> list[str]:
+    name = case_name(path, directory)
+    case_root = root / "target" / "fail-fast" / "cases" / name
     source_root = case_root / "src"
     source_root.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(path, source_root / "lib.rs")
@@ -58,7 +67,7 @@ def compile_case(root: Path, path: Path, toolchain: str) -> list[str]:
         "\n".join(
             [
                 "[package]",
-                f'name = "wire-repr-fail-{path.stem.replace("_", "-")}"',
+                f'name = "wire-repr-fail-{name.replace("_", "-")}"',
                 'version = "0.0.0"',
                 'edition = "2024"',
                 "",
@@ -116,14 +125,14 @@ def main() -> int:
     args = parser.parse_args()
     root = args.root.resolve()
     directory = root / "wire-repr" / "tests" / "fail_fast"
-    fixtures = sorted(directory.glob("*.rs"))
+    fixtures = discover_fixtures(directory)
     if not fixtures:
         raise RuntimeError(f"no fail-fast fixtures found below {directory}")
 
     failures: list[str] = []
     for path in fixtures:
         expected = expected_errors(path)
-        messages = compile_case(root, path, args.toolchain)
+        messages = compile_case(root, path, directory, args.toolchain)
         missing = [fragment for fragment in expected if not any(fragment in message for message in messages)]
         relative = path.relative_to(root)
         if missing:
