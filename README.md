@@ -299,10 +299,3 @@ it separately against the exact-source view selection.
 it has no macro privileges and can be replaced by an ordinary function. A field referenced by
 `#[wire(bytes = length)]` is different: the framing relation derives `length` canonically from
 the payload extent during preparation, so that source cannot also declare a computation.
-
-## 🧪 Real formats
-
-The repository includes consumer fixtures for [PNG chunks](wire-repr/tests/consumer_formats/png.rs),
-[SQLite headers](wire-repr/tests/consumer_formats/sqlite.rs), and
-[WebAssembly sections](wire-repr/tests/consumer_formats/wasm.rs). They keep magic values,
-checksums, and format policy outside the representation layer.

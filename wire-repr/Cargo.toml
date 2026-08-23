@@ -9,6 +9,7 @@ documentation = "https://docs.rs/wire-repr"
 repository.workspace = true
 homepage.workspace = true
 readme = "../README.md"
+autotests = false
 keywords = ["binary", "zero-copy", "no-std", "no-alloc", "codegen"]
 categories = ["encoding", "no-std", "no-std::no-alloc"]
 
@@ -21,9 +22,8 @@ bytes = { workspace = true, optional = true }
 wire-repr-macros.workspace = true
 
 [[test]]
-name = "bytes_mode"
-path = "tests/bytes_mode.rs"
-required-features = ["bytes"]
+name = "suite"
+path = "tests/suite.rs"
 
 [lints]
 workspace = true
