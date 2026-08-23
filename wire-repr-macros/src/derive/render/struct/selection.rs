@@ -5,18 +5,30 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
 pub(super) struct Input<'a> {
+    pub(super) schema: Schema<'a>,
+    pub(super) geometry: Geometry<'a>,
+    pub(super) types: Types<'a>,
+    pub(super) runtime: &'a TokenStream,
+}
+
+pub(super) struct Schema<'a> {
     pub(super) name: &'a Ident,
     pub(super) vis: &'a syn::Visibility,
     pub(super) fields: &'a [Field],
+}
+
+pub(super) struct Geometry<'a> {
     pub(super) plans: &'a [Ident],
     pub(super) gaps: &'a [Option<Ident>],
     pub(super) nested_fields_paths: &'a [Option<TokenStream>],
     pub(super) nested_view_paths: &'a [Option<TokenStream>],
     pub(super) nested_plan_paths: &'a [Option<TokenStream>],
+}
+
+pub(super) struct Types<'a> {
     pub(super) selection_impl_generics: &'a TokenStream,
     pub(super) selection_plan_type: &'a TokenStream,
     pub(super) view: &'a Ident,
-    pub(super) runtime: &'a TokenStream,
 }
 
 pub(super) struct Output {
@@ -26,41 +38,67 @@ pub(super) struct Output {
 
 pub(super) fn render(input: Input<'_>) -> Output {
     let Input {
-        name,
-        vis,
-        fields,
-        plans,
-        gaps,
-        nested_fields_paths,
-        nested_view_paths,
-        nested_plan_paths,
-        selection_impl_generics,
-        selection_plan_type,
-        view,
+        schema: Schema { name, vis, fields },
+        geometry:
+            Geometry {
+                plans,
+                gaps,
+                nested_fields_paths,
+                nested_view_paths,
+                nested_plan_paths,
+            },
+        types:
+            Types {
+                selection_impl_generics,
+                selection_plan_type,
+                view,
+            },
         runtime,
     } = input;
     let field_proxy = format_ident!("{name}Fields");
     let markers: Vec<_> = (0..fields.len())
         .map(|index| format_ident!("__WireRepr{name}Field{index}"))
         .collect();
-    let proxy_fields = fields.iter().enumerate().zip(&markers).map(|((index, field), marker)| {
-        let field_name = &field.name;
-        if matches!(field.kind, FieldKind::Nested) {
-            let child_fields = nested_fields_paths[index].as_ref().expect("nested fields have generated field proxy paths");
-            quote!(#vis #field_name: #runtime::NestedField<<S as #runtime::MarkerScope>::Wrap<#marker>, #child_fields<#runtime::Through<S, #marker>>>)
-        } else {
-            quote!(#vis #field_name: <S as #runtime::MarkerScope>::Wrap<#marker>)
-        }
-    });
-    let proxy_values = fields.iter().enumerate().zip(&markers).map(|((index, field), marker)| {
-        let field_name = &field.name;
-        if matches!(field.kind, FieldKind::Nested) {
-            let child_fields = nested_fields_paths[index].as_ref().expect("nested fields have generated field proxy paths");
-            quote!(#field_name: #runtime::NestedField::new(<S as #runtime::MarkerScope>::wrap(#marker), #child_fields::<#runtime::Through<S, #marker>>::__wire_repr_new()))
-        } else {
-            quote!(#field_name: <S as #runtime::MarkerScope>::wrap(#marker))
-        }
-    });
+    let proxy_fields = fields
+        .iter()
+        .enumerate()
+        .zip(&markers)
+        .map(|((index, field), marker)| {
+            let field_name = &field.name;
+            if matches!(field.kind, FieldKind::Nested) {
+                let child_fields = nested_fields_paths[index]
+                    .as_ref()
+                    .expect("nested fields have generated field proxy paths");
+                quote!(
+                    #vis #field_name: #runtime::NestedField<
+                        <S as #runtime::MarkerScope>::Wrap<#marker>,
+                        #child_fields<#runtime::Through<S, #marker>>
+                    >
+                )
+            } else {
+                quote!(#vis #field_name: <S as #runtime::MarkerScope>::Wrap<#marker>)
+            }
+        });
+    let proxy_values = fields
+        .iter()
+        .enumerate()
+        .zip(&markers)
+        .map(|((index, field), marker)| {
+            let field_name = &field.name;
+            if matches!(field.kind, FieldKind::Nested) {
+                let child_fields = nested_fields_paths[index]
+                    .as_ref()
+                    .expect("nested fields have generated field proxy paths");
+                quote!(
+                    #field_name: #runtime::NestedField::new(
+                        <S as #runtime::MarkerScope>::wrap(#marker),
+                        #child_fields::<#runtime::Through<S, #marker>>::__wire_repr_new()
+                    )
+                )
+            } else {
+                quote!(#field_name: <S as #runtime::MarkerScope>::wrap(#marker))
+            }
+        });
     let marker_impls = fields.iter().enumerate().map(|(index, field)| {
         let marker = &markers[index];
         let prior_steps = (0..index).map(|prior_index| {
@@ -156,7 +194,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
             #selection
         }
     });
-    let view_marker_impls = fields.iter().enumerate().map(|(index, field)| {
+    let borrowed_view_marker_impls: Vec<_> = fields.iter().enumerate().map(|(index, field)| {
         let marker = &markers[index];
         let prior_steps = (0..index).map(|prior_index| {
             let prior = &fields[prior_index];
@@ -219,15 +257,73 @@ pub(super) fn render(input: Input<'_>) -> Output {
             }
         };
         quote!(#selection)
-    });
+    }).collect();
+    let view_marker_impls = if cfg!(feature = "bytes") {
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let marker = &markers[index];
+                let stored = format_ident!("field_{index}");
+                if matches!(field.kind, FieldKind::Nested) {
+                    let child_view = nested_view_paths[index]
+                        .as_ref()
+                        .expect("nested fields have generated view paths");
+                    let range = format_ident!("field_{index}_range");
+                    quote! {
+                        impl #runtime::FieldProjection<#view> for #marker {
+                            type Inner = #child_view;
+                            fn project<'a>(target: &'a #view) -> (::core::ops::Range<usize>, &'a Self::Inner) {
+                                (target.#range.clone(), &target.#stored)
+                            }
+                        }
+                        impl #runtime::FieldSelection<#view> for #marker {
+                            #[inline(always)]
+                            fn visit_ranges<V>(&self, target: &#view, visitor: &mut V) where V: FnMut(::core::ops::Range<usize>) {
+                                let (span, _) = <Self as #runtime::FieldProjection<#view>>::project(target);
+                                visitor(span);
+                            }
+                        }
+                    }
+                } else {
+                    quote! {
+                        impl #runtime::FieldSelection<#view> for #marker {
+                            #[inline(always)]
+                            fn visit_ranges<V>(&self, target: &#view, visitor: &mut V) where V: FnMut(::core::ops::Range<usize>) {
+                                visitor(target.#stored.clone());
+                            }
+                        }
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        borrowed_view_marker_impls
+    };
     let declaration = quote! {
         #[allow(missing_docs)]
         #[doc(hidden)]
-        #vis struct #field_proxy<S: #runtime::MarkerScope = #runtime::RootScope> { #(#proxy_fields,)* }
+        #vis struct #field_proxy<S: #runtime::MarkerScope = #runtime::RootScope> {
+            #(#proxy_fields,)*
+        }
+
         impl<S: #runtime::MarkerScope> Copy for #field_proxy<S> {}
-        impl<S: #runtime::MarkerScope> Clone for #field_proxy<S> { fn clone(&self) -> Self { *self } }
+
+        impl<S: #runtime::MarkerScope> Clone for #field_proxy<S> {
+            fn clone(&self) -> Self {
+                *self
+            }
+        }
+
         #[allow(missing_docs)]
-        impl<S: #runtime::MarkerScope> #field_proxy<S> { #[doc(hidden)] #vis fn __wire_repr_new() -> Self { Self { #(#proxy_values,)* } } }
+        impl<S: #runtime::MarkerScope> #field_proxy<S> {
+            #[doc(hidden)]
+            #vis fn __wire_repr_new() -> Self {
+                Self {
+                    #(#proxy_values,)*
+                }
+            }
+        }
         #(#marker_impls)*
         #(#view_marker_impls)*
     };

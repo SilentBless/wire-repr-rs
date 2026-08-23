@@ -1,11 +1,13 @@
-# Borrowed wire views and atomic writers
+# Wire views and atomic writers
 
 `wire-repr` derives safe, `no_std`, allocation-free binary representation code from
 ordinary Rust structs and enums.
 
-A declared `Foo` is the semantic value used for writing. Reading produces a generated
-`FooView<'wire>` that borrows the original bytes, validates their geometry once, and
-exposes getters. Protocol policy remains consumer code.
+A declared `Foo` is the semantic value used for writing. By default, reading produces a
+generated `FooView<'wire>` that borrows the original bytes. With the `bytes` feature, the
+same API produces a lifetime-free view owning a shared `bytes::Bytes` handle. Both forms
+validate geometry once and expose the same semantic getters. Protocol policy remains
+consumer code.
 
 ## Read one representation
 
@@ -22,13 +24,16 @@ struct Packet<'value> {
     sequence: u16,
 }
 
-let input = [7, 3, 10, 11, 12, 0x12, 0x34, 0xaa];
-let (packet, suffix) = Packet::view(&input).with_remainder()?;
+# #[cfg(not(feature = "bytes"))]
+# let input = &[7, 3, 10, 11, 12, 0x12, 0x34, 0xaa][..];
+# #[cfg(feature = "bytes")]
+# let input = bytes::Bytes::from_static(&[7, 3, 10, 11, 12, 0x12, 0x34, 0xaa]);
+let (packet, suffix) = Packet::view(input).with_remainder()?;
 assert_eq!(packet.kind(), 7);
 assert_eq!(packet.payload(), &[10, 11, 12]);
 assert_eq!(packet.sequence(), 0x1234);
-assert_eq!(packet.as_bytes(), &input[..7]);
-assert_eq!(suffix, &[0xaa]);
+assert_eq!(packet.as_bytes(), &[7, 3, 10, 11, 12, 0x12, 0x34]);
+assert_eq!(suffix.as_ref(), &[0xaa]);
 # Ok::<(), PacketDecodeError>(())
 ```
 
@@ -54,7 +59,11 @@ enum Command {
     Halt = 2,
 }
 
-let command = Command::view(&[1, 0x12, 0x34]).without_trailing()?;
+# #[cfg(not(feature = "bytes"))]
+# let input = &[1, 0x12, 0x34][..];
+# #[cfg(feature = "bytes")]
+# let input = bytes::Bytes::from_static(&[1, 0x12, 0x34]);
+let command = Command::view(input).without_trailing()?;
 assert!(!command.is_halt());
 assert_eq!(command.ping().unwrap().id(), 0x1234);
 # Ok::<(), CommandValidationError>(())
@@ -74,10 +83,15 @@ enum ChunkType {
     Other([u8; 4]),
 }
 
-let chunk_type = ChunkType::view(b"vpAg")
+# #[cfg(not(feature = "bytes"))]
+# let input = &b"vpAg"[..];
+# #[cfg(feature = "bytes")]
+# let input = bytes::Bytes::from_static(b"vpAg");
+let chunk_type = ChunkType::view(input)
     .without_trailing()
     .expect("unknown tag is preserved");
-assert_eq!(chunk_type.other(), Some(b"vpAg"));
+assert!(chunk_type.other().is_some());
+assert_eq!(chunk_type.as_bytes(), b"vpAg");
 ```
 
 Unknown tags are rejected by the explicit policy. Dynamic numeric IDs can instead use a
@@ -99,7 +113,11 @@ struct Flags {
     mode: u8,
 }
 
-let flags = Flags::view(&[0b1110_1011]).without_trailing()?;
+# #[cfg(not(feature = "bytes"))]
+# let input = &[0b1110_1011][..];
+# #[cfg(feature = "bytes")]
+# let input = bytes::Bytes::from_static(&[0b1110_1011]);
+let flags = Flags::view(input).without_trailing()?;
 assert!(flags.enabled());
 assert_eq!(flags.mode(), 5);
 # Ok::<(), FlagsDecodeError>(())
@@ -121,7 +139,11 @@ struct Word {
     value: u16,
 }
 
-let mut words = Word::views(&[0x12, 0x34, 0xab, 0xcd])?;
+# #[cfg(not(feature = "bytes"))]
+# let input = &[0x12, 0x34, 0xab, 0xcd][..];
+# #[cfg(feature = "bytes")]
+# let input = bytes::Bytes::from_static(&[0x12, 0x34, 0xab, 0xcd]);
+let mut words = Word::views(input)?;
 assert_eq!(words.len(), 2);
 assert_eq!(words.next().unwrap().value(), 0x1234);
 assert_eq!(words.next().unwrap().value(), 0xabcd);
@@ -148,16 +170,27 @@ struct Header {
 let plan = Header { kind: 3, code: 0x0102 }.prepare()?;
 assert_eq!(plan.encoded_len(), 3);
 
-let mut output = [0xa5; 4];
-let (written, suffix) = plan.commit_into(&mut output)?;
+# #[cfg(not(feature = "bytes"))]
+# {
+# let mut output = [0xa5; 4];
+# let (written, suffix) = plan.commit_into(&mut output)?;
+# assert_eq!(written.as_bytes(), &[3, 1, 2]);
+# assert_eq!(suffix, &mut [0xa5]);
+# }
+# #[cfg(feature = "bytes")]
+# {
+let mut output = bytes::BytesMut::with_capacity(3);
+let written = plan.commit_into(&mut output)?;
 assert_eq!(written.as_bytes(), &[3, 1, 2]);
-assert_eq!(suffix, &mut [0xa5]);
+# }
 # Ok::<(), Box<dyn core::error::Error>>(())
 ```
 
 Preparation completes all fallible codec work, conversions, operation-input mapping, dynamic
 geometry, and total-length checks before output mutation. Commit checks capacity before
-its first write. Short output remains byte-for-byte unchanged.
+its first write. Short output remains byte-for-byte unchanged. In `bytes` mode, commit appends
+after any existing prefix without reserving; the caller can freeze the `BytesMut` after the
+returned `Written` borrow ends.
 
 ## Select and compute represented bytes
 

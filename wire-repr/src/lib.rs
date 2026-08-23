@@ -18,6 +18,8 @@ mod wire;
 pub mod __private {
     pub use crate::codec::fixed::OwnedBytes;
     pub use crate::codec::{BorrowedSource, ByteChain, EmptySource};
+    #[cfg(feature = "bytes")]
+    pub use bytes::{Bytes, BytesMut};
 }
 
 #[doc(inline)]

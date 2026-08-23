@@ -374,6 +374,30 @@ pub trait ByteSource {
             "ByteSource emitted wrong length"
         );
     }
+
+    /// Appends this source to a pre-capacitated output buffer without growing it.
+    #[cfg(feature = "bytes")]
+    #[doc(hidden)]
+    fn append_into_bytes_mut(
+        &self,
+        output: &mut bytes::BytesMut,
+    ) -> Result<(), OutputTooShortError> {
+        let required = self.byte_len();
+        let available = output.capacity() - output.len();
+        if available < required {
+            return Err(OutputTooShortError {
+                required,
+                available,
+            });
+        }
+        let mut sink = BytesMutSink {
+            output,
+            remaining: required,
+        };
+        self.emit_to(&mut sink);
+        assert_eq!(sink.remaining, 0, "ByteSource emitted wrong length");
+        Ok(())
+    }
 }
 
 struct SliceSink<'output> {
@@ -411,6 +435,44 @@ impl ByteSink for SliceSink<'_> {
     }
 }
 
+#[cfg(feature = "bytes")]
+struct BytesMutSink<'output> {
+    output: &'output mut bytes::BytesMut,
+    remaining: usize,
+}
+
+#[cfg(feature = "bytes")]
+impl BytesMutSink<'_> {
+    #[inline(always)]
+    fn claim(&mut self, len: usize) {
+        self.remaining = self
+            .remaining
+            .checked_sub(len)
+            .expect("ByteSource emitted too many bytes");
+    }
+}
+
+#[cfg(feature = "bytes")]
+impl ByteSink for BytesMutSink<'_> {
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        self.claim(bytes.len());
+        self.output.extend_from_slice(bytes);
+    }
+
+    #[inline(always)]
+    fn fill(&mut self, byte: u8, len: usize) {
+        self.claim(len);
+        let block = [byte; 64];
+        let mut remaining = len;
+        while remaining != 0 {
+            let chunk = remaining.min(block.len());
+            self.output.extend_from_slice(&block[..chunk]);
+            remaining -= chunk;
+        }
+    }
+}
+
 /// A prepared wire encoding that can be committed into an output buffer.
 ///
 /// Preparation performs every fallible codec operation. Implementations only check
@@ -429,10 +491,21 @@ pub trait PreparedLayout: ByteSourceCursor {
     ///
     /// Extra output bytes are returned as a disjoint suffix. A short output is left
     /// unchanged.
+    #[cfg(not(feature = "bytes"))]
     fn commit_into<'output>(
         self,
         output: &'output mut [u8],
     ) -> Result<(Self::Written<'output>, &'output mut [u8]), OutputTooShortError>;
+
+    /// Appends this prepared encoding into existing spare output capacity.
+    ///
+    /// A short output is left unchanged. Implementations return a wrapper over only the newly
+    /// appended range.
+    #[cfg(feature = "bytes")]
+    fn commit_into<'output>(
+        self,
+        output: &'output mut bytes::BytesMut,
+    ) -> Result<Self::Written<'output>, OutputTooShortError>;
 }
 
 /// Reports that an output buffer cannot contain a prepared layout.

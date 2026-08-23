@@ -1,8 +1,13 @@
 //! Source attribute syntax parsing for `Wire` derives.
 
-use syn::{Attribute, Expr, Ident, Lit, Member, Path, Type};
+use syn::{Attribute, Expr, Ident, Lit, Path, Type};
 
 use super::{EnumTag, FieldPosition, OperationInput, TagCodec, UnknownPolicy};
+
+mod computation;
+
+use computation::parse_computation;
+pub(super) use computation::{ComputationArgument, ComputationBytes, ComputationSyntax};
 
 pub(super) struct VariantAttributes {
     pub(super) operation_selector: Option<(Ident, Path)>,
@@ -65,133 +70,6 @@ pub(super) enum WireAttribute {
     Prefix(Path),
     Bytes(Ident),
     Rest,
-}
-
-pub(super) enum ComputationSyntax {
-    Callback {
-        path: Path,
-        arguments: Vec<ComputationArgument>,
-    },
-}
-
-pub(super) enum ComputationArgument {
-    Semantic(Ident),
-    Bytes(ComputationBytes),
-}
-
-pub(super) enum ComputationBytes {
-    Include(Vec<ComputationFieldPath>),
-    Exclude(Vec<ComputationFieldPath>),
-}
-
-pub(super) struct ComputationFieldPath {
-    pub(super) top_level: Ident,
-    pub(super) nested: Vec<Ident>,
-}
-
-fn parse_computation(expression: Expr) -> syn::Result<ComputationSyntax> {
-    let Expr::Call(call) = expression else {
-        return Err(syn::Error::new_spanned(
-            expression,
-            "computed fields require `computed = callback(arg, include(field, ...), exclude(field, ...))`",
-        ));
-    };
-    let syn::ExprCall { func, args, .. } = call;
-    let Expr::Path(function) = *func else {
-        return Err(syn::Error::new_spanned(
-            func,
-            "computed callbacks must be function paths",
-        ));
-    };
-    if function.qself.is_some() {
-        return Err(syn::Error::new_spanned(
-            function,
-            "computed callbacks must be function paths",
-        ));
-    }
-    let arguments = args
-        .iter()
-        .map(parse_computation_argument)
-        .collect::<syn::Result<Vec<_>>>()?;
-    Ok(ComputationSyntax::Callback {
-        path: function.path,
-        arguments,
-    })
-}
-
-fn parse_computation_argument(expression: &Expr) -> syn::Result<ComputationArgument> {
-    if let Expr::Path(path) = expression {
-        if let (None, Some(name)) = (&path.qself, path.path.get_ident()) {
-            return Ok(ComputationArgument::Semantic(name.clone()));
-        }
-        return Err(syn::Error::new_spanned(
-            path,
-            "computed semantic arguments must be top-level field names",
-        ));
-    }
-    parse_computation_bytes(expression).map(ComputationArgument::Bytes)
-}
-
-fn parse_computation_bytes(expression: &Expr) -> syn::Result<ComputationBytes> {
-    let Expr::Call(call) = expression else {
-        return Err(syn::Error::new_spanned(
-            expression,
-            "computed arguments must be top-level field names, `include(field, ...)`, or `exclude(field, ...)`",
-        ));
-    };
-    let Expr::Path(mode) = call.func.as_ref() else {
-        return Err(syn::Error::new_spanned(
-            &call.func,
-            "computed byte selections require `include(field, ...)` or `exclude(field, ...)`",
-        ));
-    };
-    let selection = if mode.path.is_ident("include") {
-        ComputationBytes::Include
-    } else if mode.path.is_ident("exclude") {
-        ComputationBytes::Exclude
-    } else {
-        return Err(syn::Error::new_spanned(
-            mode,
-            "computed byte selections require `include(field, ...)` or `exclude(field, ...)`",
-        ));
-    };
-    call.args
-        .iter()
-        .map(parse_computation_field_path)
-        .collect::<syn::Result<Vec<_>>>()
-        .map(selection)
-}
-
-fn parse_computation_field_path(expression: &Expr) -> syn::Result<ComputationFieldPath> {
-    match expression {
-        Expr::Path(path) if path.qself.is_none() => {
-            let Some(top_level) = path.path.get_ident() else {
-                return Err(syn::Error::new_spanned(
-                    path,
-                    "computed byte selections require field paths",
-                ));
-            };
-            Ok(ComputationFieldPath {
-                top_level: top_level.clone(),
-                nested: Vec::new(),
-            })
-        }
-        Expr::Field(field) => {
-            let mut path = parse_computation_field_path(&field.base)?;
-            let Member::Named(member) = &field.member else {
-                return Err(syn::Error::new_spanned(
-                    &field.member,
-                    "computed byte selections require named field paths",
-                ));
-            };
-            path.nested.push(member.clone());
-            Ok(path)
-        }
-        _ => Err(syn::Error::new_spanned(
-            expression,
-            "computed byte selections require field paths",
-        )),
-    }
 }
 
 pub(super) struct FieldWireAttributes {
@@ -489,7 +367,7 @@ pub(super) fn parse_struct_attributes(attributes: &[Attribute]) -> syn::Result<S
                     "bitfields require an explicit reserved-bit policy; add `reserved = zero`",
                 ));
             }
-            Some(super::parse_bitfield_storage(&ty, endian)?)
+            Some(super::bitfield::parse_storage(&ty, endian)?)
         }
         None => {
             if endian.is_some() || reserved_zero {

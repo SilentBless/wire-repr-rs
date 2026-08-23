@@ -6,18 +6,30 @@ use quote::{format_ident, quote};
 use syn::{Path, Type, Visibility};
 
 pub(super) struct Input<'a> {
+    pub(super) schema: Schema<'a>,
+    pub(super) policy: Policy<'a>,
+    pub(super) types: Types<'a>,
+    pub(super) runtime: &'a TokenStream,
+}
+
+pub(super) struct Schema<'a> {
     pub(super) vis: &'a Visibility,
     pub(super) fields: &'a [Field],
     pub(super) labels: &'a [String],
     pub(super) variants: &'a [Ident],
     pub(super) nested_view_paths: &'a [Option<TokenStream>],
+}
+
+pub(super) struct Policy<'a> {
     pub(super) model_validators: &'a [Path],
     pub(super) custom_validation_error: Option<&'a Type>,
     pub(super) has_nested: bool,
+}
+
+pub(super) struct Types<'a> {
     pub(super) view: &'a Ident,
     pub(super) validation_error: &'a Ident,
     pub(super) view_error_type: &'a TokenStream,
-    pub(super) runtime: &'a TokenStream,
 }
 
 pub(super) struct Output {
@@ -26,18 +38,30 @@ pub(super) struct Output {
 }
 
 pub(super) fn render(input: Input<'_>) -> Output {
+    if cfg!(feature = "bytes") {
+        return render_owned(input);
+    }
     let Input {
-        vis,
-        fields,
-        labels,
-        variants,
-        nested_view_paths,
-        model_validators,
-        custom_validation_error,
-        has_nested,
-        view,
-        validation_error,
-        view_error_type,
+        schema:
+            Schema {
+                vis,
+                fields,
+                labels,
+                variants,
+                nested_view_paths,
+            },
+        policy:
+            Policy {
+                model_validators,
+                custom_validation_error,
+                has_nested,
+            },
+        types:
+            Types {
+                view,
+                validation_error,
+                view_error_type,
+            },
         runtime,
     } = input;
     let generated_validation_error = custom_validation_error.is_none() && has_nested;
@@ -61,9 +85,19 @@ pub(super) fn render(input: Input<'_>) -> Output {
             let variant = &variants[index];
             let child = if generated_validation_error {
                 let nested_variant = format_ident!("Nested{variant}");
-                quote!(<#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::validate(&self.#name()).map_err(#validation_error::#nested_variant)?;)
+                quote! {
+                    <#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::validate(
+                        &self.#name()
+                    )
+                    .map_err(#validation_error::#nested_variant)?;
+                }
             } else {
-                quote!(<#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::validate(&self.#name()).map_err(<Self::ValidationError as From<_>>::from)?;)
+                quote! {
+                    <#child_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::validate(
+                        &self.#name()
+                    )
+                    .map_err(<Self::ValidationError as From<_>>::from)?;
+                }
             };
             quote!(#child #(#own)*)
         } else {
@@ -103,7 +137,13 @@ pub(super) fn render(input: Input<'_>) -> Output {
             .map(|(index, _)| {
                 let variant = format_ident!("Nested{}", variants[index]);
                 let label = &labels[index];
-                quote!(Self::#variant(error) => write!(formatter, "nested validation failed in field `{}`: {error}", #label),)
+                quote!(
+                    Self::#variant(error) => write!(
+                        formatter,
+                        "nested validation failed in field `{}`: {error}",
+                        #label
+                    ),
+                )
             });
         quote! {
             /// Semantic validation failures for this wire representation.
@@ -123,7 +163,9 @@ pub(super) fn render(input: Input<'_>) -> Output {
             }
             impl ::core::error::Error for #validation_error<'_> {}
             impl<'__wire_repr_wire> From<#view_error_type> for #validation_error<'__wire_repr_wire> {
-                fn from(error: #view_error_type) -> Self { Self::Decode(error) }
+                fn from(error: #view_error_type) -> Self {
+                    Self::Decode(error)
+                }
             }
         }
     });
@@ -134,5 +176,132 @@ pub(super) fn render(input: Input<'_>) -> Output {
             #generated_validation_error_decl
             #validation_impl
         },
+    }
+}
+
+fn render_owned(input: Input<'_>) -> Output {
+    let Input {
+        schema:
+            Schema {
+                vis,
+                fields,
+                labels,
+                variants,
+                nested_view_paths,
+            },
+        policy:
+            Policy {
+                model_validators,
+                custom_validation_error,
+                has_nested,
+            },
+        types:
+            Types {
+                view,
+                validation_error,
+                view_error_type,
+            },
+        runtime,
+    } = input;
+    let generated = custom_validation_error.is_none() && has_nested;
+    let error_type = if let Some(error) = custom_validation_error {
+        quote!(#error)
+    } else if generated {
+        quote!(#validation_error)
+    } else {
+        quote!(#view_error_type)
+    };
+    let field_validators = fields.iter().enumerate().flat_map(|(index, field)| {
+        let name = &field.name;
+        let own = field
+            .validators
+            .iter()
+            .map(move |validator| quote!(#validator(self.#name())?;));
+        let nested = matches!(field.kind, FieldKind::Nested).then(|| {
+            let child = nested_view_paths[index]
+                .as_ref()
+                .expect("nested fields have generated view paths");
+            if generated {
+                let variant = format_ident!("Nested{}", variants[index]);
+                quote! {
+                    <#child as #runtime::WireViewValidation<'static>>::validate(&self.#name())
+                        .map_err(#validation_error::#variant)?;
+                }
+            } else {
+                quote! {
+                    <#child as #runtime::WireViewValidation<'static>>::validate(&self.#name())
+                        .map_err(<Self::ValidationError as From<_>>::from)?;
+                }
+            }
+        });
+        quote!(#nested #(#own)*)
+    });
+    let validation_impl = quote! {
+        impl #runtime::WireViewValidation<'static> for #view {
+            type ValidationError = #error_type;
+            fn validate(&self) -> Result<(), Self::ValidationError> {
+                #(#field_validators)*
+                #(#model_validators(self)?;)*
+                Ok(())
+            }
+        }
+    };
+    let error_decl = generated.then(|| {
+        let nested_variants = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| matches!(field.kind, FieldKind::Nested))
+            .map(|(index, _)| {
+                let child = nested_view_paths[index]
+                    .as_ref()
+                    .expect("nested fields have generated view paths");
+                let variant = format_ident!("Nested{}", variants[index]);
+                let label = &labels[index];
+                quote! {
+                    #[doc = concat!("Nested semantic validation failed in field `", #label, "`.")]
+                    #variant(<#child as #runtime::WireViewValidation<'static>>::ValidationError),
+                }
+            });
+        let nested_arms = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| matches!(field.kind, FieldKind::Nested))
+            .map(|(index, _)| {
+                let variant = format_ident!("Nested{}", variants[index]);
+                let label = &labels[index];
+                quote!(
+                    Self::#variant(error) => write!(
+                        formatter,
+                        "nested validation failed in field `{}`: {error}",
+                        #label
+                    ),
+                )
+            });
+        quote! {
+            /// Semantic validation failures for this wire representation.
+            #[derive(Debug)]
+            #vis enum #validation_error {
+                Decode(#view_error_type),
+                #(#nested_variants)*
+            }
+            impl ::core::fmt::Display for #validation_error {
+                fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    match self {
+                        Self::Decode(error) => error.fmt(formatter),
+                        #(#nested_arms)*
+                    }
+                }
+            }
+            impl ::core::error::Error for #validation_error {}
+            impl From<#view_error_type> for #validation_error {
+                fn from(error: #view_error_type) -> Self {
+                    Self::Decode(error)
+                }
+            }
+        }
+    });
+    Output {
+        error_type,
+        declaration: quote!(#error_decl #validation_impl),
     }
 }

@@ -6,18 +6,34 @@ use quote::{format_ident, quote};
 
 pub(super) struct Input<'a> {
     pub(super) has_builder: bool,
+    pub(super) identity: Identity<'a>,
+    pub(super) types: Types<'a>,
+    pub(super) operation: Operation<'a>,
+    pub(super) preparation: Preparation<'a>,
+    pub(super) runtime: &'a TokenStream,
+}
+
+pub(super) struct Identity<'a> {
     pub(super) name: &'a Ident,
     pub(super) vis: &'a syn::Visibility,
+}
+
+pub(super) struct Types<'a> {
     pub(super) wire_lifetime: Option<&'a syn::Lifetime>,
-    pub(super) operation_input_ty: Option<&'a syn::Path>,
-    pub(super) operation_name: Option<&'a Ident>,
-    pub(super) prepare_fields: &'a [&'a Field],
-    pub(super) prepare_field_names: &'a [&'a Ident],
     pub(super) plan: &'a Ident,
     pub(super) encode_error: &'a Ident,
     pub(super) self_type: &'a TokenStream,
+}
+
+pub(super) struct Operation<'a> {
+    pub(super) operation_input_ty: Option<&'a syn::Path>,
+    pub(super) operation_name: Option<&'a Ident>,
+}
+
+pub(super) struct Preparation<'a> {
+    pub(super) prepare_fields: &'a [&'a Field],
+    pub(super) prepare_field_names: &'a [&'a Ident],
     pub(super) prepare_helper: &'a Ident,
-    pub(super) runtime: &'a TokenStream,
 }
 
 pub(super) struct Output {
@@ -28,17 +44,24 @@ pub(super) struct Output {
 pub(super) fn render(input: Input<'_>) -> Output {
     let Input {
         has_builder,
-        name,
-        vis,
-        wire_lifetime,
-        operation_input_ty,
-        operation_name,
-        prepare_fields,
-        prepare_field_names,
-        plan,
-        encode_error,
-        self_type,
-        prepare_helper,
+        identity: Identity { name, vis },
+        types:
+            Types {
+                wire_lifetime,
+                plan,
+                encode_error,
+                self_type,
+            },
+        operation: Operation {
+            operation_input_ty,
+            operation_name,
+        },
+        preparation:
+            Preparation {
+                prepare_fields,
+                prepare_field_names,
+                prepare_helper,
+            },
         runtime,
     } = input;
     let declaration = has_builder.then(|| {
@@ -96,6 +119,35 @@ pub(super) fn render(input: Input<'_>) -> Output {
             let label = field_name.to_string();
             quote!(let #field_name = builder.#field_name.ok_or(#encode_error::MissingField { field: #label })?;)
         });
+        let build_into = if cfg!(feature = "bytes") {
+            quote! {
+                /// Prepares and atomically writes this encoding into `output`.
+                #vis fn build_into<'__wire_repr_output>(
+                    self,
+                    output: &'__wire_repr_output mut #runtime::__private::BytesMut,
+                ) -> Result<
+                    #runtime::Written<'__wire_repr_output>,
+                    #runtime::BuildIntoError<#builder_error_type>,
+                > {
+                    let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?;
+                    #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output)
+                }
+            }
+        } else {
+            quote! {
+                /// Prepares and atomically writes this encoding into `output`.
+                #vis fn build_into<'__wire_repr_output>(
+                    self,
+                    output: &'__wire_repr_output mut [u8],
+                ) -> Result<
+                    (#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]),
+                    #runtime::BuildIntoError<#builder_error_type>,
+                > {
+                    let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?;
+                    #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output)
+                }
+            }
+        };
         if let (Some(operation_input_ty), Some(operation_name)) = (operation_input_ty, operation_name)
         {
             let request_name = format_ident!("{name}Builder{}Request", operation_name);
@@ -111,7 +163,9 @@ pub(super) fn render(input: Input<'_>) -> Output {
             };
             quote! {
                 /// A no-allocation builder for this computed wire representation.
-                #vis struct #builder_name #builder_decl_generics { #(#builder_fields,)* }
+                #vis struct #builder_name #builder_decl_generics {
+                    #(#builder_fields,)*
+                }
                 #[doc(hidden)]
                 #vis struct #request_name #request_decl_generics {
                     builder: #builder_type,
@@ -133,23 +187,24 @@ pub(super) fn render(input: Input<'_>) -> Output {
                         #(#missing)*
                         <#self_type>::#prepare_helper(#(#prepare_field_names,)* #operation_name)
                     }
-                    /// Prepares and atomically writes this encoding into `output`.
-                    #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#builder_error_type>> {
-                        let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?;
-                        #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output)
-                    }
+                    #build_into
                 }
             }
         } else {
             quote! {
                 /// A no-allocation builder for this computed wire representation.
-                #vis struct #builder_name #builder_decl_generics { #(#builder_fields,)* }
+                #vis struct #builder_name #builder_decl_generics {
+                    #(#builder_fields,)*
+                }
                 impl #builder_decl_generics #builder_type {
                     #(#setters)*
                     /// Prepares this encoding after checking all caller-owned fields.
-                    #vis fn prepare(self) -> Result<#builder_plan_type, #builder_error_type> { let builder = self; #(#missing)* <#self_type>::#prepare_helper(#(#prepare_field_names),*) }
-                    /// Prepares and atomically writes this encoding into `output`.
-                    #vis fn build_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(#runtime::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::BuildIntoError<#builder_error_type>> { let plan = self.prepare().map_err(#runtime::BuildIntoError::Prepare)?; #runtime::PreparedLayout::commit_into(plan, output).map_err(#runtime::BuildIntoError::Output) }
+                    #vis fn prepare(self) -> Result<#builder_plan_type, #builder_error_type> {
+                        let builder = self;
+                        #(#missing)*
+                        <#self_type>::#prepare_helper(#(#prepare_field_names),*)
+                    }
+                    #build_into
                 }
             }
         }

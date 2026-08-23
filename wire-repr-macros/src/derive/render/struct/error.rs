@@ -6,49 +6,77 @@ use quote::quote;
 use syn::{Ident, Lifetime, Visibility};
 
 pub(super) struct Input<'a> {
+    pub(super) schema: Schema<'a>,
+    pub(super) nested: Nested<'a>,
+    pub(super) capabilities: Capabilities,
+    pub(super) types: Types<'a>,
+    pub(super) runtime: &'a TokenStream,
+}
+
+pub(super) struct Schema<'a> {
     pub(super) vis: &'a Visibility,
     pub(super) wire_lifetime: Option<&'a Lifetime>,
     pub(super) fields: &'a [Field],
     pub(super) labels: &'a [String],
     pub(super) variants: &'a [Ident],
+}
+
+pub(super) struct Nested<'a> {
     pub(super) nested_view_paths: &'a [Option<TokenStream>],
     pub(super) nested_decode_error_paths: &'a [Option<TokenStream>],
     pub(super) nested_encode_error_paths: &'a [Option<TokenStream>],
+}
+
+pub(super) struct Capabilities {
     pub(super) has_positions: bool,
     pub(super) has_geometry: bool,
     pub(super) has_bytes: bool,
     pub(super) has_builder: bool,
     pub(super) has_computed: bool,
+}
+
+pub(super) struct Types<'a> {
     pub(super) decode_error: &'a Ident,
     pub(super) encode_error: &'a Ident,
     pub(super) decode_error_decl_generics: &'a TokenStream,
     pub(super) error_impl_type: &'a TokenStream,
     pub(super) encode_error_decl_generics: &'a TokenStream,
     pub(super) encode_error_impl_type: &'a TokenStream,
-    pub(super) runtime: &'a TokenStream,
 }
 
 pub(super) fn render(input: Input<'_>) -> TokenStream {
     let Input {
-        vis,
-        wire_lifetime,
-        fields,
-        labels,
-        variants,
-        nested_view_paths,
-        nested_decode_error_paths,
-        nested_encode_error_paths,
-        has_positions,
-        has_geometry,
-        has_bytes,
-        has_builder,
-        has_computed,
-        decode_error,
-        encode_error,
-        decode_error_decl_generics,
-        error_impl_type,
-        encode_error_decl_generics,
-        encode_error_impl_type,
+        schema:
+            Schema {
+                vis,
+                wire_lifetime,
+                fields,
+                labels,
+                variants,
+            },
+        nested:
+            Nested {
+                nested_view_paths,
+                nested_decode_error_paths,
+                nested_encode_error_paths,
+            },
+        capabilities:
+            Capabilities {
+                has_positions,
+                has_geometry,
+                has_bytes,
+                has_builder,
+                has_computed,
+            },
+        types:
+            Types {
+                decode_error,
+                encode_error,
+                decode_error_decl_generics,
+                error_impl_type,
+                encode_error_decl_generics,
+                encode_error_impl_type,
+            },
         runtime,
     } = input;
     let encode_lifetime_variant = wire_lifetime.map(|lifetime| {
@@ -77,6 +105,8 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                         .as_ref()
                         .expect("operation-backed nested fields have generated error paths");
                     quote!(#error)
+                } else if cfg!(feature = "bytes") {
+                    quote!(<#child_view as #runtime::WireView<'static>>::DecodeError)
                 } else {
                     quote!(<#child_view<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::DecodeError)
                 };
@@ -115,7 +145,10 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                     Some(quote!(#[doc = concat!("Nested preparation error for field `", #label, "`.")] #variant(<#ty as #runtime::WireEncode>::EncodeError),))
                 }
             }
-            FieldKind::Prefix(codec) => Some(quote!(#[doc = concat!("Prefix preparation error for field `", #label, "`.")] #variant(<#codec as #runtime::PrefixCodec>::EncodeError),)),
+            FieldKind::Prefix(codec) => Some(quote! {
+                #[doc = concat!("Prefix preparation error for field `", #label, "`.")]
+                #variant(<#codec as #runtime::PrefixCodec>::EncodeError),
+            }),
             FieldKind::Bytes { .. } | FieldKind::Rest => None,
         },
     );

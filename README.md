@@ -1,7 +1,7 @@
 <h1 align="center">wire-repr</h1>
 
 <p align="center">
-  <strong>Compile Rust wire schemas into borrowed views and atomic writers.</strong>
+  <strong>Compile Rust wire schemas into zero-copy views and atomic writers.</strong>
 </p>
 
 <p align="center">
@@ -9,8 +9,9 @@
 </p>
 
 `wire-repr` derives binary representation code from ordinary Rust structs and enums.
-The declared type is the semantic value used for writing; `FooView<'wire>` is the
-generated, bytes-backed read representation.
+The declared type is the semantic value used for writing. Reading produces either a
+borrowing `FooView<'wire>` or, with the `bytes` feature, a lifetime-free view over shared
+backing storage.
 
 ## 📦 Add it
 
@@ -18,6 +19,19 @@ generated, bytes-backed read representation.
 [dependencies]
 wire-repr = { version = "1", default-features = false }
 ```
+
+Enable `bytes` when decoded views need to own shared input instead of borrowing it:
+
+```toml
+[dependencies]
+wire-repr = { version = "1", features = ["bytes"] }
+bytes = { version = "1", default-features = false }
+```
+
+The schema stays unchanged. `Type::view(bytes::Bytes)` then returns a lifetime-free,
+cloneable view over the same backing storage. Builders and prepared plans still borrow
+semantic inputs; encoding appends into caller-owned, pre-capacitated `bytes::BytesMut`
+without reserving or staging a second frame.
 
 ## 🚀 A real header
 

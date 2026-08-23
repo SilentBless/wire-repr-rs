@@ -14,9 +14,16 @@ categories = ["encoding", "no-std", "no-std::no-alloc"]
 
 [features]
 default = []
+bytes = ["dep:bytes", "wire-repr-macros/bytes"]
 
 [dependencies]
+bytes = { workspace = true, optional = true }
 wire-repr-macros.workspace = true
+
+[[test]]
+name = "bytes_mode"
+path = "tests/bytes_mode.rs"
+required-features = ["bytes"]
 
 [lints]
 workspace = true

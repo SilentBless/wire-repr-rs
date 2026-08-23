@@ -15,7 +15,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<TokenStream> {
-    if model.operation_input.is_none()
+    if !cfg!(feature = "bytes")
+        && model.operation_input.is_none()
         && model
             .fields
             .iter()
@@ -108,6 +109,8 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         })
         .collect();
     let prepare_helper = format_ident!("__wire_repr_prepare_fields");
+    let fixed_sequence_width =
+        fixed::sequence_width(&fields, operation_input_ty.is_none(), runtime);
 
     let has_bytes = controlled_by.iter().any(Option::is_some) || has_computed;
     let has_nested = fields
@@ -184,7 +187,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             )
         };
     let (decode_error_decl_generics, error_impl_type, view_error_type, association_error_type) =
-        if has_nested {
+        if has_nested && !cfg!(feature = "bytes") {
             (
                 quote!(<'__wire_repr_wire>),
                 quote!(#decode_error<'_>),
@@ -218,17 +221,23 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     };
 
     let selection = selection::render(selection::Input {
-        name: &name,
-        vis: &vis,
-        fields: &fields,
-        plans: &plans,
-        gaps: &gaps,
-        nested_fields_paths: &nested_fields_paths,
-        nested_view_paths: &nested_view_paths,
-        nested_plan_paths: &nested_plan_paths,
-        selection_impl_generics: &selection_impl_generics,
-        selection_plan_type: &selection_plan_type,
-        view: &view,
+        schema: selection::Schema {
+            name: &name,
+            vis: &vis,
+            fields: &fields,
+        },
+        geometry: selection::Geometry {
+            plans: &plans,
+            gaps: &gaps,
+            nested_fields_paths: &nested_fields_paths,
+            nested_view_paths: &nested_view_paths,
+            nested_plan_paths: &nested_plan_paths,
+        },
+        types: selection::Types {
+            selection_impl_generics: &selection_impl_generics,
+            selection_plan_type: &selection_plan_type,
+            view: &view,
+        },
         runtime,
     });
     let selection::Output {
@@ -236,19 +245,28 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         declaration: selection_declaration,
     } = selection;
     let view_declaration = view::render(view::Input {
-        vis: &vis,
-        fields: &fields,
-        labels: &labels,
-        variants: &variants,
-        controlled_by: &controlled_by,
-        position_sources: &position_sources,
-        nested_view_paths: &nested_view_paths,
-        view: &view,
-        decode_error: &decode_error,
-        view_error_type: &view_error_type,
-        operation_input_ty,
-        operation_parse: operation_parse.as_ref(),
-        field_proxy: &field_proxy,
+        schema: view::Schema {
+            vis: &vis,
+            fields: &fields,
+            labels: &labels,
+            variants: &variants,
+        },
+        geometry: view::Geometry {
+            controlled_by: &controlled_by,
+            position_sources: &position_sources,
+            nested_view_paths: &nested_view_paths,
+            fixed_sequence: fixed_sequence_width.is_some(),
+        },
+        types: view::Types {
+            view: &view,
+            decode_error: &decode_error,
+            view_error_type: &view_error_type,
+            field_proxy: &field_proxy,
+        },
+        operation: view::Operation {
+            operation_input_ty,
+            operation_parse: operation_parse.as_ref(),
+        },
         runtime,
     })
     .declaration;
@@ -256,124 +274,173 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         error_type: validation_error_type,
         declaration: validation_declaration,
     } = validation::render(validation::Input {
-        vis: &vis,
-        fields: &fields,
-        labels: &labels,
-        variants: &variants,
-        nested_view_paths: &nested_view_paths,
-        model_validators: &model_validators,
-        custom_validation_error: custom_validation_error.as_ref(),
-        has_nested,
-        view: &view,
-        validation_error: &validation_error,
-        view_error_type: &view_error_type,
+        schema: validation::Schema {
+            vis: &vis,
+            fields: &fields,
+            labels: &labels,
+            variants: &variants,
+            nested_view_paths: &nested_view_paths,
+        },
+        policy: validation::Policy {
+            model_validators: &model_validators,
+            custom_validation_error: custom_validation_error.as_ref(),
+            has_nested,
+        },
+        types: validation::Types {
+            view: &view,
+            validation_error: &validation_error,
+            view_error_type: &view_error_type,
+        },
         runtime,
     });
     let plan_output = plan::render(plan::Input {
-        vis: &vis,
-        wire_lifetime: wire_lifetime.as_ref(),
-        fields: &fields,
-        plans: &plans,
-        gaps: &gaps,
-        gap_names: &gap_names,
-        nested_plan_paths: &nested_plan_paths,
-        plan: &plan,
-        plan_decl_generics: &plan_decl_generics,
-        plan_decl_where: &plan_decl_where,
-        plan_impl_generics: &plan_impl_generics,
-        plan_impl_type: &plan_impl_type,
-        field_proxy: &field_proxy,
+        schema: plan::Schema {
+            vis: &vis,
+            wire_lifetime: wire_lifetime.as_ref(),
+            fields: &fields,
+        },
+        layout: plan::Layout {
+            plans: &plans,
+            gaps: &gaps,
+            gap_names: &gap_names,
+            nested_plan_paths: &nested_plan_paths,
+        },
+        types: plan::Types {
+            plan: &plan,
+            plan_decl_generics: &plan_decl_generics,
+            plan_decl_where: &plan_decl_where,
+            plan_impl_generics: &plan_impl_generics,
+            plan_impl_type: &plan_impl_type,
+            field_proxy: &field_proxy,
+        },
         runtime,
     });
     let plan_declaration = plan_output.declaration;
     let plan_lifetime_init = plan_output.lifetime_init;
     let preparation_body = preparation::render(preparation::Input {
-        fields: &fields,
-        plans: &plans,
-        gaps: &gaps,
-        gap_names: &gap_names,
-        variants: &variants,
-        controlled_by: &controlled_by,
-        computation_order: &computation_order,
-        operation_prepare: operation_prepare.as_ref(),
-        operation_value: &operation_value,
-        encode_error: &encode_error,
-        plan: &plan,
-        plan_lifetime_init: &plan_lifetime_init,
+        layout: preparation::Layout {
+            fields: &fields,
+            plans: &plans,
+            gaps: &gaps,
+            gap_names: &gap_names,
+            variants: &variants,
+        },
+        scheduling: preparation::Scheduling {
+            controlled_by: &controlled_by,
+            computation_order: &computation_order,
+        },
+        operation: preparation::Operation {
+            operation_prepare: operation_prepare.as_ref(),
+            operation_value: &operation_value,
+        },
+        types: preparation::Types {
+            encode_error: &encode_error,
+            plan: &plan,
+            plan_lifetime_init: &plan_lifetime_init,
+        },
         runtime,
     });
 
     let error_declaration = error::render(error::Input {
-        vis: &vis,
-        wire_lifetime: wire_lifetime.as_ref(),
-        fields: &fields,
-        labels: &labels,
-        variants: &variants,
-        nested_view_paths: &nested_view_paths,
-        nested_decode_error_paths: &nested_decode_error_paths,
-        nested_encode_error_paths: &nested_encode_error_paths,
-        has_positions,
-        has_geometry,
-        has_bytes,
-        has_builder,
-        has_computed,
-        decode_error: &decode_error,
-        encode_error: &encode_error,
-        decode_error_decl_generics: &decode_error_decl_generics,
-        error_impl_type: &error_impl_type,
-        encode_error_decl_generics: &encode_error_decl_generics,
-        encode_error_impl_type: &encode_error_impl_type,
+        schema: error::Schema {
+            vis: &vis,
+            wire_lifetime: wire_lifetime.as_ref(),
+            fields: &fields,
+            labels: &labels,
+            variants: &variants,
+        },
+        nested: error::Nested {
+            nested_view_paths: &nested_view_paths,
+            nested_decode_error_paths: &nested_decode_error_paths,
+            nested_encode_error_paths: &nested_encode_error_paths,
+        },
+        capabilities: error::Capabilities {
+            has_positions,
+            has_geometry,
+            has_bytes,
+            has_builder,
+            has_computed,
+        },
+        types: error::Types {
+            decode_error: &decode_error,
+            encode_error: &encode_error,
+            decode_error_decl_generics: &decode_error_decl_generics,
+            error_impl_type: &error_impl_type,
+            encode_error_decl_generics: &encode_error_decl_generics,
+            encode_error_impl_type: &encode_error_impl_type,
+        },
         runtime,
     });
 
     let builder = builder::render(builder::Input {
         has_builder,
-        name: &name,
-        vis: &vis,
-        wire_lifetime: wire_lifetime.as_ref(),
-        operation_input_ty,
-        operation_name,
-        prepare_fields: &prepare_fields,
-        prepare_field_names: &prepare_field_names,
-        plan: &plan,
-        encode_error: &encode_error,
-        self_type: &self_type,
-        prepare_helper: &prepare_helper,
+        identity: builder::Identity {
+            name: &name,
+            vis: &vis,
+        },
+        types: builder::Types {
+            wire_lifetime: wire_lifetime.as_ref(),
+            plan: &plan,
+            encode_error: &encode_error,
+            self_type: &self_type,
+        },
+        operation: builder::Operation {
+            operation_input_ty,
+            operation_name,
+        },
+        preparation: builder::Preparation {
+            prepare_fields: &prepare_fields,
+            prepare_field_names: &prepare_field_names,
+            prepare_helper: &prepare_helper,
+        },
         runtime,
     });
     let builder_declaration = builder.declaration;
     let builder_method = builder.method;
 
     let interface_declaration = interface::render(interface::Input {
-        name: &name,
-        vis: &vis,
-        wire_lifetime: wire_lifetime.as_ref(),
-        operation_input_ty,
-        operation_name,
-        operation_parse: operation_parse.as_ref(),
-        operation_prepare: operation_prepare.as_ref(),
-        operation_value: &operation_value,
-        view_input_request: &view_input_request,
-        direct_view_request: &direct_view_request,
-        unchecked_view_request: &unchecked_view_request,
-        cursor_input_request: &cursor_input_request,
-        direct_cursor: &direct_cursor,
-        unchecked_cursor: &unchecked_cursor,
-        encode_request: &encode_request,
-        view: &view,
-        decode_error: &decode_error,
-        view_error_type: &view_error_type,
-        validation_error_type: &validation_error_type,
-        association_error_type: &association_error_type,
-        plan_type: &plan_type,
-        encode_error_type: &encode_error_type,
-        prepare_helper: &prepare_helper,
-        preparation_body: &preparation_body,
-        prepare_field_parameters: &prepare_field_parameters,
-        prepare_destructure: &prepare_destructure,
-        prepare_field_names: &prepare_field_names,
-        builder_method: &builder_method,
-        runtime,
+        identity: interface::Identity {
+            name: &name,
+            view: &view,
+            decode_error: &decode_error,
+        },
+        surface: interface::Surface { vis: &vis, runtime },
+        types: interface::Types {
+            wire_lifetime: wire_lifetime.as_ref(),
+            view_error_type: &view_error_type,
+            validation_error_type: &validation_error_type,
+            association_error_type: &association_error_type,
+            plan_type: &plan_type,
+            encode_error_type: &encode_error_type,
+        },
+        operation: interface::Operation {
+            input_ty: operation_input_ty,
+            name: operation_name,
+            parse: operation_parse.as_ref(),
+            prepare: operation_prepare.as_ref(),
+            value: &operation_value,
+            encode_request: &encode_request,
+        },
+        requests: interface::Requests {
+            view_input: &view_input_request,
+            direct_view: &direct_view_request,
+            unchecked_view: &unchecked_view_request,
+            cursor_input: &cursor_input_request,
+            direct_cursor: &direct_cursor,
+            unchecked_cursor: &unchecked_cursor,
+        },
+        preparation: interface::Preparation {
+            helper: &prepare_helper,
+            body: &preparation_body,
+            field_parameters: &prepare_field_parameters,
+            destructure: &prepare_destructure,
+            field_names: &prepare_field_names,
+            builder_method: &builder_method,
+        },
+        capabilities: interface::Capabilities {
+            fixed_sequence_width: fixed_sequence_width.as_ref(),
+            has_validation: custom_validation_error.is_some(),
+        },
     });
 
     Ok(quote! {

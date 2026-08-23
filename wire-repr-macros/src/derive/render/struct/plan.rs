@@ -7,20 +7,32 @@ use quote::quote;
 use syn::Lifetime;
 
 pub(super) struct Input<'a> {
+    pub(super) schema: Schema<'a>,
+    pub(super) layout: Layout<'a>,
+    pub(super) types: Types<'a>,
+    pub(super) runtime: &'a TokenStream,
+}
+
+pub(super) struct Schema<'a> {
     pub(super) vis: &'a syn::Visibility,
     pub(super) wire_lifetime: Option<&'a Lifetime>,
     pub(super) fields: &'a [Field],
+}
+
+pub(super) struct Layout<'a> {
     pub(super) plans: &'a [Ident],
     pub(super) gaps: &'a [Option<Ident>],
     pub(super) gap_names: &'a [&'a Ident],
     pub(super) nested_plan_paths: &'a [Option<TokenStream>],
+}
+
+pub(super) struct Types<'a> {
     pub(super) plan: &'a Ident,
     pub(super) plan_decl_generics: &'a TokenStream,
     pub(super) plan_decl_where: &'a TokenStream,
     pub(super) plan_impl_generics: &'a TokenStream,
     pub(super) plan_impl_type: &'a TokenStream,
     pub(super) field_proxy: &'a Ident,
-    pub(super) runtime: &'a TokenStream,
 }
 
 pub(super) struct Output {
@@ -30,19 +42,27 @@ pub(super) struct Output {
 
 pub(super) fn render(input: Input<'_>) -> Output {
     let Input {
-        vis,
-        wire_lifetime,
-        fields,
-        plans,
-        gaps,
-        gap_names,
-        nested_plan_paths,
-        plan,
-        plan_decl_generics,
-        plan_decl_where,
-        plan_impl_generics,
-        plan_impl_type,
-        field_proxy,
+        schema: Schema {
+            vis,
+            wire_lifetime,
+            fields,
+        },
+        layout:
+            Layout {
+                plans,
+                gaps,
+                gap_names,
+                nested_plan_paths,
+            },
+        types:
+            Types {
+                plan,
+                plan_decl_generics,
+                plan_decl_where,
+                plan_impl_generics,
+                plan_impl_type,
+                field_proxy,
+            },
         runtime,
     } = input;
     let plan_field_types: Vec<_> = fields
@@ -128,15 +148,61 @@ pub(super) fn render(input: Input<'_>) -> Output {
         .into_iter()
         .reduce(|left, right| quote!(::core::iter::Iterator::chain(#left, #right)))
         .expect("wire structs have fields");
+    let commit_impl = if cfg!(feature = "bytes") {
+        quote! {
+            impl #plan_impl_generics #runtime::PreparedLayout for #plan_impl_type {
+                type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
+                fn commit_into<'__wire_repr_output>(
+                    self,
+                    output: &'__wire_repr_output mut #runtime::__private::BytesMut,
+                ) -> Result<Self::Written<'__wire_repr_output>, #runtime::OutputTooShortError> {
+                    let start = output.len();
+                    #runtime::ByteSource::append_into_bytes_mut(&self, output)?;
+                    Ok(#runtime::Written::new(&mut output[start..]))
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl #plan_impl_generics #runtime::PreparedLayout for #plan_impl_type {
+                type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
+                fn commit_into<'__wire_repr_output>(
+                    self,
+                    output: &'__wire_repr_output mut [u8],
+                ) -> Result<
+                    (Self::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]),
+                    #runtime::OutputTooShortError,
+                > {
+                    let required = self.encoded_len;
+                    if output.len() < required {
+                        return Err(#runtime::OutputTooShortError {
+                            required,
+                            available: output.len(),
+                        });
+                    }
+                    let (bytes, suffix) = output.split_at_mut(required);
+                    #runtime::ByteSource::write_into(&self, bytes);
+                    Ok((#runtime::Written::new(bytes), suffix))
+                }
+            }
+        }
+    };
 
     Output {
         declaration: quote! {
             /// A prepared encoding for this wire representation.
-            #vis struct #plan #plan_decl_generics #plan_decl_where { #(#plan_fields,)* #(#gap_fields,)* #lifetime_field encoded_len: usize }
+            #vis struct #plan #plan_decl_generics #plan_decl_where {
+                #(#plan_fields,)*
+                #(#gap_fields,)*
+                #lifetime_field
+                encoded_len: usize,
+            }
             impl #plan_impl_generics #plan_impl_type {
                 /// Returns the exact encoded byte count.
                 #[must_use]
-                #vis const fn encoded_len(&self) -> usize { self.encoded_len }
+                #vis const fn encoded_len(&self) -> usize {
+                    self.encoded_len
+                }
                 /// Returns a byte-selection root for this prepared representation.
                 #[must_use]
                 #vis fn bytes(&self) -> #runtime::ByteSelection<'_, Self, #field_proxy<#runtime::RootScope>> {
@@ -145,28 +211,27 @@ pub(super) fn render(input: Input<'_>) -> Output {
             }
             impl #plan_impl_generics #runtime::ByteSource for #plan_impl_type {
                 #[inline(always)]
-                fn byte_len(&self) -> usize { self.encoded_len }
+                fn byte_len(&self) -> usize {
+                    self.encoded_len
+                }
                 #[inline(always)]
-                fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) { #(#emit_steps)* }
+                fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) {
+                    #(#emit_steps)*
+                }
             }
             impl #plan_impl_generics #runtime::ByteSourceCursor for #plan_impl_type
             where
                 #(#plan_cursor_bounds,)*
             {
-                type Segments<'__wire_repr_source> = #plan_segments_type where Self: '__wire_repr_source;
+                type Segments<'__wire_repr_source> = #plan_segments_type
+                where
+                    Self: '__wire_repr_source;
                 #[inline(always)]
-                fn segments(&self) -> Self::Segments<'_> { #plan_segments_value }
-            }
-            impl #plan_impl_generics #runtime::PreparedLayout for #plan_impl_type {
-                type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
-                fn commit_into<'__wire_repr_output>(self, output: &'__wire_repr_output mut [u8]) -> Result<(Self::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]), #runtime::OutputTooShortError> {
-                    let required = self.encoded_len;
-                    if output.len() < required { return Err(#runtime::OutputTooShortError { required, available: output.len() }); }
-                    let (bytes, suffix) = output.split_at_mut(required);
-                    #runtime::ByteSource::write_into(&self, bytes);
-                    Ok((#runtime::Written::new(bytes), suffix))
+                fn segments(&self) -> Self::Segments<'_> {
+                    #plan_segments_value
                 }
             }
+            #commit_impl
         },
         lifetime_init,
     }

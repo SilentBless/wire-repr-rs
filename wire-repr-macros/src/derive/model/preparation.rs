@@ -2,7 +2,8 @@
 
 use syn::{Ident, Lifetime, Type};
 
-use super::{Codec, Field, FieldKind, FieldPosition, is_borrowed_byte_slice, is_unsigned_integer};
+use super::codec::{is_borrowed_byte_slice, is_unsigned_integer};
+use super::{Codec, Field, FieldKind, FieldPosition};
 
 pub(in crate::derive) struct Computation {
     /// Raw semantic value encoded for this computed field.

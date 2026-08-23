@@ -8,35 +8,61 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
 pub(super) struct Input<'a> {
+    pub(super) layout: Layout<'a>,
+    pub(super) scheduling: Scheduling<'a>,
+    pub(super) operation: Operation<'a>,
+    pub(super) types: Types<'a>,
+    pub(super) runtime: &'a TokenStream,
+}
+
+pub(super) struct Layout<'a> {
     pub(super) fields: &'a [Field],
     pub(super) plans: &'a [Ident],
     pub(super) gaps: &'a [Option<Ident>],
     pub(super) gap_names: &'a [&'a Ident],
     pub(super) variants: &'a [Ident],
+}
+
+pub(super) struct Scheduling<'a> {
     pub(super) controlled_by: &'a [Option<usize>],
     pub(super) computation_order: &'a [usize],
+}
+
+pub(super) struct Operation<'a> {
     pub(super) operation_prepare: Option<&'a Ident>,
     pub(super) operation_value: &'a Ident,
+}
+
+pub(super) struct Types<'a> {
     pub(super) encode_error: &'a Ident,
     pub(super) plan: &'a Ident,
     pub(super) plan_lifetime_init: &'a TokenStream,
-    pub(super) runtime: &'a TokenStream,
 }
 
 pub(super) fn render(input: Input<'_>) -> TokenStream {
     let Input {
-        fields,
-        plans,
-        gaps,
-        gap_names,
-        variants,
-        controlled_by,
-        computation_order,
-        operation_prepare,
-        operation_value,
-        encode_error,
-        plan,
-        plan_lifetime_init,
+        layout:
+            Layout {
+                fields,
+                plans,
+                gaps,
+                gap_names,
+                variants,
+            },
+        scheduling: Scheduling {
+            controlled_by,
+            computation_order,
+        },
+        operation: Operation {
+            operation_prepare,
+            operation_value,
+        },
+        types:
+            Types {
+                encode_error,
+                plan,
+                plan_lifetime_init,
+            },
         runtime,
     } = input;
     let prepare_steps: Vec<_> = fields

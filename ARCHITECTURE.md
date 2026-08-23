@@ -9,18 +9,20 @@ behavior, not compatibility history or a roadmap.
 
 ```text
 Foo<'value>      semantic value and write intent
-FooView<'wire>   validated, bytes-backed read representation
+FooView           validated exact-source read representation
 FooPlan<'value>  prepared atomic encoding
 ```
 
 The user-declared struct or enum remains an ordinary Rust value. Reading does not
-construct it. A generated view borrows the original input, retains exact represented
-bytes and validated dynamic geometry, and exposes getters. A plan owns or borrows every
+construct it. By default, generated `FooView<'wire>` borrows the original input. With the
+`bytes` feature, the same schema instead generates a lifetime-free `FooView` owning a
+shared `bytes::Bytes` handle. Both retain exact represented bytes and validated dynamic
+geometry without self-referential fields or payload copies. A plan owns or borrows every
 piece of completed write state needed for an infallible commit.
 
 This separation avoids pretending that Rust memory layout is a wire ABI. It also keeps
-reading allocation-free and preserves exact source framing without copying fields into a
-second semantic object.
+reading free of library-side allocation and preserves exact source framing without
+copying fields into a second semantic object.
 
 The runtime is `no_std`, allocation-free, safe Rust, and has no runtime schema or dynamic
 dispatch layer.
@@ -70,8 +72,9 @@ retained exact spans. Nested and enum-body getters return retained child views. 
 byte getters use endpoints established during the framing pass rather than re-reading
 controller fields.
 
-Views are borrowed and immutable. Mutation is expressed by constructing a semantic write
-value and preparing it, not by a parallel setter or mutable-view hierarchy.
+Views are immutable exact-source handles: they borrow input in the default mode and own
+shared input in `bytes` mode. Mutation is expressed by constructing a semantic write value
+and preparing it, not by a parallel setter or mutable-view hierarchy.
 
 Structural validation establishes bounds, field extents, prefix claims, tag selection,
 and physical geometry. It does not validate protocol meaning such as magic values,
@@ -156,17 +159,20 @@ Writing has two stages:
 
 1. `value.prepare()` consumes semantic write intent and returns `FooPlan` or a typed
    preparation error.
-2. `plan.commit_into(output)` checks complete capacity, writes one represented prefix,
-   and returns `Written` plus the disjoint untouched suffix.
+2. `plan.commit_into(output)` checks complete capacity and writes exactly one representation.
+   The default mode writes a leading slice and returns `Written` plus the disjoint untouched
+   suffix. `bytes` mode appends to caller-owned, pre-capacitated `BytesMut` and returns
+   `Written` over only the appended range.
 
 Preparation completes every fallible operation: codec planning, canonical controller
 derivation, operation-input mapping, conversions, range and placement checks, child preparation,
 and total-length arithmetic. The plan retains the resulting state. Commit does not
 reparse, remap, or repeat fallible planning.
 
-Short output is checked before the first write and leaves the entire supplied slice
-unchanged. Successful commit writes only the represented prefix. `build_into` is the
-prepare-and-commit convenience path with the same guarantee.
+Short output is checked before the first write and leaves the supplied slice or `BytesMut`
+unchanged. The `bytes` path never reserves or grows the buffer internally and preserves an
+existing prefix. `build_into` is the prepare-and-commit convenience path with the same
+guarantee.
 
 ## 9. Physical byte sources and computed fields
 

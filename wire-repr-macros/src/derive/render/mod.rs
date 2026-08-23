@@ -90,7 +90,11 @@ fn generated_decode_error_path(ty: &syn::Type) -> syn::Result<TokenStream> {
             path.extend(quote::quote!(#segment::));
         } else {
             let error = quote::format_ident!("{}DecodeError", segment.ident);
-            path.extend(quote::quote!(#error<'__wire_repr_wire>));
+            if cfg!(feature = "bytes") {
+                path.extend(quote::quote!(#error));
+            } else {
+                path.extend(quote::quote!(#error<'__wire_repr_wire>));
+            }
         }
     }
     Ok(path)
