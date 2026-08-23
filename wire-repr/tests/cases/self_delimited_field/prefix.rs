@@ -41,6 +41,15 @@ impl ByteSourceCursor for TinyPlan {
     fn segments(&self) -> Self::Segments<'_> {
         core::iter::once(ByteSegment::Bytes(&self.bytes[..self.len]))
     }
+
+    type Bytes<'source>
+        = wire_repr::ByteBytes<'source, Self::Segments<'source>>
+    where
+        Self: 'source;
+
+    fn bytes(&self) -> Self::Bytes<'_> {
+        wire_repr::ByteBytes::new(self.segments())
+    }
 }
 
 struct TinyPrefix;
@@ -108,6 +117,15 @@ impl ByteSourceCursor for BorrowedPlan<'_> {
 
     fn segments(&self) -> Self::Segments<'_> {
         core::iter::once(ByteSegment::Bytes(self.0))
+    }
+
+    type Bytes<'source>
+        = wire_repr::ByteBytes<'source, Self::Segments<'source>>
+    where
+        Self: 'source;
+
+    fn bytes(&self) -> Self::Bytes<'_> {
+        wire_repr::ByteBytes::new(self.segments())
     }
 }
 

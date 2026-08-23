@@ -104,6 +104,16 @@ impl ByteSourceCursor for ByteSegment<'_> {
     fn segments(&self) -> Self::Segments<'_> {
         core::iter::once(*self)
     }
+
+    type Bytes<'source>
+        = ByteSegmentBytes<'source>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> ByteSegmentBytes<'_> {
+        ByteSegment::bytes(*self)
+    }
 }
 
 /// Byte iterator returned by [`ByteSegment::bytes`].
@@ -161,14 +171,14 @@ pub trait ByteSourceCursor: ByteSource {
         }
     }
 
-    /// Flattens the source's physical spans into ordered bytes.
+    /// The source's ordered byte iterator.
+    type Bytes<'source>: Iterator<Item = u8>
+    where
+        Self: 'source;
+
+    /// Iterates the source's bytes in order.
     #[must_use]
-    fn bytes(&self) -> ByteBytes<'_, Self::Segments<'_>> {
-        ByteBytes {
-            segments: self.segments(),
-            current: None,
-        }
-    }
+    fn bytes(&self) -> Self::Bytes<'_>;
 
     /// Returns a zero-copy source over one logical byte range.
     ///
@@ -208,6 +218,17 @@ impl<'source, I: Iterator<Item = ByteSegment<'source>>> Iterator for ByteChunks<
 pub struct ByteBytes<'source, I> {
     segments: I,
     current: Option<ByteSegmentBytes<'source>>,
+}
+
+impl<'source, I> ByteBytes<'source, I> {
+    #[inline(always)]
+    #[doc(hidden)]
+    pub fn new(segments: I) -> Self {
+        Self {
+            segments,
+            current: None,
+        }
+    }
 }
 
 impl<'source, I: Iterator<Item = ByteSegment<'source>>> Iterator for ByteBytes<'source, I> {
@@ -282,6 +303,16 @@ impl<T: ByteSourceCursor + ?Sized> ByteSourceCursor for ByteRange<'_, T> {
             start: self.start,
             end: self.end,
         }
+    }
+
+    type Bytes<'source>
+        = ByteBytes<'source, RangeSegments<T::Segments<'source>>>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> Self::Bytes<'_> {
+        ByteBytes::new(self.segments())
     }
 }
 
@@ -376,27 +407,46 @@ pub trait ByteSource {
     }
 
     /// Appends this source to a pre-capacitated output buffer without growing it.
+    ///
+    /// Returns exactly the newly appended output. A short output or a contract-violating
+    /// emission leaves the existing logical output unchanged.
     #[cfg(feature = "bytes")]
     #[doc(hidden)]
-    fn append_into_bytes_mut(
+    #[allow(unsafe_code)]
+    fn append_into_bytes_mut<'output>(
         &self,
-        output: &mut bytes::BytesMut,
-    ) -> Result<(), OutputTooShortError> {
+        output: &'output mut bytes::BytesMut,
+    ) -> Result<&'output mut [u8], OutputTooShortError> {
         let required = self.byte_len();
-        let available = output.capacity() - output.len();
+        let start = output.len();
+        let available = output.capacity() - start;
         if available < required {
             return Err(OutputTooShortError {
                 required,
                 available,
             });
         }
-        let mut sink = BytesMutSink {
-            output,
-            remaining: required,
-        };
-        self.emit_to(&mut sink);
-        assert_eq!(sink.remaining, 0, "ByteSource emitted wrong length");
-        Ok(())
+
+        {
+            let mut sink = BytesMutSink {
+                output: &mut output.spare_capacity_mut()[..required],
+                written: 0,
+            };
+            self.emit_to(&mut sink);
+            assert_eq!(sink.written, required, "ByteSource emitted wrong length");
+        }
+
+        // SAFETY: `BytesMutSink` writes exactly `required` initialized bytes into the spare
+        // capacity beginning at `start`. Its bounds checks run before every write, and the
+        // equality assertion above prevents publishing an uninitialized suffix. The capacity
+        // preflight proves both the new length and appended range lie within the allocation.
+        unsafe {
+            output.set_len(start + required);
+            Ok(core::slice::from_raw_parts_mut(
+                output.as_mut_ptr().add(start),
+                required,
+            ))
+        }
     }
 }
 
@@ -437,18 +487,24 @@ impl ByteSink for SliceSink<'_> {
 
 #[cfg(feature = "bytes")]
 struct BytesMutSink<'output> {
-    output: &'output mut bytes::BytesMut,
-    remaining: usize,
+    output: &'output mut [core::mem::MaybeUninit<u8>],
+    written: usize,
 }
 
 #[cfg(feature = "bytes")]
-impl BytesMutSink<'_> {
+impl<'output> BytesMutSink<'output> {
     #[inline(always)]
-    fn claim(&mut self, len: usize) {
-        self.remaining = self
-            .remaining
-            .checked_sub(len)
+    fn claim(&mut self, len: usize) -> &'_ mut [core::mem::MaybeUninit<u8>] {
+        let end = self
+            .written
+            .checked_add(len)
+            .expect("ByteSource emission length overflow");
+        let output = self
+            .output
+            .get_mut(self.written..end)
             .expect("ByteSource emitted too many bytes");
+        self.written = end;
+        output
     }
 }
 
@@ -456,19 +512,15 @@ impl BytesMutSink<'_> {
 impl ByteSink for BytesMutSink<'_> {
     #[inline(always)]
     fn write(&mut self, bytes: &[u8]) {
-        self.claim(bytes.len());
-        self.output.extend_from_slice(bytes);
+        for (output, byte) in self.claim(bytes.len()).iter_mut().zip(bytes) {
+            output.write(*byte);
+        }
     }
 
     #[inline(always)]
     fn fill(&mut self, byte: u8, len: usize) {
-        self.claim(len);
-        let block = [byte; 64];
-        let mut remaining = len;
-        while remaining != 0 {
-            let chunk = remaining.min(block.len());
-            self.output.extend_from_slice(&block[..chunk]);
-            remaining -= chunk;
+        for output in self.claim(len) {
+            output.write(byte);
         }
     }
 }
@@ -551,6 +603,16 @@ impl<const N: usize> ByteSourceCursor for [u8; N] {
     fn segments(&self) -> Self::Segments<'_> {
         SingleSegment(Some(self))
     }
+
+    type Bytes<'source>
+        = core::iter::Copied<core::slice::Iter<'source, u8>>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> Self::Bytes<'_> {
+        self.iter().copied()
+    }
 }
 
 impl ByteSource for &[u8] {
@@ -574,6 +636,16 @@ impl ByteSourceCursor for &[u8] {
     #[inline]
     fn segments(&self) -> Self::Segments<'_> {
         SingleSegment(Some(self))
+    }
+
+    type Bytes<'source>
+        = core::iter::Copied<core::slice::Iter<'source, u8>>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> Self::Bytes<'_> {
+        self.iter().copied()
     }
 }
 
@@ -612,6 +684,16 @@ impl<T: ByteSourceCursor + ?Sized> ByteSourceCursor for BorrowedSource<'_, T> {
     #[inline(always)]
     fn segments(&self) -> Self::Segments<'_> {
         self.source.segments()
+    }
+
+    type Bytes<'source>
+        = T::Bytes<'source>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> Self::Bytes<'_> {
+        self.source.bytes()
     }
 }
 
@@ -659,6 +741,16 @@ impl<L: ByteSourceCursor, R: ByteSourceCursor> ByteSourceCursor for ByteChain<L,
             right: self.right.segments(),
         }
     }
+
+    type Bytes<'source>
+        = core::iter::Chain<L::Bytes<'source>, R::Bytes<'source>>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> Self::Bytes<'_> {
+        self.left.bytes().chain(self.right.bytes())
+    }
 }
 
 /// An empty macro-support byte source.
@@ -683,6 +775,16 @@ impl ByteSourceCursor for EmptySource {
 
     #[inline(always)]
     fn segments(&self) -> Self::Segments<'_> {
+        core::iter::empty()
+    }
+
+    type Bytes<'source>
+        = core::iter::Empty<u8>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> Self::Bytes<'_> {
         core::iter::empty()
     }
 }

@@ -1,5 +1,8 @@
 //! Owned `bytes::Bytes` struct VIEW rendering.
 
+#[path = "owned/exact.rs"]
+mod exact;
+
 use super::{Geometry, Input, Operation, Output, Schema, Types};
 use crate::derive::model::{Codec, FieldKind, FieldPosition};
 use proc_macro2::TokenStream;
@@ -65,18 +68,22 @@ pub(super) fn render(input: Input<'_>) -> Output {
         })
         .collect();
 
-    let initializers = fields.iter().enumerate().map(|(index, field)| {
-        let stored = format_ident!("field_{index}");
-        if matches!(field.kind, FieldKind::Nested) {
-            let name = &field.name;
-            let stored_range = format_ident!("field_{index}_range");
-            let range = format_ident!("range_{index}");
-            quote!(#stored: #name, #stored_range: #range)
-        } else {
-            let range = format_ident!("range_{index}");
-            quote!(#stored: #range)
-        }
-    });
+    let initializers: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let stored = format_ident!("field_{index}");
+            if matches!(field.kind, FieldKind::Nested) {
+                let name = &field.name;
+                let stored_range = format_ident!("field_{index}_range");
+                let range = format_ident!("range_{index}");
+                quote!(#stored: #name, #stored_range: #range)
+            } else {
+                let range = format_ident!("range_{index}");
+                quote!(#stored: #range)
+            }
+        })
+        .collect();
 
     let decode_steps: Vec<_> = fields
         .iter()
@@ -195,6 +202,16 @@ pub(super) fn render(input: Input<'_>) -> Output {
         })
         .collect();
 
+    let fixed_complete = exact::render(exact::Input {
+        enabled: fixed_sequence,
+        fields,
+        labels,
+        initializers: &initializers,
+        decode_error,
+        view_error_type,
+        runtime,
+    });
+
     let getters = fields.iter().enumerate().map(|(index, field)| {
         let name = &field.name;
         let label = &labels[index];
@@ -257,10 +274,11 @@ pub(super) fn render(input: Input<'_>) -> Output {
     });
 
     let parse_body = quote! {
+        let mut input = input;
         let mut cursor = 0usize;
         #(#decode_steps)*
-        let represented = input.slice(..cursor);
-        let remaining = input.slice(cursor..);
+        let represented = input.split_to(cursor);
+        let remaining = input;
         Ok((
             Self {
                 bytes: represented,
@@ -269,6 +287,28 @@ pub(super) fn render(input: Input<'_>) -> Output {
             remaining,
         ))
     };
+    let (complete_error_helper, parse_complete_body) = fixed_complete.map_or_else(
+        || {
+            (
+                quote!(),
+                quote! {
+                    let mut cursor = 0usize;
+                    #(#decode_steps)*
+                    if cursor != input.len() {
+                        return Err(#decode_error::TrailingBytes {
+                            expected: cursor,
+                            actual: input.len(),
+                        });
+                    }
+                    Ok(Self {
+                        bytes: input,
+                        #(#initializers,)*
+                    })
+                },
+            )
+        },
+        |output| (output.error_helper, output.parse_body),
+    );
     let operation_helper = operation_input_ty.map(|operation| {
         quote! {
             #[doc(hidden)]
@@ -288,6 +328,11 @@ pub(super) fn render(input: Input<'_>) -> Output {
                     input: #runtime::__private::Bytes,
                 ) -> Result<(Self, #runtime::__private::Bytes), Self::DecodeError> {
                     #parse_body
+                }
+                fn parse_complete(
+                    input: #runtime::__private::Bytes,
+                ) -> Result<Self, Self::DecodeError> {
+                    #parse_complete_body
                 }
                 fn trailing_bytes_error(
                     represented: usize,
@@ -314,6 +359,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
                 #(#view_fields,)*
             }
             impl #view {
+                #complete_error_helper
                 #sequence_constructor
                 /// Returns this view's exact represented bytes.
                 #[must_use]
@@ -352,6 +398,15 @@ pub(super) fn render(input: Input<'_>) -> Output {
                     ::core::iter::once(#runtime::ByteSegment::Bytes(
                         self.as_bytes(),
                     ))
+                }
+
+                type Bytes<'__wire_repr_source> = ::core::iter::Copied<::core::slice::Iter<'__wire_repr_source, u8>>
+                where
+                    Self: '__wire_repr_source;
+
+                #[inline(always)]
+                fn bytes(&self) -> Self::Bytes<'_> {
+                    self.as_bytes().iter().copied()
                 }
             }
         },

@@ -189,6 +189,15 @@ impl ByteSourceCursor for SegmentedPlan {
     fn segments(&self) -> Self::Segments<'_> {
         core::iter::once(ByteSegment::Bytes(&[0x10, 0x20, 0xa5, 0xa5]))
     }
+
+    type Bytes<'source>
+        = wire_repr::ByteBytes<'source, Self::Segments<'source>>
+    where
+        Self: 'source;
+
+    fn bytes(&self) -> Self::Bytes<'_> {
+        wire_repr::ByteBytes::new(self.segments())
+    }
 }
 
 impl PreparedLayout for SegmentedPlan {
@@ -198,17 +207,7 @@ impl PreparedLayout for SegmentedPlan {
         self,
         output: &'output mut BytesMut,
     ) -> Result<Self::Written<'output>, OutputTooShortError> {
-        let required = self.encoded_len();
-        let available = output.capacity() - output.len();
-        if available < required {
-            return Err(OutputTooShortError {
-                required,
-                available,
-            });
-        }
-        let start = output.len();
-        self.append_into_bytes_mut(output)?;
-        Ok(Written::new(&mut output[start..]))
+        Ok(Written::new(self.append_into_bytes_mut(output)?))
     }
 }
 
@@ -328,7 +327,7 @@ fn short_output_is_unchanged_before_commit_mutation() {
 }
 
 #[test]
-fn bounded_bytes_mut_sink_rejects_broken_source_before_growth() {
+fn bounded_bytes_mut_sink_rejects_broken_source_without_publishing_partial_output() {
     struct BrokenSource;
 
     impl ByteSource for BrokenSource {
@@ -341,7 +340,9 @@ fn bounded_bytes_mut_sink_rejects_broken_source_before_growth() {
         }
     }
 
-    let mut output = BytesMut::with_capacity(1);
+    let mut output = BytesMut::with_capacity(3);
+    output.extend_from_slice(&[0xca]);
+    let bytes = output.to_vec();
     let pointer = output.as_ptr();
     let capacity = output.capacity();
     assert!(
@@ -350,7 +351,37 @@ fn bounded_bytes_mut_sink_rejects_broken_source_before_growth() {
         }))
         .is_err()
     );
-    assert!(output.is_empty());
+    assert_eq!(&output[..], bytes);
+    assert_eq!(output.as_ptr(), pointer);
+    assert_eq!(output.capacity(), capacity);
+}
+
+#[test]
+fn bounded_bytes_mut_sink_does_not_publish_under_emission() {
+    struct BrokenSource;
+
+    impl ByteSource for BrokenSource {
+        fn byte_len(&self) -> usize {
+            2
+        }
+
+        fn emit_to<S: ByteSink>(&self, sink: &mut S) {
+            sink.write(&[1]);
+        }
+    }
+
+    let mut output = BytesMut::with_capacity(3);
+    output.extend_from_slice(&[0xca]);
+    let bytes = output.to_vec();
+    let pointer = output.as_ptr();
+    let capacity = output.capacity();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            BrokenSource.append_into_bytes_mut(&mut output).unwrap();
+        }))
+        .is_err()
+    );
+    assert_eq!(&output[..], bytes);
     assert_eq!(output.as_ptr(), pointer);
     assert_eq!(output.capacity(), capacity);
 }

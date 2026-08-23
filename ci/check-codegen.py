@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 METRICS = ("instructions", "branches", "calls", "panic_paths")
+STACK_TARGET = "x86_64-unknown-linux-gnu"
 DEFAULT_WEIGHTS = {
     "instructions": 1.0,
     "branches": 4.0,
@@ -38,6 +39,39 @@ PANIC_MARKERS = (
     "assert_failed",
 )
 FORBIDDEN_MARKERS = ("__rust_alloc", "__rust_realloc", "__rust_dealloc", "vtable")
+REQUIRED_PAIRS = {
+    "default": frozenset(
+        {
+            "complex_computed/dependency",
+            "complex_computed/callback",
+            "complex_computed/nested",
+            "complex_geometry/computed_position_encode",
+            "complex_geometry/cross_referenced_decode",
+            "derived/encode",
+            "layout/positioned_encode",
+            "layout/bitfield_decode",
+            "projection/direct",
+            "projection/nested",
+            "sequential/fixed_decode",
+            "sequential/fixed_encode",
+            "sequential/bounded_decode",
+            "sequential/fixed_sequence",
+            "sequential/variable_cursor",
+            "tagged/scalar",
+            "tagged/fixed_bytes",
+            "tagged/mapped",
+            "tagged_validated/validated",
+        }
+    ),
+    "bytes": frozenset(
+        {
+            "owned_append/dynamic",
+            "owned_complex_computed/multi_computed_append",
+            "owned_decode/fixed",
+            "owned_wide_fixed/wide_fixed_append",
+        }
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -94,7 +128,7 @@ def weight_map(value: str, context: str) -> dict[str, float]:
 
 
 def parse_fixture(root: Path, path: Path) -> Fixture:
-    name = path.stem
+    name = "_".join(path.relative_to(root).with_suffix("").parts)
     pairs: list[Pair] = []
     tolerance: float | None = None
     weights: dict[str, float] = {}
@@ -134,12 +168,21 @@ def parse_fixture(root: Path, path: Path) -> Fixture:
     return Fixture(path, tuple(pairs), tolerance, weights, mode)
 
 
+def require_pairs(fixtures: tuple[Fixture, ...], mode: str) -> None:
+    discovered = {pair.identity for fixture in fixtures for pair in fixture.pairs}
+    missing = REQUIRED_PAIRS[mode] - discovered
+    if missing:
+        raise RuntimeError(
+            f"missing required codegen pairs for mode {mode!r}: {', '.join(sorted(missing))}"
+        )
+
+
 def discover(root: Path, mode: str) -> tuple[Fixture, ...]:
     directory = root / "wire-repr" / "tests" / "fixtures"
-    paths = sorted(directory.glob("*.rs"))
+    paths = sorted(directory.rglob("*.rs"))
     if not paths:
         raise RuntimeError(f"no codegen fixtures found below {directory}")
-    all_fixtures = tuple(parse_fixture(root, path) for path in paths)
+    all_fixtures = tuple(parse_fixture(directory, path) for path in paths)
     pairs = [pair for fixture in all_fixtures for pair in fixture.pairs]
     identities = [pair.identity for pair in pairs]
     symbols = [symbol for pair in pairs for symbol in (pair.generated, pair.handwritten)]
@@ -150,6 +193,7 @@ def discover(root: Path, mode: str) -> tuple[Fixture, ...]:
     fixtures = tuple(fixture for fixture in all_fixtures if fixture.mode == mode)
     if not fixtures:
         raise RuntimeError(f"no codegen fixtures found for mode {mode!r}")
+    require_pairs(fixtures, mode)
     return fixtures
 
 
@@ -226,10 +270,16 @@ def compile_harness(root: Path, crate: Path, target: str, toolchain: str) -> tup
     if not ir_files:
         raise RuntimeError(f"expected optimized LLVM IR below {deps}")
     ir_path = ir_files[-1]
+    assembly_path = matching_assembly(ir_path)
+    return ir_path, assembly_path
+
+
+def matching_assembly(ir_path: Path) -> Path:
+    """Return the assembly emitted alongside this exact LLVM IR artifact."""
     assembly_path = ir_path.with_suffix(".s")
     if not assembly_path.is_file():
         raise RuntimeError(f"expected matching assembly at {assembly_path}")
-    return ir_path, assembly_path
+    return assembly_path
 
 
 def unquote(symbol: str) -> str:
@@ -300,6 +350,51 @@ def metrics(body: str) -> dict[str, int]:
     }
 
 
+def assembly_body(assembly: str, symbol: str) -> str:
+    """Find one ELF assembly function body by its exact emitted symbol."""
+    escaped = re.escape(symbol)
+    label = re.compile(rf'^\s*(?:{escaped}|"{escaped}"):\s*(?:[#;].*)?$', re.MULTILINE)
+    match = label.search(assembly)
+    if match is None:
+        raise RuntimeError(f"expected assembly function for symbol {symbol!r}")
+
+    body_start = match.end()
+    next_function = re.compile(r"^\s*(?!\.L|[0-9]+:)[A-Za-z_$][\w.$@]*:\s*(?:[#;].*)?$", re.MULTILINE)
+    following = next_function.search(assembly, body_start)
+    return assembly[body_start : following.start() if following else len(assembly)]
+
+
+def assembly_instructions(body: str) -> int:
+    """Count emitted instruction lines, excluding labels, directives, and comments."""
+    count = 0
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";", "//")):
+            continue
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith(".") or line.endswith(":"):
+            continue
+        count += 1
+    return count
+
+
+def stack_bytes(assembly: str, symbol: str, target: str) -> int:
+    """Measure the largest static stack frame for a resolved assembly function."""
+    if target != STACK_TARGET:
+        raise RuntimeError(f"stack measurement is unsupported for target {target!r}")
+    body = assembly_body(assembly, symbol)
+    offsets = [int(value) for value in re.findall(r"^\s*\.cfi_def_cfa_offset\s+(\d+)\b", body, re.MULTILINE)]
+    return max(0, max(offsets, default=8) - 8)
+
+
+def stack_within_tolerance(generated: int, handwritten: int, tolerance: float) -> tuple[bool, float, float]:
+    limit = handwritten * (1.0 + tolerance)
+    overhead = 0.0 if handwritten == 0 and generated == 0 else (
+        math.inf if handwritten == 0 else (generated - handwritten) / handwritten
+    )
+    return generated <= limit, overhead, limit
+
+
 def cost(values: dict[str, int], weights: dict[str, float]) -> float:
     return sum(values[name] * weights[name] for name in METRICS)
 
@@ -340,10 +435,26 @@ def main() -> int:
                     continue
                 generated_values = handwritten_values = metrics(survivor[1])
                 generated_body = survivor[1]
+                generated_stack_symbol = handwritten_stack_symbol = resolve(survivor[0], alias_map)
             else:
                 generated_values = metrics(generated[1])
                 handwritten_values = metrics(handwritten[1])
                 generated_body = generated[1]
+                generated_stack_symbol = resolve(generated[0], alias_map)
+                handwritten_stack_symbol = resolve(handwritten[0], alias_map)
+
+            try:
+                generated_values["instructions"] = assembly_instructions(
+                    assembly_body(assembly, generated_stack_symbol)
+                )
+                handwritten_values["instructions"] = assembly_instructions(
+                    assembly_body(assembly, handwritten_stack_symbol)
+                )
+                generated_values["stack_bytes"] = stack_bytes(assembly, generated_stack_symbol, args.target)
+                handwritten_values["stack_bytes"] = stack_bytes(assembly, handwritten_stack_symbol, args.target)
+            except RuntimeError as error:
+                failures.append(f"{pair.identity}: {error}")
+                continue
 
             forbidden = [marker for marker in FORBIDDEN_MARKERS if marker in generated_body]
             generated_cost = cost(generated_values, weights)
@@ -352,15 +463,25 @@ def main() -> int:
                 overhead = 0.0 if generated_cost == 0 else math.inf
             else:
                 overhead = (generated_cost - handwritten_cost) / handwritten_cost
+            stack_passes, stack_overhead, stack_limit = stack_within_tolerance(
+                generated_values["stack_bytes"], handwritten_values["stack_bytes"], tolerance
+            )
             print(
                 f"{pair.identity}: generated={generated_values} handwritten={handwritten_values} "
                 f"weights={weights} costs={generated_cost:g}/{handwritten_cost:g} "
-                f"overhead={overhead:.2%} tolerance={tolerance:.2%}"
+                f"overhead={overhead:.2%} stack={generated_values['stack_bytes']}/"
+                f"{handwritten_values['stack_bytes']} bytes stack_limit={stack_limit:g} bytes "
+                f"stack_overhead={stack_overhead:.2%} tolerance={tolerance:.2%}"
             )
             if forbidden:
                 failures.append(f"{pair.identity}: generated body contains forbidden markers {forbidden}")
             if overhead > tolerance:
                 failures.append(f"{pair.identity}: weighted overhead {overhead:.2%} exceeds {tolerance:.2%}")
+            if not stack_passes:
+                failures.append(
+                    f"{pair.identity}: stack overhead {stack_overhead:.2%} exceeds {tolerance:.2%} "
+                    f"({generated_values['stack_bytes']} bytes > limit {stack_limit:g} bytes)"
+                )
 
     if failures:
         print("codegen fixture gate failed:", file=sys.stderr)

@@ -3,7 +3,7 @@
 //! pair: bounded_decode = sequential_generated_bounded_decode / sequential_handwritten_bounded_decode
 //! pair: fixed_sequence = sequential_generated_fixed_sequence / sequential_handwritten_fixed_sequence
 //! pair: variable_cursor = sequential_generated_variable_cursor / sequential_handwritten_variable_cursor
-//! tolerance: 160%
+//! tolerance: 10%
 //! weights: instructions=1, branches=4, calls=8, panic_paths=16
 
 #![allow(dead_code)]
@@ -76,11 +76,19 @@ pub fn sequential_handwritten_bounded_decode(bytes: &[u8]) -> u8 {
     let Some((&length, remaining)) = bytes.split_first() else {
         return u8::MAX;
     };
-    let length = usize::from(length);
-    if remaining.len() != length + 1 || length == 0 {
+    let Some((payload, remaining)) = remaining.split_at_checked(usize::from(length)) else {
+        return u8::MAX;
+    };
+    let Some((&tail, suffix)) = remaining.split_first() else {
+        return u8::MAX;
+    };
+    let Some(&first) = payload.first() else {
+        return u8::MAX;
+    };
+    if !suffix.is_empty() {
         return u8::MAX;
     }
-    remaining[0] ^ remaining[length] ^ length as u8
+    first ^ tail ^ length
 }
 
 #[inline(never)]

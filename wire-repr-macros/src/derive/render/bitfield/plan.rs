@@ -81,9 +81,8 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                     self,
                     output: &'__wire_repr_output mut #runtime::__private::BytesMut,
                 ) -> Result<Self::Written<'__wire_repr_output>, #runtime::OutputTooShortError> {
-                    let start = output.len();
-                    #runtime::ByteSource::append_into_bytes_mut(&self, output)?;
-                    Ok(#runtime::Written::new(&mut output[start..]))
+                    let appended = #runtime::ByteSource::append_into_bytes_mut(&self, output)?;
+                    Ok(#runtime::Written::new(appended))
                 }
             }
         }
@@ -150,6 +149,15 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
             #[inline(always)]
             fn segments(&self) -> Self::Segments<'_> {
                 #runtime::ByteSourceCursor::segments(&self.storage)
+            }
+
+            type Bytes<'__wire_repr_source> = <<#runtime::#codec as #runtime::FixedCodec>::Plan<'__wire_repr_value> as #runtime::ByteSourceCursor>::Bytes<'__wire_repr_source>
+            where
+                Self: '__wire_repr_source;
+
+            #[inline(always)]
+            fn bytes(&self) -> Self::Bytes<'_> {
+                #runtime::ByteSourceCursor::bytes(&self.storage)
             }
         }
 

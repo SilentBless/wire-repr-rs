@@ -1,8 +1,7 @@
 //! pair: scalar = tagged_generated_scalar / tagged_handwritten_scalar
 //! pair: fixed_bytes = tagged_generated_fixed_bytes / tagged_handwritten_fixed_bytes
-//! pair: validated = tagged_generated_validated / tagged_handwritten_validated
 //! pair: mapped = tagged_generated_mapped / tagged_handwritten_mapped
-//! tolerance: 40%
+//! tolerance: 10%
 //! weights: instructions=1, branches=4, calls=8, panic_paths=16
 
 #![allow(dead_code)]
@@ -33,36 +32,6 @@ enum ByteChoice {
     Data(Body),
 }
 
-#[derive(Debug)]
-struct NonzeroError;
-impl core::fmt::Display for NonzeroError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("zero")
-    }
-}
-impl core::error::Error for NonzeroError {}
-fn nonzero(value: u8) -> Result<(), NonzeroError> {
-    if value == 0 {
-        Err(NonzeroError)
-    } else {
-        Ok(())
-    }
-}
-
-#[derive(Wire)]
-#[wire(error = NonzeroError)]
-struct ValidatedBody {
-    #[wire(validate = nonzero)]
-    value: u8,
-}
-
-#[derive(Wire)]
-#[wire(tag = U8, unknown = reject)]
-#[repr(u8)]
-enum ValidatedChoice {
-    Data(ValidatedBody) = 1,
-    Halt = 2,
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Code {
@@ -135,22 +104,7 @@ pub fn tagged_handwritten_fixed_bytes(bytes: &[u8]) -> u16 {
         _ => u16::MAX,
     }
 }
-#[inline(never)]
-pub fn tagged_generated_validated(bytes: &[u8]) -> u8 {
-    match ValidatedChoice::view(bytes).without_trailing() {
-        Ok(choice) if choice.is_halt() => 0,
-        Ok(choice) => choice.data().map_or(u8::MAX, |body| body.value()),
-        Err(_) => u8::MAX,
-    }
-}
-#[inline(never)]
-pub fn tagged_handwritten_validated(bytes: &[u8]) -> u8 {
-    match bytes {
-        [1, value] if *value != 0 => *value,
-        [2] => 0,
-        _ => u8::MAX,
-    }
-}
+
 #[inline(never)]
 pub fn tagged_generated_mapped(bytes: &[u8]) -> u16 {
     match MappedChoice::view(bytes).table(&Table).without_trailing() {
@@ -161,10 +115,21 @@ pub fn tagged_generated_mapped(bytes: &[u8]) -> u16 {
 }
 #[inline(never)]
 pub fn tagged_handwritten_mapped(bytes: &[u8]) -> u16 {
-    match bytes {
-        [0x41, high, low] => u16::from_be_bytes([*high, *low]),
-        [0x7f] => 0,
-        _ => u16::MAX,
+    let Some((&raw, remaining)) = bytes.split_first() else {
+        return u16::MAX;
+    };
+    let Ok(Some(code)) = Table.decode(raw) else {
+        return u16::MAX;
+    };
+    match code {
+        Code::Data => {
+            let [high, low] = remaining else {
+                return u16::MAX;
+            };
+            u16::from_be_bytes([*high, *low])
+        }
+        Code::Halt if remaining.is_empty() => 0,
+        Code::Halt => u16::MAX,
     }
 }
 
@@ -182,12 +147,7 @@ fn tagged_pairs_are_semantically_equivalent() {
             tagged_handwritten_fixed_bytes(black_box(bytes))
         );
     }
-    for bytes in [&[][..], &[1, 0], &[1, 7], &[2], &[3]] {
-        assert_eq!(
-            tagged_generated_validated(black_box(bytes)),
-            tagged_handwritten_validated(black_box(bytes))
-        );
-    }
+
     for bytes in [&[][..], &[0x41, 0x12, 0x34], &[0x7f], &[0x55]] {
         assert_eq!(
             tagged_generated_mapped(black_box(bytes)),

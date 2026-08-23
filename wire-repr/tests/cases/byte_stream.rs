@@ -105,6 +105,15 @@ impl ByteSourceCursor for BorrowedPlan<'_> {
     fn segments(&self) -> Self::Segments<'_> {
         core::iter::once(ByteSegment::Bytes(self.0))
     }
+
+    type Bytes<'source>
+        = wire_repr::ByteBytes<'source, Self::Segments<'source>>
+    where
+        Self: 'source;
+
+    fn bytes(&self) -> Self::Bytes<'_> {
+        wire_repr::ByteBytes::new(self.segments())
+    }
 }
 
 struct Borrowing;
@@ -225,6 +234,15 @@ impl ByteSourceCursor for TerminatedPlan<'_> {
             ByteSegment::Rest { byte: 0, len: 1 },
         ]
         .into_iter()
+    }
+
+    type Bytes<'source>
+        = wire_repr::ByteBytes<'source, Self::Segments<'source>>
+    where
+        Self: 'source;
+
+    fn bytes(&self) -> Self::Bytes<'_> {
+        wire_repr::ByteBytes::new(self.segments())
     }
 }
 

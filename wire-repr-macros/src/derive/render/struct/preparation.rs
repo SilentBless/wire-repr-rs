@@ -345,6 +345,12 @@ fn computation_source(
                     continue;
                 }
                 debug_assert!(matches!(fields[index].kind, FieldKind::Nested));
+                if let [path] = selected.as_slice() {
+                    let nested = &path.nested;
+                    components
+                        .push(quote!(#plan.bytes().include_direct(|fields| fields #(.#nested)*)));
+                    continue;
+                }
                 let selector = selected
                     .iter()
                     .map(|path| {

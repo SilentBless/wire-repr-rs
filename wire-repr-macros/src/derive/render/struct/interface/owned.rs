@@ -58,6 +58,9 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
         || (quote!(), quote!(#name)),
         |lifetime| (quote!(<#lifetime>), quote!(#name<#lifetime>)),
     );
+    let validation_mode = has_validation;
+    let view_request = quote!(#runtime::ValidatedViewRequest);
+    let view_cursor = quote!(#runtime::ValidatedViewCursor);
 
     let fixed_sequence = fixed_sequence_width.map(|width| {
         if has_validation {
@@ -303,11 +306,11 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
             #[allow(missing_docs)]
             impl #impl_generics #self_type {
                 #fixed_sequence
-                #vis fn view(input: #runtime::__private::Bytes) -> #runtime::ValidatedViewRequest<'static, #view> {
-                    #runtime::ValidatedViewRequest::new(input)
+                #vis fn view(input: #runtime::__private::Bytes) -> #runtime::ValidatedViewRequest<'static, #view, #validation_mode> {
+                    #view_request::new(input)
                 }
-                #vis fn cursor(input: #runtime::__private::Bytes) -> #runtime::ValidatedViewCursor<'static, #view> {
-                    #runtime::ValidatedViewCursor::new(input)
+                #vis fn cursor(input: #runtime::__private::Bytes) -> #view_cursor<'static, #view> {
+                    #view_cursor::new(input)
                 }
                 #builder_method
                 #[doc(hidden)]

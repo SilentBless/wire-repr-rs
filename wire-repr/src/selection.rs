@@ -28,6 +28,22 @@ pub trait FieldSelection<T: ?Sized> {
     }
 }
 
+/// Selects a generated field by directly borrowing its prepared byte source.
+///
+/// This is intentionally narrower than [`FieldSelection`]: unions and arbitrary
+/// selections still use range selection to preserve physical wire order and deduplicate
+/// overlapping ranges.
+#[doc(hidden)]
+pub trait DirectFieldSelection<T: ?Sized> {
+    /// The directly selected byte source.
+    type Source<'a>: ByteSourceCursor
+    where
+        T: 'a;
+
+    /// Borrows the selected prepared field source.
+    fn direct_source<'a>(&self, target: &'a T) -> Self::Source<'a>;
+}
+
 /// A recursive union of two field selections.
 #[doc(hidden)]
 pub struct FieldUnion<L, R> {
@@ -119,6 +135,18 @@ pub trait FieldProjection<Outer: ?Sized> {
     fn project<'a>(outer: &'a Outer) -> (Range<usize>, &'a Self::Inner);
 }
 
+/// Projects a nested source for direct cursor selection.
+#[doc(hidden)]
+pub trait DirectFieldProjection<Outer: ?Sized> {
+    /// The child source borrowed for a given outer-source lifetime.
+    type Inner<'a>: ?Sized + 'a
+    where
+        Outer: 'a;
+
+    /// Returns the child source without translating it into outer coordinates.
+    fn direct_project<'a>(outer: &'a Outer) -> &'a Self::Inner<'a>;
+}
+
 /// A child-plan selection translated into an enclosing prepared-plan coordinate space.
 #[doc(hidden)]
 pub struct Translated<Projection, Selection> {
@@ -207,6 +235,27 @@ where
     }
 }
 
+impl<Outer: ?Sized, Projection, Selection> DirectFieldSelection<Outer>
+    for Translated<Projection, Selection>
+where
+    Projection: DirectFieldProjection<Outer>,
+    for<'a> Selection: DirectFieldSelection<Projection::Inner<'a>>,
+{
+    type Source<'a>
+        = <Selection as DirectFieldSelection<Projection::Inner<'a>>>::Source<'a>
+    where
+        Outer: 'a;
+
+    #[inline(always)]
+    fn direct_source<'a>(&self, outer: &'a Outer) -> Self::Source<'a> {
+        let child = Projection::direct_project(outer);
+        <Selection as DirectFieldSelection<Projection::Inner<'a>>>::direct_source(
+            &self.selection,
+            child,
+        )
+    }
+}
+
 impl<Projection, Selection, Right> BitOr<Right> for Translated<Projection, Selection> {
     type Output = FieldUnion<Self, Right>;
 
@@ -256,6 +305,21 @@ where
         V: FnMut(Range<usize>),
     {
         self.whole.visit_ranges(target, visitor);
+    }
+}
+
+impl<T: ?Sized, Whole, Fields> DirectFieldSelection<T> for NestedField<Whole, Fields>
+where
+    Whole: DirectFieldSelection<T>,
+{
+    type Source<'a>
+        = Whole::Source<'a>
+    where
+        T: 'a;
+
+    #[inline(always)]
+    fn direct_source<'a>(&self, target: &'a T) -> Self::Source<'a> {
+        self.whole.direct_source(target)
     }
 }
 
@@ -319,6 +383,19 @@ impl<'source, T, Fields> ByteSelection<'source, T, Fields> {
         IncludedBytes::new(self.source, choose(&self.fields))
     }
 
+    /// Borrows the prepared source of one directly selected generated field.
+    #[must_use]
+    #[inline(always)]
+    pub fn include_direct<Selection>(
+        &self,
+        choose: impl FnOnce(&Fields) -> Selection,
+    ) -> Selection::Source<'source>
+    where
+        Selection: DirectFieldSelection<T>,
+    {
+        choose(&self.fields).direct_source(self.source)
+    }
+
     /// Selects every source byte except the exact representation bytes of the chosen fields.
     #[must_use]
     #[inline(always)]
@@ -353,6 +430,16 @@ impl<T: ByteSourceCursor, Fields> ByteSourceCursor for ByteSelection<'_, T, Fiel
     #[inline(always)]
     fn segments(&self) -> Self::Segments<'_> {
         self.source.segments()
+    }
+
+    type Bytes<'source>
+        = T::Bytes<'source>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> Self::Bytes<'_> {
+        self.source.bytes()
     }
 }
 
@@ -420,6 +507,16 @@ impl<T: ByteSourceCursor, Selection: FieldSelection<T>> ByteSourceCursor
     fn segments(&self) -> Self::Segments<'_> {
         SelectedSegments::new(self.source, &self.selection, true)
     }
+
+    type Bytes<'source>
+        = crate::ByteBytes<'source, SelectedSegments<'source, T::Segments<'source>, T, Selection>>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> Self::Bytes<'_> {
+        crate::ByteBytes::new(self.segments())
+    }
 }
 
 /// The bytes outside a static field selection.
@@ -481,6 +578,16 @@ impl<T: ByteSourceCursor, Selection: FieldSelection<T>> ByteSourceCursor
     #[inline(always)]
     fn segments(&self) -> Self::Segments<'_> {
         SelectedSegments::new(self.source, &self.selection, false)
+    }
+
+    type Bytes<'source>
+        = crate::ByteBytes<'source, SelectedSegments<'source, T::Segments<'source>, T, Selection>>
+    where
+        Self: 'source;
+
+    #[inline(always)]
+    fn bytes(&self) -> Self::Bytes<'_> {
+        crate::ByteBytes::new(self.segments())
     }
 }
 

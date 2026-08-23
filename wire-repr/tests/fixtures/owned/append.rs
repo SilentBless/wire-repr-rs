@@ -1,7 +1,7 @@
 //! Owned output pays for checked planning and atomic capacity preflight.
 //! mode: bytes
 //! pair: dynamic = owned_generated_append / owned_handwritten_append
-//! tolerance: 50%
+//! tolerance: 30%
 //! weights: instructions=1, branches=4, calls=8, panic_paths=16
 
 #![allow(dead_code)]

@@ -1,7 +1,7 @@
 //! Prepared PLAN representation rendering.
 
 use super::codec_tokens;
-use crate::derive::model::{Field, FieldKind};
+use crate::derive::model::{ComputationArgument, Field, FieldKind};
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::Lifetime;
@@ -148,7 +148,152 @@ pub(super) fn render(input: Input<'_>) -> Output {
         .into_iter()
         .reduce(|left, right| quote!(::core::iter::Iterator::chain(#left, #right)))
         .expect("wire structs have fields");
+    let mut plan_bytes_types = Vec::new();
+    let mut plan_bytes_values = Vec::new();
+    for ((plan, ty), gap) in plans.iter().zip(&plan_field_types).zip(gaps) {
+        if let Some(gap) = gap {
+            plan_bytes_types.push(quote!(::core::iter::Take<::core::iter::Repeat<u8>>));
+            plan_bytes_values.push(quote!(::core::iter::repeat(0).take(self.#gap)));
+        }
+        plan_bytes_types
+            .push(quote!(<#ty as #runtime::ByteSourceCursor>::Bytes<'__wire_repr_source>));
+        plan_bytes_values.push(quote!(#runtime::ByteSourceCursor::bytes(&self.#plan)));
+    }
+    let plan_bytes_type = plan_bytes_types
+        .into_iter()
+        .reduce(|left, right| quote!(::core::iter::Chain<#left, #right>))
+        .expect("wire structs have fields");
+    let plan_bytes_value = plan_bytes_values
+        .into_iter()
+        .reduce(|left, right| quote!(::core::iter::Iterator::chain(#left, #right)))
+        .expect("wire structs have fields");
+    let static_prefix_bytes_emit = (!gaps.iter().any(Option::is_some)
+        && fields.iter().all(|field| field.position.is_none())
+        && fields.len() >= 2)
+        .then(|| {
+            let (prefix_fields, terminal_field) = fields.split_at(fields.len() - 1);
+            let (prefix_plans, terminal_plans) = plans.split_at(plans.len() - 1);
+            let terminal_plan = terminal_plans
+                .first()
+                .expect("terminal byte field has a generated plan");
+            let terminal_is_bytes = matches!(
+                terminal_field
+                    .first()
+                    .expect("terminal byte field exists")
+                    .kind,
+                FieldKind::Bytes { .. } | FieldKind::Rest
+            );
+            let prefix_widths: Option<Vec<_>> = prefix_fields
+                .iter()
+                .map(|field| match &field.kind {
+                    FieldKind::Fixed(codec) => codec.static_width(),
+                    FieldKind::Bytes { .. }
+                    | FieldKind::Rest
+                    | FieldKind::Prefix(_)
+                    | FieldKind::Nested => None,
+                })
+                .collect();
+            (terminal_is_bytes && prefix_widths.is_some()).then(|| {
+                let prefix_widths = prefix_widths.expect("static fixed prefix has widths");
+                let prefix_width = quote!(0usize #(+ #prefix_widths)*);
+                let destructure = plans.iter();
+                let write_steps = prefix_plans
+                    .iter()
+                    .zip(&prefix_widths)
+                    .map(|(plan, width)| {
+                        quote! {
+                            let (field_output, suffix) = remaining.split_at_mut(#width);
+                            #runtime::ByteSource::write_into(&#plan, field_output);
+                            remaining = suffix;
+                        }
+                    });
+                quote! {
+                    let Self { #(#destructure,)* .. } = self;
+                    output.extend_from_slice(&[0_u8; #prefix_width]);
+                    {
+                        let mut remaining: &mut [u8] = output
+                            .last_chunk_mut::<{ #prefix_width }>()
+                            .expect("appended static prefix has its required width");
+                        #(#write_steps)*
+                    }
+                    output.extend_from_slice(#terminal_plan);
+                }
+            })
+        })
+        .flatten();
+    let exact_field_emit = gaps.iter().all(Option::is_none).then(|| {
+        let destructure = plans.iter();
+        let write_steps = fields
+            .iter()
+            .zip(plans)
+            .enumerate()
+            .map(|(index, (field, plan))| {
+                let is_final_field = index + 1 == fields.len();
+                let emit = match (&field.kind, is_final_field) {
+                    (FieldKind::Bytes { .. } | FieldKind::Rest, true) => quote! {
+                        remaining.copy_from_slice(#plan);
+                    },
+                    (FieldKind::Fixed(_) | FieldKind::Prefix(_) | FieldKind::Nested, true) => {
+                        quote! {
+                            #runtime::ByteSource::write_into(&#plan, remaining);
+                        }
+                    }
+                    (FieldKind::Bytes { .. } | FieldKind::Rest, false) => quote! {
+                        let (field_output, suffix) = remaining.split_at_mut(#plan.len());
+                        field_output.copy_from_slice(#plan);
+                        remaining = suffix;
+                    },
+                    (FieldKind::Fixed(_) | FieldKind::Prefix(_) | FieldKind::Nested, false) => {
+                        quote! {
+                            let field_len = #runtime::ByteSource::byte_len(&#plan);
+                            let (field_output, suffix) = remaining.split_at_mut(field_len);
+                            #runtime::ByteSource::write_into(&#plan, field_output);
+                            remaining = suffix;
+                        }
+                    }
+                };
+                quote! {
+                    #emit
+                }
+            });
+        quote! {
+            {
+                let mut remaining: &mut [u8] = &mut *bytes;
+                let Self { #(#destructure,)* .. } = self;
+                #(#write_steps)*
+            }
+        }
+    });
+    let requires_materialized_static_prefix = fields.iter().any(|field| {
+        field.computation.as_ref().is_some_and(|computation| {
+            computation
+                .arguments
+                .iter()
+                .any(|argument| matches!(argument, ComputationArgument::Bytes(_)))
+        })
+    });
     let commit_impl = if cfg!(feature = "bytes") {
+        let commit = match (
+            requires_materialized_static_prefix,
+            static_prefix_bytes_emit.as_ref(),
+        ) {
+            (true, Some(emit)) => quote! {
+                let required = self.encoded_len;
+                let available = output.capacity() - output.len();
+                if available < required {
+                    return Err(#runtime::OutputTooShortError {
+                        required,
+                        available,
+                    });
+                }
+                #emit
+                Ok(#runtime::Written::from_appended(output, required))
+            },
+            _ => quote! {
+                let appended = #runtime::ByteSource::append_into_bytes_mut(&self, output)?;
+                Ok(#runtime::Written::new(appended))
+            },
+        };
         quote! {
             impl #plan_impl_generics #runtime::PreparedLayout for #plan_impl_type {
                 type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
@@ -156,13 +301,25 @@ pub(super) fn render(input: Input<'_>) -> Output {
                     self,
                     output: &'__wire_repr_output mut #runtime::__private::BytesMut,
                 ) -> Result<Self::Written<'__wire_repr_output>, #runtime::OutputTooShortError> {
-                    let start = output.len();
-                    #runtime::ByteSource::append_into_bytes_mut(&self, output)?;
-                    Ok(#runtime::Written::new(&mut output[start..]))
+                    #commit
                 }
             }
         }
     } else {
+        let default_emit = exact_field_emit
+            .unwrap_or_else(|| quote!(#runtime::ByteSource::write_into(&self, bytes);));
+        let commit = quote! {
+            let required = self.encoded_len;
+            if output.len() < required {
+                return Err(#runtime::OutputTooShortError {
+                    required,
+                    available: output.len(),
+                });
+            }
+            let (bytes, suffix) = output.split_at_mut(required);
+            #default_emit
+            Ok((#runtime::Written::new(bytes), suffix))
+        };
         quote! {
             impl #plan_impl_generics #runtime::PreparedLayout for #plan_impl_type {
                 type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
@@ -173,16 +330,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
                     (Self::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]),
                     #runtime::OutputTooShortError,
                 > {
-                    let required = self.encoded_len;
-                    if output.len() < required {
-                        return Err(#runtime::OutputTooShortError {
-                            required,
-                            available: output.len(),
-                        });
-                    }
-                    let (bytes, suffix) = output.split_at_mut(required);
-                    #runtime::ByteSource::write_into(&self, bytes);
-                    Ok((#runtime::Written::new(bytes), suffix))
+                    #commit
                 }
             }
         }
@@ -229,6 +377,13 @@ pub(super) fn render(input: Input<'_>) -> Output {
                 #[inline(always)]
                 fn segments(&self) -> Self::Segments<'_> {
                     #plan_segments_value
+                }
+                type Bytes<'__wire_repr_source> = #plan_bytes_type
+                where
+                    Self: '__wire_repr_source;
+                #[inline(always)]
+                fn bytes(&self) -> Self::Bytes<'_> {
+                    #plan_bytes_value
                 }
             }
             #commit_impl

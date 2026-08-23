@@ -1,6 +1,7 @@
 //! Generated PLAN/VIEW typed field-selection rendering.
 
 use super::super::super::model::{Field, FieldKind, FieldPosition};
+use super::codec_tokens;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
@@ -113,6 +114,27 @@ pub(super) fn render(input: Input<'_>) -> Output {
             }
         });
         let current_plan = &plans[index];
+        let current_plan_type = match &field.kind {
+            FieldKind::Fixed(codec) => {
+                let codec = codec_tokens(codec, runtime);
+                quote!(<#codec as #runtime::FixedCodec>::Plan<'__wire_repr_value>)
+            }
+            FieldKind::Nested => {
+                if field.operation_input.is_some() {
+                    nested_plan_paths[index]
+                        .as_ref()
+                        .expect("operation-backed nested fields have generated plan paths")
+                        .clone()
+                } else {
+                    let ty = &field.ty;
+                    quote!(<#ty as #runtime::WireEncode>::Plan<'__wire_repr_value>)
+                }
+            }
+            FieldKind::Prefix(codec) => {
+                quote!(<#codec as #runtime::PrefixCodec>::Plan<'__wire_repr_value>)
+            }
+            FieldKind::Bytes { .. } | FieldKind::Rest => quote!(&'__wire_repr_value [u8]),
+        };
         let current_gap = &gaps[index];
         let gap = current_gap.as_ref().map(|gap| quote! {
             cursor = cursor.checked_add(target.#gap).expect("prepared field geometry overflow");
@@ -136,6 +158,13 @@ pub(super) fn render(input: Input<'_>) -> Output {
                         #gap
                         let end = cursor.checked_add(#runtime::ByteSource::byte_len(&target.#current_plan)).expect("prepared field geometry overflow");
                         (cursor..end, &target.#current_plan)
+                    }
+                }
+                impl #selection_impl_generics #runtime::DirectFieldProjection<#selection_plan_type> for #marker {
+                    type Inner<'a> = #child_plan where #selection_plan_type: 'a;
+                    #[inline(always)]
+                    fn direct_project<'a>(target: &'a #selection_plan_type) -> &'a Self::Inner<'a> {
+                        &target.#current_plan
                     }
                 }
                 impl #selection_impl_generics #runtime::FieldSelection<#selection_plan_type> for #marker {
@@ -180,6 +209,16 @@ pub(super) fn render(input: Input<'_>) -> Output {
                 }
             }
         };
+        let direct_selection = quote! {
+            impl #selection_impl_generics #runtime::DirectFieldSelection<#selection_plan_type> for #marker {
+                type Source<'a> = #runtime::__private::BorrowedSource<'a, #current_plan_type>
+                where #selection_plan_type: 'a;
+                #[inline(always)]
+                fn direct_source<'a>(&self, target: &'a #selection_plan_type) -> Self::Source<'a> {
+                    #runtime::__private::BorrowedSource::new(&target.#current_plan)
+                }
+            }
+        };
         quote! {
             #[allow(missing_docs)]
             #[doc(hidden)]
@@ -192,6 +231,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
                 }
             }
             #selection
+            #direct_selection
         }
     });
     let borrowed_view_marker_impls: Vec<_> = fields.iter().enumerate().map(|(index, field)| {

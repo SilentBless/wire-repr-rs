@@ -118,9 +118,10 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
         capabilities:
             Capabilities {
                 fixed_sequence_width: _,
-                has_validation: _,
+                has_validation,
             },
     } = input;
+    let validation_mode = has_validation;
     let view_request = quote!(#runtime::ValidatedViewRequest);
     let cursor_method = quote! {
         /// Returns a fail-closed cursor over consecutive representations.
@@ -132,13 +133,13 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
         (
             quote!(<#lifetime>),
             quote!(#name<#lifetime>),
-            quote!(#vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #view_request<'__wire_repr_view, #view<'__wire_repr_view>>),
+            quote!(#vis fn view<'__wire_repr_view>(input: &'__wire_repr_view [u8]) -> #runtime::ValidatedViewRequest<'__wire_repr_view, #view<'__wire_repr_view>, #validation_mode>),
         )
     } else {
         (
             quote!(),
             quote!(#name),
-            quote!(#vis fn view<'__wire_repr_wire>(input: &'__wire_repr_wire [u8]) -> #view_request<'__wire_repr_wire, #view<'__wire_repr_wire>>),
+            quote!(#vis fn view<'__wire_repr_wire>(input: &'__wire_repr_wire [u8]) -> #runtime::ValidatedViewRequest<'__wire_repr_wire, #view<'__wire_repr_wire>, #validation_mode>),
         )
     };
 

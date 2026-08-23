@@ -116,6 +116,10 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let has_nested = fields
         .iter()
         .any(|field| matches!(field.kind, FieldKind::Nested));
+    let has_validation = validation_error.is_some()
+        || !model_validators.is_empty()
+        || has_nested
+        || fields.iter().any(|field| !field.validators.is_empty());
     let nested_view_paths: Vec<_> = fields
         .iter()
         .map(|field| {
@@ -439,7 +443,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         },
         capabilities: interface::Capabilities {
             fixed_sequence_width: fixed_sequence_width.as_ref(),
-            has_validation: custom_validation_error.is_some(),
+            has_validation,
         },
     });
 

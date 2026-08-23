@@ -270,6 +270,15 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                 fn segments(&self) -> Self::Segments<'_> {
                     ::core::iter::once(#runtime::ByteSegment::Bytes(self.as_bytes()))
                 }
+
+                type Bytes<'__wire_repr_source> = ::core::iter::Copied<::core::slice::Iter<'__wire_repr_source, u8>>
+                where
+                    Self: '__wire_repr_source;
+
+                #[inline(always)]
+                fn bytes(&self) -> Self::Bytes<'_> {
+                    self.as_bytes().iter().copied()
+                }
             }
 
             impl #runtime::WireViewValidation<'static> for #view {
@@ -330,6 +339,15 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                 #[inline(always)]
                 fn segments(&self) -> Self::Segments<'_> {
                     ::core::iter::once(#runtime::ByteSegment::Bytes(self.as_bytes()))
+                }
+
+                type Bytes<'__wire_repr_source> = ::core::iter::Copied<::core::slice::Iter<'__wire_repr_source, u8>>
+                where
+                    Self: '__wire_repr_source;
+
+                #[inline(always)]
+                fn bytes(&self) -> Self::Bytes<'_> {
+                    self.as_bytes().iter().copied()
                 }
             }
 

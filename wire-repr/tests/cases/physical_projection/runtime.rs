@@ -34,6 +34,15 @@ impl ByteSourceCursor for Segmented {
         ]
         .into_iter()
     }
+
+    type Bytes<'source>
+        = wire_repr::ByteBytes<'source, Self::Segments<'source>>
+    where
+        Self: 'source;
+
+    fn bytes(&self) -> Self::Bytes<'_> {
+        wire_repr::ByteBytes::new(self.segments())
+    }
 }
 
 struct OverEmitting;

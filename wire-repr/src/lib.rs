@@ -35,8 +35,9 @@ pub use codec::{
 
 #[doc(hidden)]
 pub use selection::{
-    ByteSelection, ExcludedBytes, FieldProjection, FieldSelection, FieldUnion, IncludedBytes,
-    MarkerScope, NestedField, RootScope, SelectedSegments, Through, Translated,
+    ByteSelection, DirectFieldProjection, DirectFieldSelection, ExcludedBytes, FieldProjection,
+    FieldSelection, FieldUnion, IncludedBytes, MarkerScope, NestedField, RootScope,
+    SelectedSegments, Through, Translated,
 };
 
 pub use wire::{

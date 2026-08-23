@@ -235,9 +235,8 @@ pub(super) fn render(input: Input<'_>) -> Output {
                     self,
                     output: &'output mut #runtime::__private::BytesMut,
                 ) -> Result<Self::Written<'output>, #runtime::OutputTooShortError> {
-                    let start = output.len();
-                    #runtime::ByteSource::append_into_bytes_mut(&self, output)?;
-                    Ok(#runtime::Written::new(&mut output[start..]))
+                    let appended = #runtime::ByteSource::append_into_bytes_mut(&self, output)?;
+                    Ok(#runtime::Written::new(appended))
                 }
             }
         }
@@ -329,6 +328,15 @@ pub(super) fn render(input: Input<'_>) -> Output {
                     match self {
                         #(#plan_segments_from_arms)*
                     }
+                }
+
+                type Bytes<'__wire_repr_source> = #runtime::ByteBytes<'__wire_repr_source, Self::Segments<'__wire_repr_source>>
+                where
+                    Self: '__wire_repr_source;
+
+                #[inline(always)]
+                fn bytes(&self) -> Self::Bytes<'_> {
+                    #runtime::ByteBytes::new(self.segments())
                 }
             }
 

@@ -27,9 +27,33 @@ pub trait WireView<'wire>: Sized {
     #[cfg(not(feature = "bytes"))]
     fn parse_view(input: &'wire [u8]) -> Result<(Self, &'wire [u8]), Self::DecodeError>;
 
+    /// Validates one complete borrowed representation and creates its view.
+    #[cfg(not(feature = "bytes"))]
+    fn parse_complete(input: &'wire [u8]) -> Result<Self, Self::DecodeError> {
+        let input_len = input.len();
+        let (view, suffix) = Self::parse_view(input)?;
+        if suffix.is_empty() {
+            Ok(view)
+        } else {
+            Err(Self::trailing_bytes_error(view.as_bytes().len(), input_len))
+        }
+    }
+
     /// Validates one leading representation from owned input and creates its view.
     #[cfg(feature = "bytes")]
     fn parse_view(input: bytes::Bytes) -> Result<(Self, bytes::Bytes), Self::DecodeError>;
+
+    /// Validates one complete owned representation and creates its view.
+    #[cfg(feature = "bytes")]
+    fn parse_complete(input: bytes::Bytes) -> Result<Self, Self::DecodeError> {
+        let input_len = input.len();
+        let (view, suffix) = Self::parse_view(input)?;
+        if suffix.is_empty() {
+            Ok(view)
+        } else {
+            Err(Self::trailing_bytes_error(view.as_bytes().len(), input_len))
+        }
+    }
 
     /// Builds this view's typed error for trailing input.
     fn trailing_bytes_error(represented: usize, input: usize) -> Self::DecodeError;
@@ -51,6 +75,48 @@ pub trait WireViewValidation<'wire> {
 
     /// Validates decoded field and model invariants.
     fn validate(&self) -> Result<(), Self::ValidationError>;
+
+    /// Frames and validates one complete borrowed representation.
+    #[cfg(not(feature = "bytes"))]
+    #[doc(hidden)]
+    fn parse_validated_complete(input: &'wire [u8]) -> Result<Self, Self::ValidationError>
+    where
+        Self: Sized + WireView<'wire>,
+        Self::ValidationError: From<<Self as WireView<'wire>>::DecodeError>,
+    {
+        let input_len = input.len();
+        let (view, suffix) = Self::parse_view(input).map_err(Self::ValidationError::from)?;
+        view.validate()?;
+        if suffix.is_empty() {
+            Ok(view)
+        } else {
+            Err(Self::ValidationError::from(Self::trailing_bytes_error(
+                view.as_bytes().len(),
+                input_len,
+            )))
+        }
+    }
+
+    /// Frames and validates one complete owned representation.
+    #[cfg(feature = "bytes")]
+    #[doc(hidden)]
+    fn parse_validated_complete(input: bytes::Bytes) -> Result<Self, Self::ValidationError>
+    where
+        Self: Sized + WireView<'wire>,
+        Self::ValidationError: From<<Self as WireView<'wire>>::DecodeError>,
+    {
+        let input_len = input.len();
+        let (view, suffix) = Self::parse_view(input).map_err(Self::ValidationError::from)?;
+        view.validate()?;
+        if suffix.is_empty() {
+            Ok(view)
+        } else {
+            Err(Self::ValidationError::from(Self::trailing_bytes_error(
+                view.as_bytes().len(),
+                input_len,
+            )))
+        }
+    }
 }
 
 /// A request to frame one bytes-backed wire view.
@@ -65,7 +131,7 @@ pub struct ViewRequest<'wire, V> {
 
 /// A request which performs structural framing followed by semantic validation.
 #[doc(hidden)]
-pub struct ValidatedViewRequest<'wire, V> {
+pub struct ValidatedViewRequest<'wire, V, const VALIDATE: bool = true> {
     #[cfg(not(feature = "bytes"))]
     input: &'wire [u8],
     #[cfg(feature = "bytes")]
@@ -73,7 +139,7 @@ pub struct ValidatedViewRequest<'wire, V> {
     view: core::marker::PhantomData<(&'wire (), V)>,
 }
 
-impl<'wire, V> ValidatedViewRequest<'wire, V> {
+impl<'wire, V, const VALIDATE: bool> ValidatedViewRequest<'wire, V, VALIDATE> {
     /// Creates a validated view request.
     #[doc(hidden)]
     #[must_use]
@@ -151,19 +217,21 @@ where
         V::parse_view(self.input)
     }
 
-    /// Validates one complete representation, rejecting trailing input.
+    /// Validates one complete borrowed representation, rejecting trailing input.
+    #[cfg(not(feature = "bytes"))]
     pub fn without_trailing(self) -> Result<V, V::DecodeError> {
-        let input_len = self.input.len();
-        let (view, suffix) = self.with_remainder()?;
-        if suffix.is_empty() {
-            Ok(view)
-        } else {
-            Err(V::trailing_bytes_error(view.as_bytes().len(), input_len))
-        }
+        V::parse_complete(self.input)
+    }
+
+    /// Validates one complete owned representation, rejecting trailing input.
+    #[cfg(feature = "bytes")]
+    pub fn without_trailing(self) -> Result<V, V::DecodeError> {
+        let view = V::parse_complete(self.input)?;
+        Ok(view)
     }
 }
 
-impl<'wire, V> ValidatedViewRequest<'wire, V>
+impl<'wire, V> ValidatedViewRequest<'wire, V, true>
 where
     V: WireView<'wire> + WireViewValidation<'wire>,
     V::ValidationError: From<V::DecodeError>,
@@ -184,18 +252,46 @@ where
         Ok((view, remainder))
     }
 
-    /// Frames and semantically validates one complete representation.
+    /// Frames and semantically validates one complete borrowed representation.
+    #[cfg(not(feature = "bytes"))]
     pub fn without_trailing(self) -> Result<V, V::ValidationError> {
-        let input_len = self.input.len();
-        let (view, suffix) = self.with_remainder()?;
-        if suffix.is_empty() {
-            Ok(view)
-        } else {
-            Err(V::ValidationError::from(V::trailing_bytes_error(
-                view.as_bytes().len(),
-                input_len,
-            )))
-        }
+        V::parse_validated_complete(self.input)
+    }
+
+    /// Frames and semantically validates one complete owned representation.
+    #[cfg(feature = "bytes")]
+    pub fn without_trailing(self) -> Result<V, V::ValidationError> {
+        V::parse_validated_complete(self.input)
+    }
+}
+
+impl<'wire, V> ValidatedViewRequest<'wire, V, false>
+where
+    V: WireView<'wire>,
+{
+    /// Structurally validates the leading representation and returns its suffix.
+    #[cfg(not(feature = "bytes"))]
+    pub fn with_remainder(self) -> Result<(V, &'wire [u8]), V::DecodeError> {
+        V::parse_view(self.input)
+    }
+
+    /// Structurally validates the leading owned representation and returns its suffix.
+    #[cfg(feature = "bytes")]
+    pub fn with_remainder(self) -> Result<(V, bytes::Bytes), V::DecodeError> {
+        V::parse_view(self.input)
+    }
+
+    /// Structurally validates one complete borrowed representation.
+    #[cfg(not(feature = "bytes"))]
+    pub fn without_trailing(self) -> Result<V, V::DecodeError> {
+        V::parse_complete(self.input)
+    }
+
+    /// Structurally validates one complete owned representation.
+    #[cfg(feature = "bytes")]
+    pub fn without_trailing(self) -> Result<V, V::DecodeError> {
+        let view = V::parse_complete(self.input)?;
+        Ok(view)
     }
 }
 
@@ -562,6 +658,16 @@ impl<'output> Written<'output> {
     #[must_use]
     pub fn new(bytes: &'output mut [u8]) -> Self {
         Self { bytes }
+    }
+
+    /// Creates a wrapper for bytes just appended to an owned output buffer.
+    #[cfg(feature = "bytes")]
+    #[doc(hidden)]
+    #[must_use]
+    #[inline(always)]
+    pub fn from_appended(output: &'output mut bytes::BytesMut, appended: usize) -> Self {
+        let start = output.len().saturating_sub(appended);
+        Self::new(&mut output[start..])
     }
 
     /// Returns committed bytes.

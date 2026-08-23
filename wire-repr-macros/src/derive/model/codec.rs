@@ -1,9 +1,30 @@
 //! Source-type and codec classification helpers.
 
-use quote::ToTokens;
+use proc_macro2::TokenStream;
+use quote::{ToTokens, quote};
 use syn::{Expr, Lifetime, Lit, Path, Type};
 
 use super::{Codec, TagCodec};
+
+impl Codec {
+    pub(in crate::derive) fn static_width(&self) -> Option<TokenStream> {
+        match self {
+            Self::Builtin(codec) => {
+                let width = match *codec {
+                    "U8" | "I8" => 1usize,
+                    "BeU16" | "LeU16" | "BeI16" | "LeI16" => 2,
+                    "BeU32" | "LeU32" | "BeI32" | "LeI32" => 4,
+                    "BeU64" | "LeU64" | "BeI64" | "LeI64" => 8,
+                    "BeU128" | "LeU128" | "BeI128" | "LeI128" => 16,
+                    _ => return None,
+                };
+                Some(quote!(#width))
+            }
+            Self::OwnedBytes(width) => Some(width.clone()),
+            Self::Custom(_) => None,
+        }
+    }
+}
 
 pub(super) fn fixed_array_len(array: &syn::TypeArray) -> syn::Result<usize> {
     let Expr::Lit(expression) = &array.len else {

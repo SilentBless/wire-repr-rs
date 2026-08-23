@@ -179,6 +179,27 @@ pub(super) fn render(input: Input<'_>) -> Output {
         .into_iter()
         .reduce(|left, right| quote!(::core::iter::Iterator::chain(#left, #right)))
         .expect("fixed structs have fields");
+    let mut bytes_types = Vec::new();
+    let mut bytes_values = Vec::new();
+    for ((field, field_plan), gap) in fields.iter().zip(plans).zip(gaps) {
+        if let Some(gap) = gap {
+            bytes_types.push(quote!(::core::iter::Take<::core::iter::Repeat<u8>>));
+            bytes_values.push(quote!(::core::iter::repeat(0).take(self.#gap)));
+        }
+        let codec = fixed_codec(field, runtime);
+        bytes_types.push(quote!(
+            <<#codec as #runtime::FixedCodec>::Plan<'__wire_repr_value> as #runtime::ByteSourceCursor>::Bytes<'__wire_repr_source>
+        ));
+        bytes_values.push(quote!(#runtime::ByteSourceCursor::bytes(&self.#field_plan)));
+    }
+    let bytes_type = bytes_types
+        .into_iter()
+        .reduce(|left, right| quote!(::core::iter::Chain<#left, #right>))
+        .expect("fixed structs have fields");
+    let bytes_value = bytes_values
+        .into_iter()
+        .reduce(|left, right| quote!(::core::iter::Iterator::chain(#left, #right)))
+        .expect("fixed structs have fields");
 
     let declaration = quote! {
         /// A prepared encoding for this wire representation.
@@ -225,6 +246,15 @@ pub(super) fn render(input: Input<'_>) -> Output {
             #[inline(always)]
             fn segments(&self) -> Self::Segments<'_> {
                 #segments_value
+            }
+
+            type Bytes<'__wire_repr_source> = #bytes_type
+            where
+                Self: '__wire_repr_source;
+
+            #[inline(always)]
+            fn bytes(&self) -> Self::Bytes<'_> {
+                #bytes_value
             }
         }
 
