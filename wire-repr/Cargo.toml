@@ -19,6 +19,7 @@ bytes = ["dep:bytes", "wire-repr-macros/bytes"]
 
 [dependencies]
 bytes = { workspace = true, optional = true }
+thiserror.workspace = true
 wire-repr-macros.workspace = true
 
 [[test]]

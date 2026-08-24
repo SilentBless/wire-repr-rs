@@ -9,7 +9,12 @@ pub(super) struct Input<'a> {
     pub(super) schema: Schema<'a>,
     pub(super) geometry: Geometry<'a>,
     pub(super) types: Types<'a>,
+    pub(super) view_projection: Option<ViewProjection>,
     pub(super) runtime: &'a TokenStream,
+}
+
+pub(super) enum ViewProjection {
+    Descriptor,
 }
 
 pub(super) struct Schema<'a> {
@@ -54,6 +59,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
                 selection_plan_type,
                 view,
             },
+        view_projection,
         runtime,
     } = input;
     let field_proxy = format_ident!("{name}Fields");
@@ -263,7 +269,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
                 .expect("nested fields have generated view paths");
             quote! {
                 impl<'__wire_repr_wire> #runtime::FieldProjection<#view<'__wire_repr_wire>> for #marker {
-                    type Inner = #child_view<'__wire_repr_wire>;
+                    type Inner = <#child_view as #runtime::WireViewType>::View<'__wire_repr_wire>;
                     fn project<'a>(target: &'a #view<'__wire_repr_wire>) -> (::core::ops::Range<usize>, &'a Self::Inner) {
                         let mut cursor = 0usize;
                         #(#prior_steps)*
@@ -298,7 +304,29 @@ pub(super) fn render(input: Input<'_>) -> Output {
         };
         quote!(#selection)
     }).collect();
-    let view_marker_impls = if cfg!(feature = "bytes") {
+    let descriptor_view_marker_impls = view_projection.map(|ViewProjection::Descriptor| {
+        let ranges_trait = format_ident!("{view}Ranges");
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let marker = &markers[index];
+                let range_method = format_ident!("__wire_repr_field_{index}_range");
+                quote! {
+                    impl<T: #view> #runtime::FieldSelection<T> for #marker {
+                        #[inline(always)]
+                        fn visit_ranges<V>(&self, target: &T, visitor: &mut V)
+                        where V: FnMut(::core::ops::Range<usize>) {
+                            visitor(#ranges_trait::#range_method(target));
+                        }
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    let view_marker_impls = if let Some(marker_impls) = descriptor_view_marker_impls {
+        marker_impls
+    } else if cfg!(feature = "bytes") {
         fields
             .iter()
             .enumerate()
@@ -312,7 +340,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
                     let range = format_ident!("field_{index}_range");
                     quote! {
                         impl #runtime::FieldProjection<#view> for #marker {
-                            type Inner = #child_view;
+                            type Inner = <#child_view as #runtime::WireViewType>::View<'static>;
                             fn project<'a>(target: &'a #view) -> (::core::ops::Range<usize>, &'a Self::Inner) {
                                 (target.#range.clone(), &target.#stored)
                             }

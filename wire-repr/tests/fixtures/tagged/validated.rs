@@ -9,11 +9,20 @@ use core::hint::black_box;
 use wire_repr::Wire;
 
 #[derive(Debug)]
-struct NonzeroError;
+enum NonzeroError {
+    Decode(ValidatedBodyDecodeError),
+    Zero,
+}
+
+impl From<ValidatedBodyDecodeError> for NonzeroError {
+    fn from(error: ValidatedBodyDecodeError) -> Self {
+        Self::Decode(error)
+    }
+}
 
 impl core::fmt::Display for NonzeroError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("zero")
+        write!(f, "{self:?}")
     }
 }
 
@@ -21,7 +30,7 @@ impl core::error::Error for NonzeroError {}
 
 fn nonzero(value: u8) -> Result<(), NonzeroError> {
     if value == 0 {
-        Err(NonzeroError)
+        Err(NonzeroError::Zero)
     } else {
         Ok(())
     }

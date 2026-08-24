@@ -20,10 +20,11 @@ pub mod __private {
     pub use crate::codec::{BorrowedSource, ByteChain, EmptySource};
     #[cfg(feature = "bytes")]
     pub use bytes::{Bytes, BytesMut};
+    pub use thiserror::Error as ThisError;
 }
 
 #[doc(inline)]
-pub use wire_repr_macros::Wire;
+pub use wire_repr_macros::{Wire, validator};
 
 pub use codec::{
     BeI16, BeI32, BeI64, BeI128, BeU16, BeU24, BeU32, BeU64, BeU128, ByteBytes, ByteChunks,
@@ -42,6 +43,7 @@ pub use selection::{
 
 pub use wire::{
     BuildIntoError, FixedValidatedViewSequenceError, FixedViewIterator, FixedViewSequenceError,
-    ValidatedViewCursor, ValidatedViewRequest, ViewCursor, ViewCursorError, ViewRequest,
-    WireEncode, WireView, WireViewType, WireViewValidation, Written,
+    GenericFixedViewIterator, ValidatedViewCursor, ValidatedViewRequest, ViewBacking, ViewCursor,
+    ViewCursorError, ViewInput, ViewRequest, WireEncode, WireView, WireViewType,
+    WireViewValidation, Written,
 };

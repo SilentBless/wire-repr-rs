@@ -18,7 +18,7 @@ pub(super) fn declarations(
                     let child_view = nested_view_paths[index]
                         .as_ref()
                         .expect("nested fields have generated view paths");
-                    quote!(#stored: #child_view<'__wire_repr_wire>)
+                    quote!(#stored: <#child_view as wire_repr::WireViewType>::View<'__wire_repr_wire>)
                 }
                 FieldKind::Fixed(codec) => match codec.static_width() {
                     Some(width) => quote!(#stored: &'__wire_repr_wire [u8; #width]),

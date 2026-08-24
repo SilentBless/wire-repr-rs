@@ -56,24 +56,15 @@ pub(super) fn parse(
     let has_nested_validation = fields
         .iter()
         .any(|field| matches!(field.kind, FieldKind::Nested));
-    match (
+    if let (false, false, true) = (
         has_explicit_validators,
         has_nested_validation,
         attributes.validation_error.is_some(),
     ) {
-        (true, _, false) => {
-            return Err(syn::Error::new_spanned(
-                &name,
-                "validators require exactly one `error = ErrorType`",
-            ));
-        }
-        (false, false, true) => {
-            return Err(syn::Error::new_spanned(
-                attributes.validation_error.as_ref().expect("checked"),
-                "`error = ErrorType` requires a validator or nested validated field",
-            ));
-        }
-        _ => {}
+        return Err(syn::Error::new_spanned(
+            attributes.validation_error.as_ref().expect("checked"),
+            "`error = ErrorType` requires a validator or nested validated field",
+        ));
     }
     let controlled_by = validate_byte_fields(&fields, wire_lifetime.as_ref())?;
     validate_operation_fields(&fields, operation_input.as_ref())?;

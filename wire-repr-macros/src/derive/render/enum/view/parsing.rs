@@ -338,7 +338,7 @@ pub(super) fn decode_arm(
             if *owned {
                 return quote! {
                     #selector => {
-                        let (body, suffix) = <#body_view as #runtime::WireView<'static>>::parse_view(remaining)
+                        let (body, suffix) = <<#body_view as #runtime::WireViewType>::View<'static> as #runtime::WireView<'static>>::parse_view(remaining)
                             .map_err(#decode_error::#variant_name)?;
                         let represented = input.slice(..input.len() - suffix.len());
                         Ok((
@@ -353,7 +353,7 @@ pub(super) fn decode_arm(
             }
             quote! {
                 #selector => {
-                    let (body, suffix) = <#body_view<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::parse_view(remaining)
+                    let (body, suffix) = <<#body_view as #runtime::WireViewType>::View<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::parse_view(remaining)
                         .map_err(#decode_error::#variant_name)?;
                     let represented = &input[..input.len() - suffix.len()];
                     Ok((

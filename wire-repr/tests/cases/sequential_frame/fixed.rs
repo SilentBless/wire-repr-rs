@@ -107,7 +107,22 @@ pub struct Header {
 }
 
 #[test]
-fn frames_with_or_without_trailing_bytes_into_bytes_backed_getters() {
+fn direct_exact_views_retain_arbitrary_backing_and_reject_trailing_bytes() {
+    struct OwnedInput([u8; 4]);
+
+    impl AsRef<[u8]> for OwnedInput {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    fn assert_view_surface(view: &impl HeaderView) {
+        assert_eq!(view.kind(), 1);
+        assert_eq!(view.code(), 0x1234);
+        assert_eq!(view.marker(), 7);
+        assert_eq!(view.as_bytes(), &[1, 0x12, 0x34, 7]);
+    }
+
     let original = Header {
         kind: 1,
         code: 0x1234,
@@ -115,32 +130,34 @@ fn frames_with_or_without_trailing_bytes_into_bytes_backed_getters() {
     };
     assert_eq!(original.code, 0x1234);
 
-    let parsed = Header::view(&[1, 0x12, 0x34, 7])
-        .without_trailing()
-        .unwrap();
+    let parsed = Header::view(&[1, 0x12, 0x34, 7]).unwrap();
     assert_eq!(parsed.kind(), 1);
     assert_eq!(parsed.code(), 0x1234);
     assert_eq!(parsed.marker(), 7);
     assert_eq!(parsed.as_bytes(), &[1, 0x12, 0x34, 7]);
 
-    let (prefix, suffix) = Header::view(&[2, 0xab, 0xcd, 9, 42])
-        .with_remainder()
-        .unwrap();
+    let owned = Header::view(OwnedInput([1, 0x12, 0x34, 7])).unwrap();
+    assert_view_surface(&owned);
+
+    let prefix = Header::view(&[2, 0xab, 0xcd, 9]).unwrap();
     assert_eq!(prefix.kind(), 2);
     assert_eq!(prefix.code(), 0xabcd);
     assert_eq!(prefix.marker(), 9);
     assert_eq!(prefix.as_bytes(), &[2, 0xab, 0xcd, 9]);
-    assert_eq!(suffix, &[42]);
 
-    let error = Header::view(&[2, 0xab]).without_trailing().unwrap_err();
+    let error = match Header::view(&[2, 0xab]) {
+        Err(error) => error,
+        Ok(_) => panic!("short input must be rejected"),
+    };
     assert_eq!(
         error.to_string(),
         "field `code` needs 2 bytes, but only 1 byte remains"
     );
 
-    let error = Header::view(&[2, 0xab, 0xcd, 9, 42])
-        .without_trailing()
-        .unwrap_err();
+    let error = match Header::view(&[2, 0xab, 0xcd, 9, 42]) {
+        Err(error) => error,
+        Ok(_) => panic!("trailing input must be rejected"),
+    };
     assert!(matches!(
         error,
         HeaderDecodeError::TrailingBytes {
@@ -203,7 +220,7 @@ fn plan_commit_suffix_and_errors_are_atomic() {
 
 #[test]
 fn custom_fixed_getters_decode_non_copy_values_without_constructing_header() {
-    let parsed = OwnedHeader::view(&[9]).without_trailing().unwrap();
+    let parsed = OwnedHeader::view(&[9]).unwrap();
     assert_eq!(parsed.marker(), NonCopyValue(9));
     assert_eq!(parsed.as_bytes(), &[9]);
 
@@ -221,13 +238,12 @@ fn custom_fixed_getters_decode_non_copy_values_without_constructing_header() {
 
 #[test]
 fn native_byte_arrays_borrow_the_validated_wire_storage() {
-    let input = [1, 2, 3, 4, 9, 0xaa];
-    let (parsed, suffix) = ArrayHeader::view(&input).with_remainder().unwrap();
+    let input = [1, 2, 3, 4, 9];
+    let parsed = ArrayHeader::view(&input).unwrap();
     let digest: &[u8; 4] = parsed.digest();
     assert_eq!(digest, &[1, 2, 3, 4]);
     assert_eq!(parsed.marker(), 9);
-    assert_eq!(parsed.as_bytes(), &input[..5]);
-    assert_eq!(suffix, &input[5..]);
+    assert_eq!(parsed.as_bytes(), &input);
 
     let plan = ArrayHeader {
         digest: [5, 6, 7, 8],
@@ -243,8 +259,15 @@ fn native_byte_arrays_borrow_the_validated_wire_storage() {
 
 #[test]
 fn fixed_sequences_validate_once_then_iterate_infallibly() {
+    fn assert_iterator_contract<I>(_: &I)
+    where
+        I: ExactSizeIterator + DoubleEndedIterator + core::iter::FusedIterator,
+    {
+    }
+
     let bytes = [1, 0x12, 0x34, 7, 2, 0xab, 0xcd, 9];
     let mut headers = Header::views(&bytes).unwrap();
+    assert_iterator_contract(&headers);
     assert_eq!(headers.len(), 2);
 
     let first = headers.next().unwrap();
@@ -257,8 +280,12 @@ fn fixed_sequences_validate_once_then_iterate_infallibly() {
     assert_eq!(second.marker(), 9);
     assert!(headers.next().is_none());
 
+    let error = match Header::views(&bytes[..7]) {
+        Err(error) => error,
+        Ok(_) => panic!("partial sequence item must be rejected"),
+    };
     assert_eq!(
-        Header::views(&bytes[..7]).unwrap_err(),
+        error,
         wire_repr::FixedViewSequenceError::TrailingPartialItem {
             item_width: 4,
             trailing: 3,

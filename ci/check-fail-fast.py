@@ -72,6 +72,7 @@ def compile_case(root: Path, path: Path, directory: Path, toolchain: str) -> lis
                 'edition = "2024"',
                 "",
                 "[dependencies]",
+                'thiserror = { version = "2", default-features = false }',
                 f'wire-repr = {{ path = {json.dumps(str(root / "wire-repr"))} }}',
                 "",
                 "[workspace]",

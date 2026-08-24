@@ -161,11 +161,10 @@ fn backward_positions_and_short_outputs_are_atomic_failures() {
 
 #[test]
 fn static_positions_encode_forward_gaps() {
-    let input = [1, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 2, 0xdd];
-    let (parsed, suffix) = StaticPosition::view(&input).with_remainder().unwrap();
+    let input = [1, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 2];
+    let parsed = StaticPosition::view(&input).unwrap();
     assert_eq!(parsed.value(), 0x1234);
-    assert_eq!(parsed.as_bytes(), &input[..7]);
-    assert_eq!(suffix, &[0xdd]);
+    assert_eq!(parsed.as_bytes(), &input);
 
     let plan = StaticPosition {
         lead: 1,
@@ -182,12 +181,11 @@ fn static_positions_encode_forward_gaps() {
 
 #[test]
 fn dynamic_fixed_positions_retain_validated_field_spans() {
-    let input = [4, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 0xdd];
-    let (view, suffix) = DynamicFixedPosition::view(&input).with_remainder().unwrap();
+    let input = [4, 0xaa, 0xbb, 0xcc, 0x12, 0x34];
+    let view = DynamicFixedPosition::view(&input).unwrap();
     assert_eq!(view.value_offset(), 4);
     assert_eq!(view.value(), 0x1234);
-    assert_eq!(view.as_bytes(), &input[..6]);
-    assert_eq!(suffix, &[0xdd]);
+    assert_eq!(view.as_bytes(), &input);
 
     let copied = view;
     assert_eq!(copied.value(), 0x1234);

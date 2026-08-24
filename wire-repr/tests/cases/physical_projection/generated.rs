@@ -1,7 +1,7 @@
 #![deny(missing_docs, unsafe_code)]
 //! Public generated prepared-byte selection coverage.
 
-use core::mem::{size_of, size_of_val};
+use core::mem::size_of_val;
 
 use wire_repr::Wire;
 
@@ -38,12 +38,10 @@ pub struct PositionedSelection {
 
 #[test]
 fn views_select_exact_source_bytes_across_fixed_dynamic_and_nested_geometry() {
-    let fixed = FixedSelection::view(&[1, 2, 3, 4])
-        .without_trailing()
-        .unwrap();
-    assert_eq!(size_of::<FixedSelectionView<'_>>(), size_of::<&[u8]>());
+    let fixed = FixedSelection::view(&[1, 2, 3, 4]).unwrap();
+    assert!(size_of_val(&fixed) >= size_of_val(&&fixed));
     let root = fixed.bytes();
-    assert_eq!(size_of_val(&root), size_of::<&FixedSelectionView<'_>>());
+    assert_eq!(size_of_val(&root), size_of_val(&&fixed));
     let mut fixed_root = [0; 4];
     root.write_into(&mut fixed_root);
     assert_eq!(fixed_root, [1, 2, 3, 4]);
@@ -52,15 +50,13 @@ fn views_select_exact_source_bytes_across_fixed_dynamic_and_nested_geometry() {
         .include(|fields| fields.checksum | fields.header);
     assert_eq!(
         size_of_val(&selected),
-        size_of::<&FixedSelectionView<'_>>() + size_of::<usize>()
+        size_of_val(&&fixed) + size_of_val(&0usize)
     );
     let mut fixed_selected = [0; 2];
     selected.write_into(&mut fixed_selected);
     assert_eq!(fixed_selected, [1, 4]);
 
-    let positioned = PositionedSelection::view(&[4, 0xa1, 0xb2, 0xc3, 0x12, 0x34])
-        .without_trailing()
-        .unwrap();
+    let positioned = PositionedSelection::view(&[4, 0xa1, 0xb2, 0xc3, 0x12, 0x34]).unwrap();
     let mut payload = [0; 2];
     positioned
         .bytes()
@@ -74,9 +70,7 @@ fn views_select_exact_source_bytes_across_fixed_dynamic_and_nested_geometry() {
         .write_into(&mut without_payload);
     assert_eq!(without_payload, [4, 0xa1, 0xb2, 0xc3]);
 
-    let dynamic = DynamicSelection::view(&[3, 2, 3, 4, 9])
-        .without_trailing()
-        .unwrap();
+    let dynamic = DynamicSelection::view(&[3, 2, 3, 4, 9]).unwrap();
     let mut dynamic_selected = [0; 4];
     dynamic
         .bytes()

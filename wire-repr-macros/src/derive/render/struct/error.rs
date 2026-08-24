@@ -106,9 +106,15 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                         .expect("operation-backed nested fields have generated error paths");
                     quote!(#error)
                 } else if cfg!(feature = "bytes") {
-                    quote!(<#child_view as #runtime::WireView<'static>>::DecodeError)
+                    quote!(
+                        <<#child_view as #runtime::WireViewType>::View<'static>
+                            as #runtime::WireView<'static>>::DecodeError
+                    )
                 } else {
-                    quote!(<#child_view<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::DecodeError)
+                    quote!(
+                        <<#child_view as #runtime::WireViewType>::View<'__wire_repr_wire>
+                            as #runtime::WireView<'__wire_repr_wire>>::DecodeError
+                    )
                 };
                 Some(quote!(
                     #[doc = concat!("Nested decode error for field `", #label, "`.")]

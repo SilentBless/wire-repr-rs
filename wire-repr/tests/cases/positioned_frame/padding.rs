@@ -49,14 +49,16 @@ pub struct DynamicAligned<'wire> {
 
 #[test]
 fn decoding_accepts_opaque_padding_and_preserves_exact_framing() {
-    let input = [7, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 9];
-    let (parsed, suffix) = Padded::view(&input).with_remainder().unwrap();
+    let input = [7, 0xaa, 0xbb, 0xcc, 0x12, 0x34];
+    let parsed = Padded::view(&input).unwrap();
     assert_eq!(parsed.head(), 7);
     assert_eq!(parsed.tail(), 0x1234);
-    assert_eq!(parsed.as_bytes(), &input[..6]);
-    assert_eq!(suffix, &[9]);
+    assert_eq!(parsed.as_bytes(), &input);
 
-    let error = Padded::view(&[7]).with_remainder().unwrap_err();
+    let error = match Padded::view(&[7]) {
+        Err(error) => error,
+        Ok(_) => panic!("short padded input must be rejected"),
+    };
     assert!(matches!(
         error,
         PaddedDecodeError::InputTooShort {

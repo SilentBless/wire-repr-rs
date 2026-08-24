@@ -50,7 +50,7 @@ fn nominal_views_decode_semantic_bits_and_compose_without_reparsing() {
 
 #[test]
 fn reads_accept_reserved_bits_and_writes_canonicalize_them_to_zero() {
-    let view = Flags::view(&[0x7f, 0xf1]).without_trailing().unwrap();
+    let view = Flags::view(&[0x7f, 0xf1]).unwrap();
     assert!(view.enabled());
     assert_eq!(view.mode(), 0);
     assert!(!view.high());
@@ -71,8 +71,44 @@ fn reads_accept_reserved_bits_and_writes_canonicalize_them_to_zero() {
     assert_eq!(suffix, &mut [0xa5]);
 }
 
+struct NonCloneLease([u8; 2]);
+
+impl AsRef<[u8]> for NonCloneLease {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 #[test]
-fn fixed_bitfield_sequences_are_exact_size_iterators() {
+fn direct_bitfield_views_retain_any_as_ref_input_without_clone() {
+    let array = [0x80, 0x0b];
+    assert!(Flags::view(&array).unwrap().enabled());
+    assert_eq!(Flags::view(vec![0x00, 0x02]).unwrap().mode(), 1);
+    assert!(Flags::view(Box::from([0x80, 0x01])).unwrap().enabled());
+
+    let lease = Flags::view(NonCloneLease([0x80, 0x0b])).unwrap();
+    assert!(lease.enabled());
+    assert_eq!(lease.mode(), 5);
+    assert_eq!(lease.as_bytes(), &[0x80, 0x0b]);
+
+    assert!(matches!(
+        Flags::view([0]),
+        Err(FlagsError::InputTooShort {
+            required: 2,
+            available: 1,
+        })
+    ));
+    assert!(matches!(
+        Flags::view([0, 0, 0]),
+        Err(FlagsError::TrailingBytes {
+            expected: 2,
+            actual: 3,
+        })
+    ));
+}
+
+#[test]
+fn fixed_bitfield_sequences_borrow_and_support_exact_double_ended_fused_iteration() {
     let bytes = [0x80, 0x0b, 0x00, 0x02];
     let mut flags = Flags::views(&bytes).unwrap();
     assert_eq!(flags.len(), 2);
@@ -80,11 +116,25 @@ fn fixed_bitfield_sequences_are_exact_size_iterators() {
     assert!(first.enabled());
     assert_eq!(first.mode(), 5);
     assert!(first.high());
-    let second = flags.next().unwrap();
+    let second = flags.next_back().unwrap();
     assert!(!second.enabled());
     assert_eq!(second.mode(), 1);
     assert!(!second.high());
     assert!(flags.next().is_none());
+    assert!(flags.next_back().is_none());
+
+    let vector = vec![0x80, 0x0b];
+    assert!(Flags::views(&vector).unwrap().next().unwrap().enabled());
+    let boxed = Box::<[u8]>::from([0x80, 0x0b]);
+    assert!(Flags::views(&boxed).unwrap().next().unwrap().enabled());
+
+    assert!(matches!(
+        Flags::views(&[0]),
+        Err(wire_repr::FixedViewSequenceError::TrailingPartialItem {
+            item_width: 2,
+            trailing: 1,
+        })
+    ));
 }
 
 fn cursor_byte_sum(source: &impl ByteSourceCursor) -> u8 {

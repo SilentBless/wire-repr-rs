@@ -21,7 +21,7 @@ pub(super) fn decode_geometry(field: &Field, label: &str, decode_error: &Ident) 
         };
         quote! {
             #conversion
-            let represented = input.len() - remaining.len();
+            let represented = input_bytes.len() - remaining.len();
             if #position < represented {
                 return Err(#decode_error::PositionBeforeCursor {
                     field: #label,
@@ -49,7 +49,7 @@ pub(super) fn decode_geometry(field: &Field, label: &str, decode_error: &Ident) 
             None => quote!(None::<usize>),
         };
         quote! {
-            let represented = input.len() - remaining.len();
+            let represented = input_bytes.len() - remaining.len();
             let padded = represented.checked_add(#padding).ok_or(
                 #decode_error::GeometryOverflow { field: #label }
             )?;

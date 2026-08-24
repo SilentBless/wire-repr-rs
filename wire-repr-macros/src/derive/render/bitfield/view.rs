@@ -2,12 +2,13 @@
 
 use super::super::super::model::BitfieldField;
 use proc_macro2::{Ident, TokenStream};
-use quote::quote;
+use quote::{format_ident, quote};
 
 pub(super) struct Input<'a> {
     pub(super) schema: Schema<'a>,
     pub(super) types: Types<'a>,
-    pub(super) mode: Mode<'a>,
+    pub(super) owned_mode: bool,
+    pub(super) runtime: &'a TokenStream,
 }
 
 pub(super) struct Schema<'a> {
@@ -18,14 +19,9 @@ pub(super) struct Schema<'a> {
 
 pub(super) struct Types<'a> {
     pub(super) view: &'a Ident,
-    pub(super) decode_error: &'a Ident,
+    pub(super) error: &'a Ident,
     pub(super) codec: &'a Ident,
     pub(super) storage_type: &'a Ident,
-}
-
-pub(super) struct Mode<'a> {
-    pub(super) runtime: &'a TokenStream,
-    pub(super) owned_mode: bool,
 }
 
 pub(super) fn render(input: Input<'_>) -> TokenStream {
@@ -34,15 +30,26 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
         types:
             Types {
                 view,
-                decode_error,
+                error,
                 codec,
                 storage_type,
             },
-        mode: Mode {
-            runtime,
-            owned_mode,
-        },
+        owned_mode,
+        runtime,
     } = input;
+    let state = format_ident!("{view}State");
+    let getter_declarations: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let field_name = &field.name;
+            let field_type = &field.ty;
+            quote! {
+                #[doc = concat!("Returns the decoded `", stringify!(#field_name), "` projection.")]
+                #[must_use]
+                fn #field_name(&self) -> #field_type;
+            }
+        })
+        .collect();
     let getters: Vec<_> = fields
         .iter()
         .map(|field| {
@@ -61,107 +68,43 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                 quote!(((raw >> #start) & #mask) as #field_type)
             };
             quote! {
-                #[doc = concat!("Returns the decoded `", stringify!(#field_name), "` projection.")]
-                #[must_use]
-                #vis fn #field_name(&self) -> #field_type {
-                    let raw = <#runtime::#codec as #runtime::FixedCodec>::decode(self.bytes.as_ref());
+                #[inline(always)]
+                fn #field_name(&self) -> #field_type {
+                    let raw = <#runtime::#codec as #runtime::FixedCodec>::decode(
+                        self.input.as_ref(),
+                    );
                     #value
                 }
             }
         })
         .collect();
 
-    if owned_mode {
+    let wire_view_implementations = if owned_mode {
         quote! {
-            /// A bytes-backed validated view of this nominal bitfield.
-            #[derive(Clone, Debug)]
-            #vis struct #view {
-                bytes: #runtime::__private::Bytes
-            }
+            impl #runtime::WireView<'static> for #state<#runtime::__private::Bytes> {
+                type DecodeError = #error;
 
-            impl #view {
-                /// Returns the exact represented storage bytes.
-                #[must_use]
-                #vis fn as_bytes(&self) -> &[u8] {
-                    &self.bytes
-                }
-
-                fn from_sequence(bytes: #runtime::__private::Bytes) -> Self {
-                    Self { bytes }
-                }
-
-                #(#getters)*
-            }
-
-            impl #runtime::WireView<'static> for #view {
-                type DecodeError = #decode_error;
-
-                fn parse_view(
-                    mut input: #runtime::__private::Bytes
-                ) -> Result<(Self, #runtime::__private::Bytes), Self::DecodeError> {
+                fn parse_view(mut input: #runtime::__private::Bytes) -> Result<(Self, #runtime::__private::Bytes), Self::DecodeError> {
                     let width = <#runtime::#codec as #runtime::FixedCodec>::WIDTH;
                     let available = input.len();
                     if available < width {
-                        return Err(#decode_error::InputTooShort {
-                            required: width,
-                            available
-                        });
+                        return Err(#error::InputTooShort { required: width, available });
                     }
                     let bytes = input.split_to(width);
-                    Ok((Self { bytes }, input))
+                    Ok((Self { input: bytes }, input))
                 }
 
-                fn trailing_bytes_error(
-                    represented: usize,
-                    input: usize
-                ) -> Self::DecodeError {
-                    #decode_error::TrailingBytes {
-                        expected: represented,
-                        actual: input
-                    }
+                fn trailing_bytes_error(represented: usize, input: usize) -> Self::DecodeError {
+                    #error::TrailingBytes { expected: represented, actual: input }
                 }
 
                 fn as_bytes(&self) -> &[u8] {
-                    &self.bytes
+                    self.input.as_ref()
                 }
             }
 
-            impl #runtime::ByteSource for #view {
-                #[inline(always)]
-                fn byte_len(&self) -> usize {
-                    self.as_bytes().len()
-                }
-
-                #[inline(always)]
-                fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) {
-                    sink.write(self.as_bytes());
-                }
-            }
-
-            impl #runtime::ByteSourceCursor for #view {
-                type Segments<'__wire_repr_source> = ::core::iter::Once<
-                    #runtime::ByteSegment<'__wire_repr_source>
-                >
-                where
-                    Self: '__wire_repr_source;
-
-                #[inline(always)]
-                fn segments(&self) -> Self::Segments<'_> {
-                    ::core::iter::once(#runtime::ByteSegment::Bytes(self.as_bytes()))
-                }
-
-                type Bytes<'__wire_repr_source> = ::core::iter::Copied<::core::slice::Iter<'__wire_repr_source, u8>>
-                where
-                    Self: '__wire_repr_source;
-
-                #[inline(always)]
-                fn bytes(&self) -> Self::Bytes<'_> {
-                    self.as_bytes().iter().copied()
-                }
-            }
-
-            impl #runtime::WireViewValidation<'static> for #view {
-                type ValidationError = #decode_error;
+            impl #runtime::WireViewValidation<'static> for #state<#runtime::__private::Bytes> {
+                type ValidationError = #error;
 
                 fn validate(&self) -> Result<(), Self::ValidationError> {
                     Ok(())
@@ -169,104 +112,39 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
             }
 
             impl #runtime::WireViewType for #name {
-                type DecodeError<'__wire_repr_wire> = #decode_error;
-                type View<'__wire_repr_wire> = #view;
+                type DecodeError<'__wire_repr_wire> = #error;
+                type View<'__wire_repr_wire> = #state<#runtime::__private::Bytes>;
             }
         }
     } else {
         quote! {
-            /// A bytes-backed validated view of this nominal bitfield.
-            #[derive(Clone, Copy, Debug)]
-            #vis struct #view<'__wire_repr_wire> {
-                bytes: &'__wire_repr_wire [u8]
-            }
-
-            impl<'__wire_repr_wire> #view<'__wire_repr_wire> {
-                /// Returns the exact represented storage bytes.
-                #[must_use]
-                #vis const fn as_bytes(&self) -> &'__wire_repr_wire [u8] {
-                    self.bytes
-                }
-
-                fn from_sequence(bytes: &'__wire_repr_wire [u8]) -> Self {
-                    Self { bytes }
-                }
-
-                #(#getters)*
-            }
-
             impl<'__wire_repr_wire> #runtime::WireView<'__wire_repr_wire>
-                for #view<'__wire_repr_wire>
+                for #state<&'__wire_repr_wire [u8]>
             {
-                type DecodeError = #decode_error;
+                type DecodeError = #error;
 
-                fn parse_view(
-                    input: &'__wire_repr_wire [u8]
-                ) -> Result<(Self, &'__wire_repr_wire [u8]), Self::DecodeError> {
+                fn parse_view(input: &'__wire_repr_wire [u8]) -> Result<(Self, &'__wire_repr_wire [u8]), Self::DecodeError> {
                     let width = <#runtime::#codec as #runtime::FixedCodec>::WIDTH;
                     let available = input.len();
                     let Some((bytes, suffix)) = input.split_at_checked(width) else {
-                        return Err(#decode_error::InputTooShort {
-                            required: width,
-                            available
-                        });
+                        return Err(#error::InputTooShort { required: width, available });
                     };
-                    Ok((Self { bytes }, suffix))
+                    Ok((Self { input: bytes }, suffix))
                 }
 
-                fn trailing_bytes_error(
-                    represented: usize,
-                    input: usize
-                ) -> Self::DecodeError {
-                    #decode_error::TrailingBytes {
-                        expected: represented,
-                        actual: input
-                    }
+                fn trailing_bytes_error(represented: usize, input: usize) -> Self::DecodeError {
+                    #error::TrailingBytes { expected: represented, actual: input }
                 }
 
                 fn as_bytes(&self) -> &'__wire_repr_wire [u8] {
-                    self.bytes
-                }
-            }
-
-            impl<'__wire_repr_wire> #runtime::ByteSource for #view<'__wire_repr_wire> {
-                #[inline(always)]
-                fn byte_len(&self) -> usize {
-                    self.as_bytes().len()
-                }
-
-                #[inline(always)]
-                fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) {
-                    sink.write(self.as_bytes());
-                }
-            }
-
-            impl<'__wire_repr_wire> #runtime::ByteSourceCursor for #view<'__wire_repr_wire> {
-                type Segments<'__wire_repr_source> = ::core::iter::Once<
-                    #runtime::ByteSegment<'__wire_repr_source>
-                >
-                where
-                    Self: '__wire_repr_source;
-
-                #[inline(always)]
-                fn segments(&self) -> Self::Segments<'_> {
-                    ::core::iter::once(#runtime::ByteSegment::Bytes(self.as_bytes()))
-                }
-
-                type Bytes<'__wire_repr_source> = ::core::iter::Copied<::core::slice::Iter<'__wire_repr_source, u8>>
-                where
-                    Self: '__wire_repr_source;
-
-                #[inline(always)]
-                fn bytes(&self) -> Self::Bytes<'_> {
-                    self.as_bytes().iter().copied()
+                    self.input
                 }
             }
 
             impl<'__wire_repr_wire> #runtime::WireViewValidation<'__wire_repr_wire>
-                for #view<'__wire_repr_wire>
+                for #state<&'__wire_repr_wire [u8]>
             {
-                type ValidationError = #decode_error;
+                type ValidationError = #error;
 
                 fn validate(&self) -> Result<(), Self::ValidationError> {
                     Ok(())
@@ -274,9 +152,87 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
             }
 
             impl #runtime::WireViewType for #name {
-                type DecodeError<'__wire_repr_wire> = #decode_error;
-                type View<'__wire_repr_wire> = #view<'__wire_repr_wire>;
+                type DecodeError<'__wire_repr_wire> = #error;
+                type View<'__wire_repr_wire> = #state<&'__wire_repr_wire [u8]>;
             }
         }
+    };
+
+    quote! {
+        /// A validated view of this nominal bitfield.
+        #vis trait #view: #runtime::ByteSource + #runtime::ByteSourceCursor {
+            /// Returns the exact represented storage bytes.
+            #[must_use]
+            fn as_bytes(&self) -> &[u8];
+
+            #(#getter_declarations)*
+        }
+
+        /// Concrete backing state for [`#view`].
+        #[doc(hidden)]
+        #[derive(Debug)]
+        #vis struct #state<T: ::core::convert::AsRef<[u8]>> {
+            input: T,
+        }
+
+        impl<T: ::core::convert::AsRef<[u8]> + Clone> Clone for #state<T> {
+            fn clone(&self) -> Self {
+                Self { input: self.input.clone() }
+            }
+        }
+
+        impl<T: ::core::convert::AsRef<[u8]> + Copy> Copy for #state<T> {}
+
+        impl<T: ::core::convert::AsRef<[u8]>> #state<T> {
+            #[inline(always)]
+            fn from_sequence(input: T) -> Self {
+                Self { input }
+            }
+        }
+
+        impl<T: ::core::convert::AsRef<[u8]>> #view for #state<T> {
+            #[inline(always)]
+            fn as_bytes(&self) -> &[u8] {
+                self.input.as_ref()
+            }
+
+            #(#getters)*
+        }
+
+        impl<T: ::core::convert::AsRef<[u8]>> #runtime::ByteSource for #state<T> {
+            #[inline(always)]
+            fn byte_len(&self) -> usize {
+                self.as_bytes().len()
+            }
+
+            #[inline(always)]
+            fn emit_to<S: #runtime::ByteSink>(&self, sink: &mut S) {
+                sink.write(self.as_bytes());
+            }
+        }
+
+        impl<T: ::core::convert::AsRef<[u8]>> #runtime::ByteSourceCursor for #state<T> {
+            type Segments<'__wire_repr_source> = ::core::iter::Once<
+                #runtime::ByteSegment<'__wire_repr_source>
+            >
+            where
+                Self: '__wire_repr_source;
+
+            #[inline(always)]
+            fn segments(&self) -> Self::Segments<'_> {
+                ::core::iter::once(#runtime::ByteSegment::Bytes(self.as_bytes()))
+            }
+
+            type Bytes<'__wire_repr_source> = ::core::iter::Copied<::core::slice::Iter<'__wire_repr_source, u8>>
+            where
+                Self: '__wire_repr_source;
+
+            #[inline(always)]
+            fn bytes(&self) -> Self::Bytes<'_> {
+                self.as_bytes().iter().copied()
+            }
+        }
+
+        #wire_view_implementations
     }
 }

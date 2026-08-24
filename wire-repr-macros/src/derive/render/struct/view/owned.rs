@@ -61,7 +61,10 @@ pub(super) fn render(input: Input<'_>) -> Output {
                         .as_ref()
                         .expect("nested fields have generated view paths");
                     let range = format_ident!("field_{index}_range");
-                    quote!(#stored: #child, #range: ::core::ops::Range<usize>)
+                    quote!(
+                        #stored: <#child as #runtime::WireViewType>::View<'static>,
+                        #range: ::core::ops::Range<usize>
+                    )
                 }
                 _ => quote!(#stored: ::core::ops::Range<usize>),
             }
@@ -184,9 +187,15 @@ pub(super) fn render(input: Input<'_>) -> Output {
                         .expect("nested fields have generated view paths");
                     let parse = if let Some(operation) = &field.operation_input {
                         let parse = format_ident!("__wire_repr_parse_with_{operation}");
-                        quote!(#child::#parse(nested_input, operation))
+                        quote!(
+                            <<#child as #runtime::WireViewType>::View<'static>>
+                                ::#parse(nested_input, operation)
+                        )
                     } else {
-                        quote!(<#child as #runtime::WireView<'static>>::parse_view(nested_input))
+                        quote!(
+                            <<#child as #runtime::WireViewType>::View<'static>
+                                as #runtime::WireView<'static>>::parse_view(nested_input)
+                        )
                     };
                     quote! {
                         let start = cursor;
@@ -261,7 +270,10 @@ pub(super) fn render(input: Input<'_>) -> Output {
                 let child = nested_view_paths[index]
                     .as_ref()
                     .expect("nested fields have generated view paths");
-                (quote!(#child), quote!(self.#stored.clone()))
+                (
+                    quote!(<#child as #runtime::WireViewType>::View<'static>),
+                    quote!(self.#stored.clone()),
+                )
             }
         };
         quote! {

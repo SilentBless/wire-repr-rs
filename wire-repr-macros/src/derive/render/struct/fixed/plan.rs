@@ -201,6 +201,47 @@ pub(super) fn render(input: Input<'_>) -> Output {
         .reduce(|left, right| quote!(::core::iter::Iterator::chain(#left, #right)))
         .expect("fixed structs have fields");
 
+    let commit_impl = if cfg!(feature = "bytes") {
+        quote! {
+            impl<'__wire_repr_value> #runtime::PreparedLayout for #plan<'__wire_repr_value> {
+                type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
+
+                fn commit_into<'__wire_repr_output>(
+                    self,
+                    output: &'__wire_repr_output mut #runtime::__private::BytesMut,
+                ) -> Result<Self::Written<'__wire_repr_output>, #runtime::OutputTooShortError> {
+                    let appended = #runtime::ByteSource::append_into_bytes_mut(&self, output)?;
+                    Ok(#runtime::Written::new(appended))
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl<'__wire_repr_value> #runtime::PreparedLayout for #plan<'__wire_repr_value> {
+                type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
+
+                fn commit_into<'__wire_repr_output>(
+                    self,
+                    output: &'__wire_repr_output mut [u8],
+                ) -> Result<
+                    (Self::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]),
+                    #runtime::OutputTooShortError,
+                > {
+                    let required = self.encoded_len;
+                    if output.len() < required {
+                        return Err(#runtime::OutputTooShortError {
+                            required,
+                            available: output.len(),
+                        });
+                    }
+                    let (bytes, suffix) = output.split_at_mut(required);
+                    #runtime::ByteSource::write_into(&self, bytes);
+                    Ok((#runtime::Written::new(bytes), suffix))
+                }
+            }
+        }
+    };
+
     let declaration = quote! {
         /// A prepared encoding for this wire representation.
         #vis struct #plan<'__wire_repr_value> {
@@ -258,28 +299,7 @@ pub(super) fn render(input: Input<'_>) -> Output {
             }
         }
 
-        impl<'__wire_repr_value> #runtime::PreparedLayout for #plan<'__wire_repr_value> {
-            type Written<'__wire_repr_output> = #runtime::Written<'__wire_repr_output>;
-
-            fn commit_into<'__wire_repr_output>(
-                self,
-                output: &'__wire_repr_output mut [u8],
-            ) -> Result<
-                (Self::Written<'__wire_repr_output>, &'__wire_repr_output mut [u8]),
-                #runtime::OutputTooShortError,
-            > {
-                let required = self.encoded_len;
-                if output.len() < required {
-                    return Err(#runtime::OutputTooShortError {
-                        required,
-                        available: output.len(),
-                    });
-                }
-                let (bytes, suffix) = output.split_at_mut(required);
-                #runtime::ByteSource::write_into(&self, bytes);
-                Ok((#runtime::Written::new(bytes), suffix))
-            }
-        }
+        #commit_impl
     };
 
     let wire_encode = quote! {

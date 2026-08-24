@@ -19,7 +19,7 @@ pub(super) fn render(model: WireBitfield, runtime: &TokenStream) -> syn::Result<
     let view = format_ident!("{name}View");
     let plan = format_ident!("{name}Plan");
     let field_proxy = format_ident!("{name}Fields");
-    let decode_error = format_ident!("{name}DecodeError");
+    let decode_error = format_ident!("{name}Error");
     let encode_error = format_ident!("{name}EncodeError");
     let codec = format_ident!("{}", storage.codec);
     let storage_type = format_ident!("{}", storage.ty);
@@ -38,14 +38,12 @@ pub(super) fn render(model: WireBitfield, runtime: &TokenStream) -> syn::Result<
         },
         types: view::Types {
             view: &view,
-            decode_error: &decode_error,
+            error: &decode_error,
             codec: &codec,
             storage_type: &storage_type,
         },
-        mode: view::Mode {
-            runtime,
-            owned_mode,
-        },
+        owned_mode,
+        runtime,
     });
     let encode_error_declaration = error::render(error::Input {
         vis: &vis,
@@ -74,6 +72,7 @@ pub(super) fn render(model: WireBitfield, runtime: &TokenStream) -> syn::Result<
             name: &name,
             view: &view,
             plan: &plan,
+            error: &decode_error,
             encode_error: &encode_error,
             codec: &codec,
         },

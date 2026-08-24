@@ -1,8 +1,6 @@
-//! Owned `bytes` struct interface rendering.
+//! Borrowed-slice dynamic struct interface rendering.
 
-#[path = "owned/read.rs"]
 mod read;
-#[path = "owned/write.rs"]
 mod write;
 
 use super::{Input, ReadFragments};
@@ -52,6 +50,7 @@ pub(super) fn render_with_read(input: Input<'_>, read: ReadFragments) -> TokenSt
     } = &shape;
 
     if input.operation.input_ty.is_some() {
+        let builder_method = input.preparation.builder_method;
         let ReadFragments {
             request_declarations,
             request_impls,
@@ -61,7 +60,6 @@ pub(super) fn render_with_read(input: Input<'_>, read: ReadFragments) -> TokenSt
         let write::Fragments {
             encode_request_declaration,
             encode_request_impl,
-            builder_method,
             inherent_methods: write_methods,
             encode_impl: _,
         } = write;
@@ -88,7 +86,6 @@ pub(super) fn render_with_read(input: Input<'_>, read: ReadFragments) -> TokenSt
         let write::Fragments {
             encode_request_declaration: _,
             encode_request_impl: _,
-            builder_method: _,
             inherent_methods: write_methods,
             encode_impl,
         } = write;

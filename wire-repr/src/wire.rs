@@ -2,6 +2,91 @@
 
 use crate::{OutputTooShortError, PreparedLayout};
 
+/// Storage retained by a generated wire view.
+///
+/// Implementations must preserve the original bytes when splitting or slicing. Checked
+/// operations return `None` for ranges outside the backing rather than panicking.
+#[doc(hidden)]
+pub trait ViewBacking: Sized + Clone {
+    /// Consumes this backing and splits it into a prefix of `length` bytes and its suffix.
+    #[must_use]
+    fn split_at(self, length: usize) -> Option<(Self, Self)>;
+
+    /// Returns a checked immutable slice of this backing.
+    #[must_use]
+    fn checked_slice(&self, range: core::ops::Range<usize>) -> Option<Self>;
+
+    /// Returns the retained bytes without allocation.
+    fn as_bytes(&self) -> &[u8];
+}
+
+impl ViewBacking for &[u8] {
+    fn split_at(self, length: usize) -> Option<(Self, Self)> {
+        self.get(..length).zip(self.get(length..))
+    }
+
+    fn checked_slice(&self, range: core::ops::Range<usize>) -> Option<Self> {
+        self.get(range)
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+#[cfg(feature = "bytes")]
+impl ViewBacking for bytes::Bytes {
+    fn split_at(mut self, length: usize) -> Option<(Self, Self)> {
+        (length <= self.len()).then(|| {
+            let prefix = self.split_to(length);
+            (prefix, self)
+        })
+    }
+
+    fn checked_slice(&self, range: core::ops::Range<usize>) -> Option<Self> {
+        (range.start <= range.end && range.end <= self.len()).then(|| self.slice(range))
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+/// Normalizes accepted generated view inputs into retained backing storage.
+#[doc(hidden)]
+pub trait ViewInput {
+    /// The backing retained by the generated view.
+    type Backing: ViewBacking;
+
+    /// Converts this input without copying its bytes.
+    fn into_view_backing(self) -> Self::Backing;
+}
+
+impl ViewInput for &[u8] {
+    type Backing = Self;
+
+    fn into_view_backing(self) -> Self::Backing {
+        self
+    }
+}
+
+impl<'wire, const N: usize> ViewInput for &'wire [u8; N] {
+    type Backing = &'wire [u8];
+
+    fn into_view_backing(self) -> Self::Backing {
+        self
+    }
+}
+
+#[cfg(feature = "bytes")]
+impl ViewInput for bytes::Bytes {
+    type Backing = Self;
+
+    fn into_view_backing(self) -> Self::Backing {
+        self
+    }
+}
+
 /// Associates a semantic wire value with its generated read view.
 #[doc(hidden)]
 pub trait WireViewType {
@@ -461,6 +546,77 @@ impl<V> ExactSizeIterator for FixedViewIterator<'_, V> {
 
 impl<V> core::iter::FusedIterator for FixedViewIterator<'_, V> {}
 
+/// An infallible iterator over fixed-width views retaining an arbitrary backing.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct GenericFixedViewIterator<B: ViewBacking, V> {
+    remaining: Option<B>,
+    item_width: usize,
+    make_view: fn(B) -> V,
+}
+
+impl<B: ViewBacking, V> GenericFixedViewIterator<B, V> {
+    /// Validates fixed-width sequence framing and creates its iterator.
+    #[doc(hidden)]
+    pub fn new(
+        input: B,
+        item_width: usize,
+        make_view: fn(B) -> V,
+    ) -> Result<Self, FixedViewSequenceError> {
+        if item_width == 0 {
+            return Err(FixedViewSequenceError::InvalidItemWidth);
+        }
+        let trailing = input.as_bytes().len() % item_width;
+        if trailing != 0 {
+            return Err(FixedViewSequenceError::TrailingPartialItem {
+                item_width,
+                trailing,
+            });
+        }
+        Ok(Self {
+            remaining: Some(input),
+            item_width,
+            make_view,
+        })
+    }
+}
+
+impl<B: ViewBacking, V> Iterator for GenericFixedViewIterator<B, V> {
+    type Item = V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let backing = self.remaining.take()?;
+        let (item, remaining) = backing.split_at(self.item_width)?;
+        self.remaining = Some(remaining);
+        Some((self.make_view)(item))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self
+            .remaining
+            .as_ref()
+            .map_or(0, |backing| backing.as_bytes().len() / self.item_width);
+        (len, Some(len))
+    }
+}
+
+impl<B: ViewBacking, V> DoubleEndedIterator for GenericFixedViewIterator<B, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let len = self.remaining.as_ref()?.as_bytes().len();
+        if len == 0 {
+            return None;
+        }
+        let backing = self.remaining.take()?;
+        let (remaining, item) = backing.split_at(len - self.item_width)?;
+        self.remaining = Some(remaining);
+        Some((self.make_view)(item))
+    }
+}
+
+impl<B: ViewBacking, V> ExactSizeIterator for GenericFixedViewIterator<B, V> {}
+
+impl<B: ViewBacking, V> core::iter::FusedIterator for GenericFixedViewIterator<B, V> {}
+
 /// Failure while advancing through a sequence of variable-width wire views.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ViewCursorError<E> {
@@ -723,4 +879,106 @@ pub trait WireEncode: Sized {
     fn prepare<'value>(self) -> Result<Self::Plan<'value>, Self::EncodeError>
     where
         Self: 'value;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GenericFixedViewIterator, ViewBacking};
+
+    #[test]
+    fn borrowed_backing_split_and_slice_preserve_identity() {
+        let input = &[0, 1, 2, 3, 4][..];
+        let (prefix, suffix) = ViewBacking::split_at(input, 3).unwrap();
+        let nested = ViewBacking::checked_slice(&prefix, 1..3).unwrap();
+
+        assert_eq!(ViewBacking::as_bytes(&prefix), &[0, 1, 2]);
+        assert_eq!(ViewBacking::as_bytes(&suffix), &[3, 4]);
+        assert_eq!(ViewBacking::as_bytes(&nested), &[1, 2]);
+        assert_eq!(prefix.as_ptr(), input.as_ptr());
+        assert_eq!(suffix.as_ptr(), input[3..].as_ptr());
+        assert_eq!(nested.as_ptr(), input[1..].as_ptr());
+        assert!(ViewBacking::split_at(input, 6).is_none());
+        assert!(ViewBacking::checked_slice(&input, 3..6).is_none());
+    }
+
+    #[test]
+    fn generic_fixed_views_consume_backing_without_cloning() {
+        #[derive(Debug)]
+        struct CountingBacking<'a> {
+            bytes: &'a [u8],
+            clones: &'a core::cell::Cell<usize>,
+        }
+
+        impl Clone for CountingBacking<'_> {
+            fn clone(&self) -> Self {
+                self.clones.set(self.clones.get() + 1);
+                Self {
+                    bytes: self.bytes,
+                    clones: self.clones,
+                }
+            }
+        }
+
+        impl ViewBacking for CountingBacking<'_> {
+            fn split_at(self, length: usize) -> Option<(Self, Self)> {
+                let (prefix, suffix) = self.bytes.get(..length).zip(self.bytes.get(length..))?;
+                Some((
+                    Self {
+                        bytes: prefix,
+                        clones: self.clones,
+                    },
+                    Self {
+                        bytes: suffix,
+                        clones: self.clones,
+                    },
+                ))
+            }
+
+            fn checked_slice(&self, range: core::ops::Range<usize>) -> Option<Self> {
+                self.bytes.get(range).map(|bytes| Self {
+                    bytes,
+                    clones: self.clones,
+                })
+            }
+
+            fn as_bytes(&self) -> &[u8] {
+                self.bytes
+            }
+        }
+
+        fn first_byte(backing: CountingBacking<'_>) -> u8 {
+            backing.bytes[0]
+        }
+
+        let clones = core::cell::Cell::new(0);
+        let backing = CountingBacking {
+            bytes: &[1, 2, 3, 4, 5, 6],
+            clones: &clones,
+        };
+        let mut views = GenericFixedViewIterator::new(backing, 2, first_byte).unwrap();
+
+        assert_eq!(views.next(), Some(1));
+        assert_eq!(views.next_back(), Some(5));
+        assert_eq!(views.next(), Some(3));
+        assert_eq!(views.next_back(), None);
+        assert_eq!(clones.get(), 0);
+    }
+
+    #[cfg(feature = "bytes")]
+    #[test]
+    fn bytes_backing_split_and_slice_share_storage() {
+        let backing = bytes::Bytes::from_static(&[0, 1, 2, 3, 4]);
+        let original = backing.clone();
+        let (prefix, suffix) = ViewBacking::split_at(backing, 3).unwrap();
+        let nested = ViewBacking::checked_slice(&prefix, 1..3).unwrap();
+
+        assert_eq!(ViewBacking::as_bytes(&prefix), &[0, 1, 2]);
+        assert_eq!(ViewBacking::as_bytes(&suffix), &[3, 4]);
+        assert_eq!(ViewBacking::as_bytes(&nested), &[1, 2]);
+        assert_eq!(prefix.as_ptr(), original.as_ptr());
+        assert_eq!(suffix.as_ptr(), original[3..].as_ptr());
+        assert_eq!(nested.as_ptr(), original[1..].as_ptr());
+        assert!(ViewBacking::split_at(original.clone(), 6).is_none());
+        assert!(ViewBacking::checked_slice(&original, 3..6).is_none());
+    }
 }

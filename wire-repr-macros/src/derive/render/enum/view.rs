@@ -110,9 +110,9 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                         .as_ref()
                         .expect("body variants have generated view paths");
                     if *owned {
-                        quote!(#variant_name(#body_view),)
+                        quote!(#variant_name(<#body_view as #runtime::WireViewType>::View<'static>),)
                     } else {
-                        quote!(#variant_name(#body_view<'__wire_repr_wire>),)
+                        quote!(#variant_name(<#body_view as #runtime::WireViewType>::View<'__wire_repr_wire>),)
                     }
                 }
                 None => quote!(#variant_name,),
@@ -160,7 +160,7 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                         return quote! {
                             #[doc = concat!("Returns the `", stringify!(#variant_name), "` body view when selected.")]
                             #[must_use]
-                            #vis fn #method(&self) -> Option<#body_view> {
+                            #vis fn #method(&self) -> Option<<#body_view as #runtime::WireViewType>::View<'static>> {
                                 match &self.variant {
                                     #view_variant::#variant_name(body) => Some(body.clone()),
                                     _ => None,
@@ -171,7 +171,7 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                     quote! {
                         #[doc = concat!("Returns the `", stringify!(#variant_name), "` body view when selected.")]
                         #[must_use]
-                        #vis fn #method(&self) -> Option<#body_view<'__wire_repr_wire>> {
+                        #vis fn #method(&self) -> Option<<#body_view as #runtime::WireViewType>::View<'__wire_repr_wire>> {
                             match self.variant {
                                 #view_variant::#variant_name(body) => Some(body),
                                 _ => None,

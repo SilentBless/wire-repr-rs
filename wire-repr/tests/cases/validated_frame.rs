@@ -44,7 +44,7 @@ fn second(value: u8) -> Result<(), PacketError> {
         Ok(())
     }
 }
-fn model(view: &PacketView<'_>) -> Result<(), PacketError> {
+fn model(view: &impl PacketView) -> Result<(), PacketError> {
     if view.kind() == view.code() {
         Err(PacketError::Model)
     } else {
@@ -103,20 +103,11 @@ pub struct Frame<'wire> {
 
 #[test]
 fn validated_fixed_views_run_field_then_model_validators_and_map_structural_errors() {
+    assert!(matches!(Packet::view(&[1, 1]), Err(PacketError::First(1))));
+    assert!(matches!(Packet::view(&[2, 9]), Err(PacketError::Second(2))));
+    assert!(matches!(Packet::view(&[3, 3]), Err(PacketError::Model)));
     assert!(matches!(
-        Packet::view(&[1, 1]).without_trailing(),
-        Err(PacketError::First(1))
-    ));
-    assert!(matches!(
-        Packet::view(&[2, 9]).without_trailing(),
-        Err(PacketError::Second(2))
-    ));
-    assert!(matches!(
-        Packet::view(&[3, 3]).without_trailing(),
-        Err(PacketError::Model)
-    ));
-    assert!(matches!(
-        Packet::view(&[3]).without_trailing(),
+        Packet::view(&[3]),
         Err(PacketError::Decode(PacketDecodeError::InputTooShort {
             field: "code",
             required: 1,
@@ -124,33 +115,19 @@ fn validated_fixed_views_run_field_then_model_validators_and_map_structural_erro
         }))
     ));
     assert!(matches!(
-        Packet::view(&[3, 4, 5]).without_trailing(),
+        Packet::view(&[3, 4, 5]),
         Err(PacketError::Decode(PacketDecodeError::TrailingBytes {
             expected: 2,
             actual: 3
         }))
     ));
     assert!(matches!(
-        Packet::view(&[1, 1, 5]).without_trailing(),
+        Packet::view(&[1, 1, 5]),
         Err(PacketError::First(1))
     ));
 
-    let (view, suffix) = Packet::view(&[3, 4, 5]).with_remainder().unwrap();
+    let view = Packet::view(&[3, 4]).unwrap();
     assert_eq!(view.code(), 4);
-    assert_eq!(suffix, &[5]);
-}
-
-#[test]
-fn unchecked_views_retain_structural_errors_and_skip_validation() {
-    let view = Packet::view(&[1, 1])
-        .unchecked()
-        .without_trailing()
-        .unwrap();
-    assert_eq!(view.kind(), 1);
-    assert!(matches!(
-        Packet::view(&[1]).unchecked().without_trailing(),
-        Err(PacketDecodeError::InputTooShort { .. })
-    ));
 }
 
 #[test]
@@ -171,8 +148,15 @@ fn dynamic_views_validate_after_framing() {
 /// Child semantic failure.
 #[derive(Debug)]
 pub enum ChildError {
+    /// Structural child decoding failed.
+    Decode(ValidatedChildDecodeError),
     /// The child value is invalid.
     Invalid(u8),
+}
+impl From<ValidatedChildDecodeError> for ChildError {
+    fn from(error: ValidatedChildDecodeError) -> Self {
+        Self::Decode(error)
+    }
 }
 impl core::fmt::Display for ChildError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -209,8 +193,16 @@ pub struct ParentWithoutError {
 /// A second child semantic failure type.
 #[derive(Debug)]
 pub enum SecondChildError {
+    /// Structural child decoding failed.
+    Decode(SecondValidatedChildDecodeError),
     /// The second child value is invalid.
     Invalid(u8),
+}
+
+impl From<SecondValidatedChildDecodeError> for SecondChildError {
+    fn from(error: SecondValidatedChildDecodeError) -> Self {
+        Self::Decode(error)
+    }
 }
 
 impl core::fmt::Display for SecondChildError {

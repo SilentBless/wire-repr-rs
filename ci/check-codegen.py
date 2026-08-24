@@ -213,6 +213,7 @@ def harness(root: Path, fixtures: tuple[Fixture, ...], mode: str) -> Path:
                 'edition = "2024"',
                 "",
                 "[dependencies]",
+                'thiserror = { version = "2", default-features = false }',
                 f'wire-repr = {{ path = {json.dumps(str(root / "wire-repr"))}{wire_features} }}',
                 *(('bytes = { version = "1", default-features = false }',) if mode == "bytes" else ()),
                 "",

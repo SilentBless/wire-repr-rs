@@ -41,7 +41,6 @@ pub fn layout_handwritten_positioned(word: u16, output: &mut [u8]) -> usize {
 #[inline(never)]
 pub fn layout_generated_bitfield(bytes: &[u8]) -> u8 {
     Flags::view(bytes)
-        .without_trailing()
         .map_or(u8::MAX, |flags| {
             u8::from(flags.enabled()) | (flags.mode() << 1)
         })

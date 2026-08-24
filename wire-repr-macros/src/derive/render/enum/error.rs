@@ -105,9 +105,15 @@ pub(super) fn render(input: Input<'_>) -> Output {
                         .as_ref()
                         .expect("body variants have generated view paths");
                     let error = if owned {
-                        quote!(<#body_view as #runtime::WireView<'static>>::DecodeError)
+                        quote!(
+                            <<#body_view as #runtime::WireViewType>::View<'static>
+                                as #runtime::WireView<'static>>::DecodeError
+                        )
                     } else {
-                        quote!(<#body_view<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::DecodeError)
+                        quote!(
+                            <<#body_view as #runtime::WireViewType>::View<'__wire_repr_wire>
+                                as #runtime::WireView<'__wire_repr_wire>>::DecodeError
+                        )
                     };
                     quote! {
                         #[doc = concat!("Nested decode error for variant `", stringify!(#variant_name), "`.")]
@@ -144,12 +150,12 @@ pub(super) fn render(input: Input<'_>) -> Output {
                     if owned {
                         quote!(
                             /// Nested semantic validation failed in this variant body.
-                            #variant_name(<#body_view as #runtime::WireViewValidation<'static>>::ValidationError),
+                            #variant_name(<<#body_view as #runtime::WireViewType>::View<'static> as #runtime::WireViewValidation<'static>>::ValidationError),
                         )
                     } else {
                         quote!(
                             /// Nested semantic validation failed in this variant body.
-                            #variant_name(<#body_view<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::ValidationError),
+                            #variant_name(<<#body_view as #runtime::WireViewType>::View<'__wire_repr_wire> as #runtime::WireViewValidation<'__wire_repr_wire>>::ValidationError),
                         )
                     }
                 })

@@ -3,6 +3,7 @@
 mod builder;
 mod error;
 mod fixed;
+mod flat;
 mod interface;
 mod plan;
 mod preparation;
@@ -12,11 +13,19 @@ mod view;
 
 use super::super::model::{Codec, FieldKind, WireStruct};
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote};
+use std::collections::BTreeMap;
+
+pub(super) struct Validator {
+    pub(super) callback: TokenStream,
+    pub(super) error: syn::Path,
+    pub(super) variant: syn::Ident,
+    pub(super) field: Option<syn::Ident>,
+    pub(super) label: String,
+}
 
 pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<TokenStream> {
-    if !cfg!(feature = "bytes")
-        && model.operation_input.is_none()
+    if model.operation_input.is_none()
         && model
             .fields
             .iter()
@@ -24,6 +33,44 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     {
         return fixed::render(model, runtime);
     }
+
+    let descriptor_bounded = model
+        .fields
+        .iter()
+        .all(|field| matches!(field.kind, FieldKind::Fixed(_) | FieldKind::Bytes { .. }))
+        && model
+            .fields
+            .iter()
+            .any(|field| matches!(field.kind, FieldKind::Bytes { .. }));
+    let descriptor_rest = matches!(
+        model.fields.last().map(|field| &field.kind),
+        Some(FieldKind::Rest)
+    ) && model
+        .fields
+        .iter()
+        .filter(|field| matches!(field.kind, FieldKind::Rest))
+        .count()
+        == 1
+        && model
+            .fields
+            .iter()
+            .all(|field| matches!(field.kind, FieldKind::Fixed(_) | FieldKind::Rest));
+    let descriptor_read = model.operation_input.is_none()
+        && model.validation_error.is_none()
+        && model.validators.is_empty()
+        && model
+            .fields
+            .iter()
+            .any(|field| matches!(field.kind, FieldKind::Fixed(_)))
+        && (descriptor_bounded || descriptor_rest)
+        && model.fields.iter().all(|field| {
+            field.validators.is_empty()
+                && field.computation.is_none()
+                && field.position.is_none()
+                && field.padding_before == 0
+                && field.alignment_before.is_none()
+                && field.operation_input.is_none()
+        });
 
     let WireStruct {
         vis,
@@ -63,6 +110,11 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         .iter()
         .map(|field| variant_name(&field.name.to_string()))
         .collect();
+    let inferred_validators = if validation_error.is_none() {
+        inferred_validators(&fields, &variants, &model_validators)?
+    } else {
+        Vec::new()
+    };
     let plans: Vec<_> = (0..fields.len())
         .map(|index| format_ident!("field_{index}"))
         .collect();
@@ -132,7 +184,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         .iter()
         .map(|field| {
             (matches!(field.kind, FieldKind::Nested) && field.operation_input.is_some())
-                .then(|| super::generated_decode_error_path(&field.ty))
+                .then(|| super::generated_decode_error_path(&field.ty, runtime))
                 .transpose()
         })
         .collect::<syn::Result<_>>()?;
@@ -218,11 +270,15 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         };
     let custom_validation_error = validation_error;
     let validation_error = format_ident!("{name}ValidationError");
+    let aggregate_error = format_ident!("{name}Error");
     let self_type = if let Some(lifetime) = &wire_lifetime {
         quote!(#name<#lifetime>)
     } else {
         quote!(#name)
     };
+    let flat_impl_generics = wire_lifetime
+        .as_ref()
+        .map_or_else(|| quote!(), |lifetime| quote!(<#lifetime>));
 
     let selection = selection::render(selection::Input {
         schema: selection::Schema {
@@ -242,41 +298,56 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             selection_plan_type: &selection_plan_type,
             view: &view,
         },
+        view_projection: descriptor_read.then_some(selection::ViewProjection::Descriptor),
         runtime,
     });
     let selection::Output {
         field_proxy,
         declaration: selection_declaration,
     } = selection;
-    let view_declaration = view::render(view::Input {
-        schema: view::Schema {
+    let view_declaration = if descriptor_read {
+        flat::render_view(flat::ViewInput {
             vis: &vis,
             fields: &fields,
             labels: &labels,
-            variants: &variants,
-        },
-        geometry: view::Geometry {
-            controlled_by: &controlled_by,
-            position_sources: &position_sources,
-            nested_view_paths: &nested_view_paths,
-            fixed_sequence: fixed_sequence_width.is_some(),
-        },
-        types: view::Types {
             view: &view,
             decode_error: &decode_error,
-            view_error_type: &view_error_type,
             field_proxy: &field_proxy,
-        },
-        operation: view::Operation {
-            operation_input_ty,
-            operation_parse: operation_parse.as_ref(),
-        },
-        runtime,
-    })
-    .declaration;
+            self_type: &self_type,
+            impl_generics: &flat_impl_generics,
+            runtime,
+        })
+    } else {
+        view::render(view::Input {
+            schema: view::Schema {
+                vis: &vis,
+                fields: &fields,
+                labels: &labels,
+                variants: &variants,
+            },
+            geometry: view::Geometry {
+                controlled_by: &controlled_by,
+                position_sources: &position_sources,
+                nested_view_paths: &nested_view_paths,
+                fixed_sequence: fixed_sequence_width.is_some(),
+            },
+            types: view::Types {
+                view: &view,
+                decode_error: &decode_error,
+                view_error_type: &view_error_type,
+                field_proxy: &field_proxy,
+            },
+            operation: view::Operation {
+                operation_input_ty,
+                operation_parse: operation_parse.as_ref(),
+            },
+            runtime,
+        })
+        .declaration
+    };
     let validation::Output {
         error_type: validation_error_type,
-        declaration: validation_declaration,
+        declaration: legacy_validation_declaration,
     } = validation::render(validation::Input {
         schema: validation::Schema {
             vis: &vis,
@@ -289,14 +360,21 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             model_validators: &model_validators,
             custom_validation_error: custom_validation_error.as_ref(),
             has_nested,
+            inferred: &inferred_validators,
         },
         types: validation::Types {
             view: &view,
             validation_error: &validation_error,
+            aggregate_error: &aggregate_error,
             view_error_type: &view_error_type,
         },
         runtime,
     });
+    let validation_declaration = if descriptor_read {
+        quote!()
+    } else {
+        legacy_validation_declaration
+    };
     let plan_output = plan::render(plan::Input {
         schema: plan::Schema {
             vis: &vis,
@@ -402,7 +480,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let builder_declaration = builder.declaration;
     let builder_method = builder.method;
 
-    let interface_declaration = interface::render(interface::Input {
+    let interface_input = interface::Input {
         identity: interface::Identity {
             name: &name,
             view: &view,
@@ -445,7 +523,20 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             fixed_sequence_width: fixed_sequence_width.as_ref(),
             has_validation,
         },
-    });
+    };
+    let interface_declaration = if descriptor_read {
+        interface::render_with_read(
+            interface_input,
+            flat::render_read(flat::ReadInput {
+                vis: &vis,
+                view: &view,
+                decode_error: &decode_error,
+                runtime,
+            }),
+        )
+    } else {
+        interface::render(interface_input)
+    };
 
     Ok(quote! {
         #error_declaration
@@ -485,4 +576,79 @@ fn variant_name(name: &str) -> proc_macro2::Ident {
         })
         .collect();
     format_ident!("{value}")
+}
+
+fn inferred_validators(
+    fields: &[super::super::model::Field],
+    variants: &[syn::Ident],
+    model_validators: &[syn::Path],
+) -> syn::Result<Vec<Validator>> {
+    let mut validators = Vec::new();
+    let mut names = BTreeMap::<String, usize>::new();
+
+    for (field, field_variant) in fields.iter().zip(variants) {
+        for callback in &field.validators {
+            validators.push(inferred_validator(
+                callback,
+                Some(&field.name),
+                field_variant,
+                &mut names,
+            )?);
+        }
+    }
+    for callback in model_validators {
+        validators.push(inferred_validator(
+            callback,
+            None,
+            &format_ident!("Model"),
+            &mut names,
+        )?);
+    }
+
+    Ok(validators)
+}
+
+fn inferred_validator(
+    callback: &syn::Path,
+    field: Option<&syn::Ident>,
+    prefix: &syn::Ident,
+    names: &mut BTreeMap<String, usize>,
+) -> syn::Result<Validator> {
+    let callback_name = callback
+        .segments
+        .last()
+        .ok_or_else(|| syn::Error::new_spanned(callback, "validator path cannot be empty"))?
+        .ident
+        .to_string();
+    let callback_variant = variant_name(callback_name.trim_start_matches("r#"));
+    let base = format!("{prefix}{callback_variant}");
+    let occurrence = names.entry(base.clone()).or_default();
+    *occurrence += 1;
+    let variant = if *occurrence == 1 {
+        format_ident!("{base}")
+    } else {
+        format_ident!("{base}{}", *occurrence)
+    };
+    let label = callback.to_token_stream().to_string().replace(" :: ", "::");
+
+    Ok(Validator {
+        callback: callback.to_token_stream(),
+        error: crate::validator::error_type(callback)?,
+        variant,
+        field: field.cloned(),
+        label,
+    })
+}
+
+fn validator_error_assertions(validators: &[Validator]) -> TokenStream {
+    let assertions = validators.iter().map(|validator| {
+        let error = &validator.error;
+        quote! {
+            const _: fn() = || {
+                fn requires_error<Error: ::core::error::Error + 'static>() {}
+                requires_error::<#error>();
+            };
+        }
+    });
+    quote!(#(#assertions)*)
 }

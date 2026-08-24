@@ -1,13 +1,10 @@
-//! error: validators require exactly one `error = ErrorType`
+//! error: wire validators must return `Result<(), Error>`
 
-use wire_repr::Wire;
+use wire_repr::validator;
 
-fn validate(_: u8) -> Result<(), ()> {
-    Ok(())
-}
+struct ValidationError;
 
-#[derive(Wire)]
-struct Packet {
-    #[wire(validate = validate)]
-    value: u8,
+#[validator]
+fn validate(_: u8) -> Result<u8, ValidationError> {
+    Ok(1)
 }

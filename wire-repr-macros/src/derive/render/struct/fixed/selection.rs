@@ -113,9 +113,9 @@ pub(super) fn render(input: Input<'_>) -> TokenStream {
                     true
                 }
             }
-            impl<'__wire_repr_wire> #runtime::FieldSelection<#view<'__wire_repr_wire>> for #marker {
+            impl<T: #view> #runtime::FieldSelection<T> for #marker {
                 #[inline(always)]
-                fn visit_ranges<V>(&self, target: &#view<'__wire_repr_wire>, visitor: &mut V)
+                fn visit_ranges<V>(&self, target: &T, visitor: &mut V)
                 where
                     V: FnMut(::core::ops::Range<usize>),
                 {

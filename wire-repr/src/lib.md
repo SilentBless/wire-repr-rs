@@ -120,7 +120,7 @@ struct Flags {
 let flags = Flags::view(input).without_trailing()?;
 assert!(flags.enabled());
 assert_eq!(flags.mode(), 5);
-# Ok::<(), FlagsDecodeError>(())
+# Ok::<(), FlagsError>(())
 ```
 
 The generated `FlagsView` owns one physical scalar span. Unprojected bits are accepted on

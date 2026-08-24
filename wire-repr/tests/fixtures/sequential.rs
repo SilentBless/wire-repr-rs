@@ -27,17 +27,15 @@ struct DynamicPacket<'wire> {
 
 #[inline(never)]
 pub fn sequential_generated_fixed_decode(bytes: &[u8]) -> u16 {
-    FixedPacket::view(bytes)
-        .with_remainder()
-        .map_or(u16::MAX, |(packet, _)| packet.word())
+    FixedPacket::view(bytes).map_or(u16::MAX, |packet| packet.word())
 }
 
 #[inline(never)]
 pub fn sequential_handwritten_fixed_decode(bytes: &[u8]) -> u16 {
-    let Some(bytes) = bytes.get(..2) else {
+    let [high, low] = bytes else {
         return u16::MAX;
     };
-    u16::from_be_bytes([bytes[0], bytes[1]])
+    u16::from_be_bytes([*high, *low])
 }
 
 #[inline(never)]
@@ -59,7 +57,6 @@ pub fn sequential_handwritten_fixed_encode(word: u16, output: &mut [u8]) -> usiz
 #[inline(never)]
 pub fn sequential_generated_bounded_decode(bytes: &[u8]) -> u8 {
     DynamicPacket::view(bytes)
-        .without_trailing()
         .ok()
         .and_then(|packet| {
             packet

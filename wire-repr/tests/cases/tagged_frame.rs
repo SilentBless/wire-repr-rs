@@ -84,8 +84,16 @@ impl FixedCodec for FragmentedTag {
 /// Semantic ping-body validation failure.
 #[derive(Debug)]
 pub enum PingError {
+    /// Structural ping decoding failed.
+    Decode(PingDecodeError),
     /// The ping value must not be zero.
     Zero,
+}
+
+impl From<PingDecodeError> for PingError {
+    fn from(error: PingDecodeError) -> Self {
+        Self::Decode(error)
+    }
 }
 
 impl core::fmt::Display for PingError {

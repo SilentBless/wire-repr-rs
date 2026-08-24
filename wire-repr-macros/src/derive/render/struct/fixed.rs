@@ -51,6 +51,12 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let position_sources = preparation.position_sources;
     let view = format_ident!("{name}View");
     let decode_error = format_ident!("{name}DecodeError");
+    let inferred_validation = validation_error.is_none()
+        && (!model_validators.is_empty()
+            || fields.iter().any(|field| !field.validators.is_empty()));
+    let inferred_validation_error =
+        inferred_validation.then(|| format_ident!("{name}ValidationError"));
+    let inferred_error = inferred_validation.then(|| format_ident!("{name}Error"));
     let encode_error = format_ident!("{name}EncodeError");
     let plan = format_ident!("{name}Plan");
     let field_proxy = format_ident!("{name}Fields");
@@ -62,6 +68,11 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         .iter()
         .map(|field| variant_name(&field.name.to_string()))
         .collect();
+    let inferred_validators = if inferred_validation {
+        super::inferred_validators(&fields, &variants, &model_validators)?
+    } else {
+        Vec::new()
+    };
     let field_plans: Vec<_> = (0..fields.len())
         .map(|index| format_ident!("field_{index}"))
         .collect();
@@ -81,6 +92,7 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
     let validation_error_type = validation_error
         .as_ref()
         .map(|error| quote!(#error))
+        .or_else(|| inferred_error.as_ref().map(|error| quote!(#error)))
         .unwrap_or_else(|| quote!(#decode_error));
     let (impl_generics, self_type) = if let Some(lifetime) = &wire_lifetime {
         (quote!(<#lifetime>), quote!(#name<#lifetime>))
@@ -110,12 +122,15 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         },
         types: error::Types {
             decode_error: &decode_error,
+            validation_error: inferred_validation_error.as_ref(),
+            aggregate_error: inferred_error.as_ref(),
             encode_error: &encode_error,
         },
         geometry: error::Geometry {
             has_positions,
             has_geometry,
         },
+        validators: &inferred_validators,
         runtime,
     });
     let view_declaration = view::render(view::Input {
@@ -135,6 +150,8 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
         validation: view::Validation {
             model_validators: &model_validators,
             error_type: &validation_error_type,
+            inferred_error: inferred_validation_error.as_ref(),
+            inferred: &inferred_validators,
         },
         runtime,
     });
@@ -184,15 +201,15 @@ pub(super) fn render(model: WireStruct, runtime: &TokenStream) -> syn::Result<To
             encode_error: &encode_error,
         },
         types: interface::Types {
-            wire_lifetime: wire_lifetime.as_ref(),
             self_type: &self_type,
             impl_generics: &impl_generics,
         },
         sequence: interface::Sequence {
             plain: plain_fixed_sequence,
-            has_custom_validation_error: validation_error.is_some(),
+            has_validation: validation_error.is_some() || inferred_validation,
             fixed_widths: &fixed_widths,
-            validation_error: validation_error.as_ref(),
+            validation_error: &validation_error_type,
+            decode_error: &decode_error,
         },
         runtime,
     });

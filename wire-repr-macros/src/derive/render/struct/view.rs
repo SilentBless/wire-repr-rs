@@ -233,14 +233,17 @@ fn render_borrowed(input: Input<'_>) -> Output {
                     if let Some(operation) = &field.operation_input {
                         let parse = format_ident!("__wire_repr_parse_with_{operation}");
                         quote! {
-                            let (#field_name, suffix) = #child_view::#parse(remaining, operation)
+                            let (#field_name, suffix) =
+                                <<#child_view as #runtime::WireViewType>::View<'__wire_repr_wire>>
+                                    ::#parse(remaining, operation)
                                 .map_err(#decode_error::#variant)?;
                             remaining = suffix;
                         }
                     } else {
                         quote! {
                             let (#field_name, suffix) =
-                                <#child_view<'__wire_repr_wire> as #runtime::WireView<'__wire_repr_wire>>::parse_view(
+                                <<#child_view as #runtime::WireViewType>::View<'__wire_repr_wire>
+                                    as #runtime::WireView<'__wire_repr_wire>>::parse_view(
                                     remaining,
                                 )
                                 .map_err(#decode_error::#variant)?;
@@ -325,7 +328,10 @@ fn render_borrowed(input: Input<'_>) -> Output {
                 let child_view = nested_view_paths[index]
                     .as_ref()
                     .expect("nested fields have generated view paths");
-                (quote!(#child_view<'__wire_repr_wire>), quote!(self.#stored))
+                (
+                    quote!(<#child_view as #runtime::WireViewType>::View<'__wire_repr_wire>),
+                    quote!(self.#stored),
+                )
             }
             FieldKind::Prefix(codec) => (
                 quote!(<#codec as #runtime::PrefixCodec>::Value<'__wire_repr_wire>),

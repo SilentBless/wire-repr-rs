@@ -239,42 +239,88 @@ fn fixed_view_iterator_transfers_owned_item_ranges() {
 }
 
 #[test]
-fn generated_fixed_sequence_owns_each_item_range() {
-    let mut views = OwnedBody::views(Bytes::from_static(&[4, 5])).unwrap();
-    let first = views.next().unwrap();
-    let cloned = first.clone();
-    assert_eq!(first.as_bytes().as_ptr(), cloned.as_bytes().as_ptr());
-    drop(first);
+fn generated_nominal_bitfield_retains_direct_bytes_and_borrows_sequence_input() {
+    let input = Bytes::from(vec![0x80, 0x0b]);
+    let input_pointer = input.as_ptr();
+    let exact = OwnedFlags::view(input).unwrap();
+    assert_eq!(exact.as_bytes().as_ptr(), input_pointer);
+    assert!(exact.enabled());
+    assert_eq!(exact.mode(), 5);
 
-    let (sender, receiver) = std::sync::mpsc::channel();
-    sender.send(cloned).unwrap();
-    assert_eq!(receiver.recv().unwrap().value(), 4);
-    assert_eq!(views.next().unwrap().value(), 5);
+    let input = Bytes::from_static(&[0x80, 0x0b, 0x00, 0x02]);
+    let input_pointer = input.as_ptr();
+    let mut views = OwnedFlags::views(&input).unwrap();
+    assert_eq!(views.len(), 2);
+    let first = views.next().unwrap();
+    assert_eq!(first.as_bytes().as_ptr(), input_pointer);
+    assert!(first.enabled());
+    let last = views.next_back().unwrap();
+    assert_eq!(last.as_bytes().as_ptr(), input_pointer.wrapping_add(2));
+    assert_eq!(last.mode(), 1);
+    assert!(views.next().is_none());
+    assert!(views.next_back().is_none());
+}
+
+#[test]
+fn generated_fixed_direct_view_owns_input_and_sequences_borrow_one_input() {
+    let input = Bytes::from_static(&[4]);
+    let input_pointer = input.as_ptr();
+    let direct = OwnedBody::view(input).unwrap();
+    assert_eq!(direct.as_bytes().as_ptr(), input_pointer);
+    assert_eq!(direct.value(), 4);
+
+    let input = Bytes::from_static(&[4, 5]);
+    let input_pointer = input.as_ptr();
+    let mut views = OwnedBody::views(&input).unwrap();
+    let first = views.next().unwrap();
+    assert_eq!(first.as_bytes().as_ptr(), input_pointer);
+    assert_eq!(first.value(), 4);
+    let second = views.next().unwrap();
+    assert_eq!(second.as_bytes().as_ptr(), input_pointer.wrapping_add(1));
+    assert_eq!(second.value(), 5);
     assert!(views.next().is_none());
 }
 
 #[test]
 fn generated_owned_validation_covers_direct_and_sequence_views() {
-    match OwnedValidated::view(Bytes::new()).without_trailing() {
+    match OwnedValidated::view(Bytes::new()) {
         Err(OwnedValidationError::Decode(error)) => {
             assert!(!format!("{error:?}").is_empty());
         }
-        result => panic!("unexpected structural validation result: {result:?}"),
+        Err(error) => panic!("unexpected structural validation error: {error:?}"),
+        Ok(_) => panic!("empty input must be rejected"),
     }
     assert!(matches!(
-        OwnedValidated::view(Bytes::from_static(&[0])).without_trailing(),
+        OwnedValidated::view(Bytes::from_static(&[0])),
         Err(OwnedValidationError::Invalid)
     ));
+    let sequence = Bytes::from_static(&[1, 0]);
     assert!(matches!(
-        OwnedValidated::views(Bytes::from_static(&[1, 0])),
+        OwnedValidated::views(&sequence),
         Err(wire_repr::FixedValidatedViewSequenceError::Item(
             OwnedValidationError::Invalid
         ))
     ));
 
-    let mut unchecked = OwnedValidated::unchecked_views(Bytes::from_static(&[1, 0])).unwrap();
+    let mut unchecked = OwnedValidated::unchecked_views(&sequence).unwrap();
     assert_eq!(unchecked.next().unwrap().value(), 1);
     assert_eq!(unchecked.next().unwrap().value(), 0);
+}
+
+#[test]
+fn generated_fixed_cursor_borrows_input_and_is_fail_closed_with_bytes_enabled() {
+    let input = [1, 0];
+    let mut cursor = OwnedValidated::cursor(&input);
+    assert_eq!(cursor.next().unwrap().unwrap().value(), 1);
+    assert!(matches!(
+        cursor.next(),
+        Err(ViewCursorError::Item(OwnedValidationError::Invalid))
+    ));
+    assert_eq!(cursor.remaining(), &[0]);
+
+    let mut unchecked = cursor.unchecked();
+    assert_eq!(unchecked.next().unwrap().unwrap().value(), 0);
+    assert!(unchecked.remaining().is_empty());
 }
 
 #[test]
@@ -388,9 +434,11 @@ fn bounded_bytes_mut_sink_does_not_publish_under_emission() {
 
 #[test]
 fn derived_bitfield_uses_owned_view_and_preallocated_output() {
-    let view = OwnedFlags::view(Bytes::from_static(&[0, 5]))
-        .without_trailing()
-        .unwrap();
+    let borrowed = OwnedFlags::view(&[0, 5]).unwrap();
+    assert!(borrowed.enabled());
+    assert_eq!(borrowed.mode(), 2);
+
+    let view = OwnedFlags::view(Bytes::from_static(&[0, 5])).unwrap();
     assert!(view.enabled());
     assert_eq!(view.mode(), 2);
 
@@ -406,9 +454,7 @@ fn derived_bitfield_uses_owned_view_and_preallocated_output() {
 
 #[test]
 fn derived_dynamic_struct_owns_input_and_borrows_builder_payload() {
-    let view = OwnedPacket::view(Bytes::from_static(&[3, 7, 8, 9]))
-        .without_trailing()
-        .unwrap();
+    let view = OwnedPacket::view(Bytes::from_static(&[3, 7, 8, 9])).unwrap();
     assert_eq!(view.length(), 3);
     assert_eq!(view.payload(), &[7, 8, 9]);
 
@@ -477,7 +523,7 @@ fn nested_owned_view_survives_parent() {
     let child = parent.body();
     drop(parent);
     assert_eq!(child.value(), 9);
-    assert_eq!(child.as_bytes(), &[9]);
+    assert_eq!(OwnedBodyView::as_bytes(&child), &[9]);
 }
 
 #[test]

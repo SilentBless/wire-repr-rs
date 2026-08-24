@@ -122,7 +122,7 @@ fn rejects_ambiguous_or_noncanonical_byte_length_sources() {
 }
 
 #[test]
-fn accepts_ordered_struct_validators_with_one_human_error_type() {
+fn accepts_ordered_struct_validators_with_inferred_or_legacy_error_types() {
     let WireType::Struct(model) = parse(
             "#[wire(error = PacketError, validate = validate_model_first, validate = validate_model_second)] struct Packet { #[wire(validate = validate_field_first, validate = validate_field_second)] value: u8 }",
         )
@@ -139,6 +139,17 @@ fn accepts_ordered_struct_validators_with_one_human_error_type() {
     assert!(model.fields[0].validators[0].is_ident("validate_field_first"));
     assert!(model.fields[0].validators[1].is_ident("validate_field_second"));
 
+    let WireType::Struct(model) = parse(
+        "#[wire(validate = validate_model)] struct Inferred { #[wire(validate = validate_field)] value: u8 }",
+    )
+    .unwrap()
+    else {
+        panic!()
+    };
+    assert!(model.validation_error.is_none());
+    assert_eq!(model.validators.len(), 1);
+    assert_eq!(model.fields[0].validators.len(), 1);
+
     let WireType::Struct(model) =
         parse("#[wire(error = ParentError)] struct Parent { child: Child }").unwrap()
     else {
@@ -150,8 +161,6 @@ fn accepts_ordered_struct_validators_with_one_human_error_type() {
 #[test]
 fn rejects_incomplete_or_unsupported_struct_validator_contracts() {
     for source in [
-        "#[wire(validate = validate_model)] struct Packet { value: u8 }",
-        "struct Packet { #[wire(validate = validate_field)] value: u8 }",
         "#[wire(error = PacketError)] struct Packet { value: u8 }",
         "#[wire(error = FirstError, error = SecondError, validate = validate_model)] struct Packet { value: u8 }",
         "#[wire(bitfield = u8, reserved = zero, error = FlagsError, validate = validate_flags)] struct Flags { #[wire(bit = 0)] enabled: bool }",
