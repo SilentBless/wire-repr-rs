@@ -1,301 +1,187 @@
 <h1 align="center">wire-repr</h1>
 
-<p align="center">
-  <strong>Compile Rust wire schemas into zero-copy views and atomic writers.</strong>
-</p>
+<p align="center"><strong>Compile Rust wire schemas into zero-copy views and progressive writers.</strong></p>
 
-<p align="center">
-  <code>no_std</code> · no allocation · safe Rust · Rust 1.91
-</p>
+<p align="center"><code>no_std</code> · no allocation · safe public API · Rust 1.91</p>
 
-`wire-repr` derives binary representation code from ordinary Rust structs and enums.
-The declared type is the semantic value used for writing. Reading produces either a
-borrowing `FooView<'wire>` or, with the `bytes` feature, a lifetime-free view over shared
-backing storage.
+`wire-repr` treats a Rust schema declaration as a physical representation, not as the decoded
+value. Reading returns an opaque exact-source view over the caller's backing. Writing uses a
+typestate writer over caller-owned fixed, growable, bounded, or custom output.
 
-## 📦 Add it
+The implemented production surface is the featureless `WireView`/`WireBuilder` capability model.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) defines the complete layout contract.
+
+## Add it
 
 ```toml
 [dependencies]
-wire-repr = { version = "1", default-features = false }
+wire-repr = "1"
 ```
 
-Enable `bytes` when decoded views need to own shared input instead of borrowing it:
+The crate is featureless. Applications may pass `bytes::Bytes`, `Vec<u8>`, slices, or custom
+`AsRef<[u8]>` backing without enabling a wire-repr feature.
 
-```toml
-[dependencies]
-wire-repr = { version = "1", features = ["bytes"] }
-bytes = { version = "1", default-features = false }
-```
-
-The schema stays unchanged. `Type::view(bytes::Bytes)` then returns a lifetime-free,
-cloneable view over the same backing storage. Builders and prepared plans still borrow
-semantic inputs; encoding appends into caller-owned, pre-capacitated `bytes::BytesMut`
-without reserving or staging a second frame.
-
-## 🚀 A real header
-
-A Bitcoin block header is exactly 80 bytes:
+## Generic exact-source view and progressive writer
 
 ```rust
-use wire_repr::Wire;
+use wire_repr::{WireBuilder, WireView};
 
-#[derive(Debug, Eq, PartialEq, Wire)]
-struct BitcoinHeader {
-    #[wire(le)]
-    version: i32,
-    previous_block_hash: [u8; 32],
-    merkle_root: [u8; 32],
-    #[wire(le)]
-    timestamp: u32,
-    #[wire(le)]
-    target_bits: u32,
-    #[wire(le)]
-    nonce: u32,
+#[derive(WireView, WireBuilder)]
+struct HelpGetConfig {
+    #[wire(le, constant = 0xc4f9_186b)]
+    constructor: u32,
 }
 
-let bytes = [
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x3b, 0xa3, 0xed, 0xfd,
-    0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e,
-    0x67, 0x76, 0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3,
-    0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f, 0xb8, 0xaa,
-    0x4b, 0x1e, 0x5e, 0x4a, 0x29, 0xab, 0x5f, 0x49,
-    0xff, 0xff, 0x00, 0x1d, 0x1d, 0xac, 0x2b, 0x7c,
+#[derive(WireView, WireBuilder)]
+struct InvokeWithLayer<T> {
+    #[wire(le, constant = 0xda9b_0d0d)]
+    constructor: u32,
+    #[wire(le)]
+    layer: i32,
+    query: T,
+}
+
+type Query = InvokeWithLayer<HelpGetConfig>;
+
+let input = [
+    0x0d, 0x0d, 0x9b, 0xda, // invokeWithLayer
+    0xc8, 0x00, 0x00, 0x00, // layer 200
+    0x6b, 0x18, 0xf9, 0xc4, // help.getConfig
 ];
+let view = Query::view(input).unwrap();
+assert_eq!(view.layer(), 200);
+assert_eq!(view.query().constructor(), 0xc4f9_186b);
+assert_eq!(view.as_bytes(), &input);
 
-let header = BitcoinHeader::view(&bytes)
-    .without_trailing()
-    .expect("genesis header is structurally valid");
-assert_eq!(header.version(), 1);
-assert_eq!(header.timestamp(), 1_231_006_505);
-assert_eq!(header.nonce(), 2_083_236_893);
-assert_eq!(header.as_bytes(), &bytes);
+let mut output = [0xa5; 16];
+let written = Query::builder(&mut output[..])
+    .layer(200)?
+    .query(|query| query)?
+    .finish()?;
+assert_eq!(written.range(), 0..12);
+assert_eq!(written.as_bytes(), &input);
+assert_eq!(&output[12..], &[0xa5; 4]);
 ```
 
-The view borrows the original bytes. It does not allocate, copy the header, or pretend
-that a Rust struct has a stable wire ABI. Proof of work, hashes, display byte order, and
-Bitcoin policy remain consumer code.
+`view(input)` stores `input` directly. Passing a reference creates a borrowed view; passing an
+owned container moves it into the hidden view state. Nested getters borrow their parent and use
+retained reference-free geometry state rather than reparsing.
 
-## 🧩 Struct fields
+Retained backing must keep projecting the same immutable byte span while the view exists. Slices,
+`Vec`, `bytes::Bytes`, and ordinary owned wrappers satisfy this. Stateful `AsRef` implementations
+that switch or mutate their projection are not supported.
 
-Fields are represented in declaration order.
+Constants are validated on read and have getters, but no writer setters. Derived and manual
+children use the same closure setter through public `WireBuilder` and `WireWrite<V>` capabilities.
+Setters write progressively; only offsets and typestate remain in the generated writer.
 
-- Plain `u8` and `i8` are one byte.
-- `#[wire(be)]` and `#[wire(le)]` select the byte order of multibyte integers.
-- `[u8; N]` is a fixed borrowed byte array in the generated view.
-- A nested `Wire` type produces its nested generated view.
-- `#[wire(codec = Path)]` uses a custom fixed-width `FixedCodec`.
-- `#[wire(prefix = Path)]` uses a self-delimiting `PrefixCodec`.
-- `#[wire(bytes = source)]` borrows the number of bytes decoded from an earlier
-  unsigned source field. Preparation derives the canonical source value from the slice.
-- `#[wire(rest)]` borrows the terminal remainder.
-- `pad_before`, `align_before`, and forward-only `at` describe physical gaps. Input gap
-  bytes are opaque; prepared output writes zeroes.
+## Manual wire types
 
-A successful `Foo::view(input)` terminal validates the complete geometry once. Getters
-then decode values from retained exact spans; dynamic endpoints are not rediscovered.
-
-## 🔖 Tagged operations
-
-Static tagged enums use an explicit tag codec, explicit unknown policy, and unit or
-one-field tuple variants:
+Manual representations implement the same independent read and write capabilities as derived
+schemas.
 
 ```rust
-use wire_repr::Wire;
+use wire_repr::{ChildWriter, Output, WireBuilder, WireWrite, WriteError};
 
-#[derive(Debug, Eq, PartialEq, Wire)]
-struct Ping {
-    #[wire(be)]
-    sequence: u16,
+struct LittleEndianWord;
+
+impl WireBuilder for LittleEndianWord {
+    type Builder = ();
+
+    fn builder() -> Self::Builder {}
 }
 
-#[derive(Debug, Eq, PartialEq, Wire)]
-#[wire(tag = U8, unknown = reject)]
-#[repr(u8)]
-enum Message {
-    Ping(Ping) = 1,
-    Halt = 2,
+impl WireWrite<u32> for LittleEndianWord {
+    type Error = core::convert::Infallible;
+
+    fn write<O: Output>(
+        value: u32,
+        writer: &mut ChildWriter<'_, O>,
+    ) -> Result<(), WriteError<Self::Error, O::GrowError>> {
+        writer.write(&value.to_le_bytes())?;
+        Ok(())
+    }
 }
-
-let message = Message::view(&[1, 0x12, 0x34])
-    .without_trailing()
-    .expect("known message is structurally valid");
-assert_eq!(message.ping().unwrap().sequence(), 0x1234);
 ```
 
-Fixed byte selectors use their byte array as the tag representation. An open enum can
-preserve unknown tags losslessly — useful for formats such as PNG, where extensions are
-valid wire values:
+Manual writers receive the same progressive cursor as generated children. They may return semantic
+errors after partially modifying unpublished output; wire-repr never allocates, rolls back, or
+clears bytes.
+
+Manual `WireView` implementations are an explicit unsafe boundary: retained state must remain
+memory-safe for any immutable span of the framed length. Generated APIs remain safe, retain
+validated logical values when needed, and check manual child extents before reconstruction.
+
+## Scalar representations
+
+The schema model handles `u8`/`i8` and every 16-, 32-, 64-, and 128-bit integer in both byte
+orders, plus `f32` and `f64`. One-byte fields have no endian attribute; every multibyte field
+requires `le` or `be`.
+
+Platform and logical Rust types declare their physical width explicitly:
 
 ```rust
-use wire_repr::Wire;
-
-#[derive(Debug, Eq, PartialEq, Wire)]
-#[wire(tag = [u8; 4], unknown = preserve)]
-enum ChunkType {
-    #[wire(tag = b"IHDR")]
-    Ihdr,
-    #[wire(tag = b"IEND")]
-    Iend,
-    #[wire(unknown)]
-    Other([u8; 4]),
-}
-
-let chunk_type = ChunkType::view(b"vpAg")
-    .without_trailing()
-    .expect("unknown chunk type remains representable");
-assert_eq!(chunk_type.other(), Some(b"vpAg"));
-```
-
-For negotiated numeric IDs, a schema names one concrete consumer-owned operation input.
-The declared name is also the generated fluent method and the explicit forwarding marker.
-For example, `opcodes = Type`, per-variant `opcodes = Path`, and `#[wire(opcodes)]` fields
-generate:
-
-```rust
-Packet::view(bytes).opcodes(&opcodes).without_trailing()
-packet.opcodes(&opcodes).prepare()
-```
-
-The name is schema-defined except for wire options and generated API method names:
-`table = Type` generates `.table(&table)`, while `offsets = Type` generates
-`.offsets(&offsets)`. The input maps raw IDs in both directions, is forwarded only by matching
-schema names, and is not retained in the generated view or prepared plan.
-
-## 🚩 Nominal bitfields
-
-A bitfield is its own semantic type and its own physical owner:
-
-```rust
-use wire_repr::Wire;
-
-#[derive(Debug, Eq, PartialEq, Wire)]
-#[wire(bitfield = u16, be, reserved = zero)]
-struct Flags {
-    #[wire(bit = 0)]
+#[derive(WireView, WireBuilder)]
+struct Index {
+    #[wire(as = u32, le)]
+    offset: usize,
+    #[wire(as = i64, be)]
+    delta: isize,
+    #[wire(as = u8)]
     enabled: bool,
-    #[wire(bits = 1..=3)]
-    mode: u8,
-}
-
-let flags = Flags::view(&[0, 0b0000_1011])
-    .without_trailing()
-    .expect("flags are structurally valid");
-assert!(flags.enabled());
-assert_eq!(flags.mode(), 5);
-```
-
-Bit numbers are semantic least-significant-bit positions after byte-order decoding.
-Unprojected bits are accepted on read and written as zero by the explicit
-`reserved = zero` policy.
-
-## 🔁 Sequences
-
-Statically fixed records expose an ordinary infallible, exact-size iterator after one
-framing check:
-
-```rust
-let records = Header::views(bytes).expect("records have fixed-width framing");
-for record in records {
-    use_record(record);
+    #[wire(as = u32, le)]
+    character: char,
 }
 ```
 
-Potentially variable-width records expose a fail-closed cursor:
+Read and write conversions are checked. Invalid stored values and values that do not fit their
+declared wire width produce nominal field-site errors rather than truncating.
 
-```rust
-let mut records = Chunk::cursor(bytes);
-while let Some(record) = records.next().expect("next record is structurally valid") {
-    use_record(record);
-}
+## Behavioral guarantees
+
+- `view()` accepts exactly one representation and rejects trailing input.
+- Errors identify the field site and absolute root-input offset.
+- `NeedMore` reports a proven lower bound for incomplete contiguous input.
+- Derived descriptors contain no input references or self-references; manual descriptors certify
+  the same invariant through the unsafe `WireView` contract.
+- Ordinary scalar getters remain ordinary scalar values.
+- Generic and nested composition is static and monomorphized.
+- `builder(&mut [u8])` writes into fixed output and returns `OutputError::NeedMore` when it ends.
+- `builder(&mut Vec<u8>)` and `builder(&mut bytes::BytesMut)` grow automatically through
+  `AsRef<[u8]> + AsMut<[u8]> + Extend<u8>`.
+- `output::bounded` and `output::grow_with` opt into bounded or caller-controlled growth.
+- On write failure, output may contain a partial unpublished representation. `finish()` returns a
+  `Written` token with the exact represented range.
+- Writers and views do not allocate or dispatch dynamically inside wire-repr.
+- The public read API is identical for borrowed and retained-owned backing.
+
+## Verification
+
+The repository checks behavior, final linked artifacts, and runtime performance independently:
+
+```text
+cargo +1.91.0 test --workspace --all-targets
+cargo +1.91.0 clippy --workspace --all-targets -- -D warnings
+python3 ci/check-fail-fast.py
+cargo +1.91.0 run -p wire-repr-measure --release -- run
 ```
 
-A cursor never advances past a malformed item. This keeps variable item errors explicit
-without allocating an index or pretending later boundaries were validated.
+The Rust measurement tool discovers capability-owned workloads below `wire-repr/measure`. Each
+workload supplies generated, idiomatic, and best-safe implementations plus optional lower bounds.
+Its own formulas decide hard failures, optimization attention, and additional derived metrics.
+Human-readable output is the default; CI uses `run --json`. Artifact analysis reads final linked
+symbols, while interleaved calibrated samples report median, p95, range, and median absolute
+deviation instead of treating LLVM instruction counts as performance truth.
 
-## 📥 Frame one view
+## Design direction
 
-`Type::view(input)` starts one framing request:
+The implemented surface currently covers fixed scalar structs, constants, explicit logical
+conversions, schema validators, and one terminal generic or manual child with progressive
+typestate writers.
 
-- `.with_remainder()` returns one validated `TypeView<'wire>` and the disjoint suffix.
-- `.without_trailing()` returns one view and rejects trailing bytes.
-
-`view.as_bytes()` is exactly the represented input range. The semantic Rust value is not
-materialized during reading; use generated getters.
-
-## 📤 Prepare, then write
-
-Encoding consumes the ordinary semantic value:
-
-```rust
-use wire_repr::{PreparedLayout, Wire};
-
-#[derive(Wire)]
-struct Header {
-    kind: u8,
-}
-
-let plan = Header { kind: 7 }
-    .prepare()
-    .expect("header preparation succeeds");
-let mut output = [0xa5; 2];
-let (written, suffix) = plan
-    .commit_into(&mut output)
-    .expect("output has enough capacity");
-assert_eq!(written.as_bytes(), &[7]);
-assert_eq!(suffix, &mut [0xa5]);
-```
-
-Preparation completes fallible codec planning, conversions, geometry, canonical length
-sources, operation-input mapping, and total-length arithmetic before output mutation. Commit
-checks full capacity before its first write. A short output remains byte-for-byte
-unchanged.
-
-## 🧮 Select and compute physical bytes
-
-Prepared plans and bytes-backed views expose typed, allocation-free selections of their
-physical representation:
-
-```rust
-let covered = view.bytes().include(|fields| fields.header | fields.payload);
-let signed = view.bytes().exclude(|fields| fields.signature);
-```
-
-Selections stay in physical wire order. Nested paths are supported, and exclusions preserve
-gaps and padding. A fragmented selection is a `ByteSource`: it can stream directly to a sink
-or expose borrowed and virtual repeated-byte segments through `ByteSourceCursor` without
-building a temporary packet-sized buffer.
-
-Computed fields use the same source contract during preparation:
-
-```rust
-use wire_repr::{ByteSourceCursor, Wire};
-
-fn checksum(source: &impl ByteSourceCursor) -> u8 {
-    source.bytes().fold(0, u8::wrapping_add)
-}
-
-#[derive(Wire)]
-struct Packet<'wire> {
-    #[wire(computed = checksum(exclude(self)))]
-    checksum: u8,
-    length: u8,
-    #[wire(bytes = length)]
-    payload: &'wire [u8],
-}
-```
-
-The selection is the computation's compile-time read-set, so dependencies are ordered
-without relying on declaration order and cycles are rejected by the derive. Computations are
-infallible derivations; preparation checked-converts their results into the stored field type.
-Reading still returns the stored computed value. If stored-value consistency matters, validate
-it separately against the exact-source view selection.
-
-`wire_repr::computation::len` is a generic slice-length helper using this same callback path;
-it has no macro privileges and can be replaced by an ordinary function. A field referenced by
-`#[wire(bytes = length)]` is different: the framing relation derives `length` canonically from
-the payload extent during preparation, so that source cannot also declare a computation.
+Counted arrays, conditional fields, selectors, padding, alignment, placement, resource limits,
+heterogeneous builders, recursive iterative framing, physical-byte selections, and computed fields
+remain planned layout classes. `computed` and `try_computed` are not present in the current
+production renderer; their former implementation belonged to the removed legacy derive. New layout
+classes must extend the progressive writer model and gain behavioral and generated/idiomatic/
+best-safe workloads when implemented.
