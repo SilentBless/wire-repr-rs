@@ -1,0 +1,68 @@
+name = "output/growth"
+
+[roles]
+generated = "generated.rs"
+idiomatic = "idiomatic.rs"
+best_latency = "best/latency.rs"
+
+[[cases]]
+name = "fixed"
+entry = "fixed"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_allocation_symbols == 0 && generated_artifact_transitive_vtable_references == 0"
+[[cases.rules]]
+name = "idiomatic runtime attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.25"
+message = "fixed progressive writer latency is materially behind idiomatic"
+
+[[cases]]
+name = "growable"
+entry = "growable"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "idiomatic runtime attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.25"
+message = "auto-growing writer latency is materially behind idiomatic Vec encoding"
+
+[[cases]]
+name = "callback"
+entry = "callback"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_allocation_symbols == 0 && generated_artifact_transitive_vtable_references == 0"
+[[cases.rules]]
+name = "idiomatic runtime attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.25"
+message = "caller-growth writer latency is materially behind idiomatic fixed encoding"

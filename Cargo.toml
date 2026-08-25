@@ -1,5 +1,5 @@
 [workspace]
-members = ["wire-repr", "wire-repr-macros"]
+members = ["ci/measure", "wire-repr", "wire-repr-macros"]
 resolver = "3"
 
 [workspace.package]
@@ -15,7 +15,7 @@ bytes = { version = "1", default-features = false }
 proc-macro-crate = { version = "3.5", default-features = false }
 proc-macro2 = { version = "1", default-features = false, features = ["proc-macro"] }
 quote = { version = "1", default-features = false }
-syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "proc-macro", "derive", "visit"] }
+syn = { version = "2", default-features = false, features = ["clone-impls", "full", "parsing", "printing", "proc-macro", "derive", "visit"] }
 thiserror = { version = "2", default-features = false }
 wire-repr-macros = { path = "wire-repr-macros", version = "1.0.0" }
 

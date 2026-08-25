@@ -7,7 +7,7 @@ use proc_macro::TokenStream;
 mod derive;
 mod validator;
 
-/// Marks a semantic validator so `Wire` derives can infer its error type.
+/// Marks a semantic validator so schema derives can infer its error type.
 #[proc_macro_attribute]
 pub fn validator(_attribute: TokenStream, input: TokenStream) -> TokenStream {
     match syn::parse(input).and_then(validator::expand) {
@@ -16,10 +16,19 @@ pub fn validator(_attribute: TokenStream, input: TokenStream) -> TokenStream {
     }
 }
 
-/// Derives wire decoding and prepared encoding for a supported Rust struct or enum.
-#[proc_macro_derive(Wire, attributes(wire))]
-pub fn derive_wire(input: TokenStream) -> TokenStream {
-    match syn::parse(input).and_then(derive::expand) {
+/// Derives the schema-only exact-source read surface.
+#[proc_macro_derive(WireView, attributes(wire))]
+pub fn derive_wire_view(input: TokenStream) -> TokenStream {
+    match syn::parse(input).and_then(derive::expand_view) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+/// Derives the schema-only typestate builder surface.
+#[proc_macro_derive(WireBuilder, attributes(wire))]
+pub fn derive_wire_builder(input: TokenStream) -> TokenStream {
+    match syn::parse(input).and_then(derive::expand_builder) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.into_compile_error().into(),
     }

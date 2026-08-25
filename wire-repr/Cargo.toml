@@ -10,17 +10,16 @@ repository.workspace = true
 homepage.workspace = true
 readme = "../README.md"
 autotests = false
+autoexamples = false
 keywords = ["binary", "zero-copy", "no-std", "no-alloc", "codegen"]
 categories = ["encoding", "no-std", "no-std::no-alloc"]
 
-[features]
-default = []
-bytes = ["dep:bytes", "wire-repr-macros/bytes"]
-
 [dependencies]
-bytes = { workspace = true, optional = true }
 thiserror.workspace = true
 wire-repr-macros.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
 
 [[test]]
 name = "suite"

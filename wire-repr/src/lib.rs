@@ -4,46 +4,23 @@
 
 extern crate self as wire_repr;
 
-/// Codec contracts and built-in codecs.
-pub mod codec;
+pub mod output;
+mod schema;
 
-/// Helpers for computed wire fields.
-pub mod computation;
-
-mod selection;
-mod wire;
-
-/// Implementation details used by `#[derive(Wire)]`.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::codec::fixed::OwnedBytes;
-    pub use crate::codec::{BorrowedSource, ByteChain, EmptySource};
-    #[cfg(feature = "bytes")]
-    pub use bytes::{Bytes, BytesMut};
+    pub use crate::schema::{
+        ConstantMismatch, Frame, InvalidFrameExtent, NeedMore, ScalarBuildConversionError,
+        ScalarConversionError, Set, TrailingBytes, Unset,
+    };
     pub use thiserror::Error as ThisError;
 }
 
+pub use output::{ChildWriter, GrowthRequest, Output, OutputError, WriteError, Writer, Written};
 #[doc(inline)]
-pub use wire_repr_macros::{Wire, validator};
+pub use wire_repr_macros::{WireBuilder, WireView, validator};
 
-pub use codec::{
-    BeI16, BeI32, BeI64, BeI128, BeU16, BeU24, BeU32, BeU64, BeU128, ByteBytes, ByteChunks,
-    ByteRange, ByteSegment, ByteSegmentBytes, ByteSink, ByteSource, ByteSourceCursor, Bytes,
-    ExactWidthError, FixedCodec, I8, LeI16, LeI32, LeI64, LeI128, LeU16, LeU24, LeU32, LeU64,
-    LeU128, OutputTooShortError, PrefixCodec, PrefixExtent, PreparedLayout, RangeSegments, U8,
-    U24RangeError,
-};
-
-#[doc(hidden)]
-pub use selection::{
-    ByteSelection, DirectFieldProjection, DirectFieldSelection, ExcludedBytes, FieldProjection,
-    FieldSelection, FieldUnion, IncludedBytes, MarkerScope, NestedField, RootScope,
-    SelectedSegments, Through, Translated,
-};
-
-pub use wire::{
-    BuildIntoError, FixedValidatedViewSequenceError, FixedViewIterator, FixedViewSequenceError,
-    GenericFixedViewIterator, ValidatedViewCursor, ValidatedViewRequest, ViewBacking, ViewCursor,
-    ViewCursorError, ViewInput, ViewRequest, WireEncode, WireView, WireViewType,
-    WireViewValidation, Written,
+pub use schema::{
+    ConstantMismatch, Frame, InvalidFrameExtent, NeedMore, ScalarBuildConversionError,
+    ScalarConversionError, TrailingBytes, WireBuilder, WireView, WireWrite,
 };

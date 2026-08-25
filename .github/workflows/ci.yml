@@ -17,39 +17,27 @@ jobs:
       - name: Format
         run: cargo +1.91.0 fmt --all -- --check
       - name: Check
-        run: cargo +1.91.0 check --workspace --no-default-features --all-targets
-      - name: Check owned mode
-        run: cargo +1.91.0 check --workspace --features bytes --all-targets
+        run: cargo +1.91.0 check --workspace --all-targets
       - name: Test
-        run: cargo +1.91.0 test --workspace --no-default-features --all-targets
-      - name: Test owned mode
-        run: cargo +1.91.0 test --workspace --features bytes --all-targets
+        run: cargo +1.91.0 test --workspace --all-targets
       - name: Documentation tests
-        run: cargo +1.91.0 test -p wire-repr --no-default-features --doc
-      - name: Owned-mode documentation tests
-        run: cargo +1.91.0 test -p wire-repr --features bytes --doc
+        run: cargo +1.91.0 test -p wire-repr --doc
       - name: Test CI tools
         run: python3 -m unittest discover -s ci/tests -v
       - name: Compile-failure diagnostics
         run: python3 ci/check-fail-fast.py --root "$GITHUB_WORKSPACE"
       - name: Clippy
-        run: cargo +1.91.0 clippy --workspace --no-default-features --all-targets -- -D warnings
-      - name: Clippy owned mode
-        run: cargo +1.91.0 clippy --workspace --features bytes --all-targets -- -D warnings
+        run: cargo +1.91.0 clippy --workspace --all-targets -- -D warnings
       - name: Documentation
-        run: RUSTDOCFLAGS='-D warnings' cargo +1.91.0 doc --workspace --no-default-features --no-deps
-      - name: Owned-mode documentation
-        run: RUSTDOCFLAGS='-D warnings' cargo +1.91.0 doc --workspace --features bytes --no-deps
+        run: RUSTDOCFLAGS='-D warnings' cargo +1.91.0 doc --workspace --no-deps
 
-  release-codegen:
+  measure:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Install Rust 1.91.0 and Linux target
-        run: |
-          rustup toolchain install 1.91.0 --profile minimal
-          rustup target add x86_64-unknown-linux-gnu --toolchain 1.91.0
-      - name: Check release code generation
-        run: python3 ci/check-codegen.py --root "$GITHUB_WORKSPACE" --tolerance 10%
-      - name: Check owned-mode release code generation
-        run: python3 ci/check-codegen.py --root "$GITHUB_WORKSPACE" --mode bytes --tolerance 10%
+      - name: Install Rust 1.91.0
+        run: rustup toolchain install 1.91.0 --profile minimal
+      - name: Build measurement tool
+        run: cargo +1.91.0 build -p wire-repr-measure --release
+      - name: Measure generated code and runtime performance
+        run: target/release/wire-repr-measure run --json

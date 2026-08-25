@@ -2,22 +2,23 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use syn::ext::IdentExt;
 use syn::{GenericArgument, ItemFn, PathArguments, ReturnType, Type};
 
 pub(crate) fn error_type(callback: &syn::Path) -> syn::Result<syn::Path> {
     let mut marker: syn::Path = syn::parse2(quote!(#callback))?;
-    let Some(segment) = marker.segments.last_mut() else {
+    let function = marker
+        .segments
+        .pop()
+        .ok_or_else(|| syn::Error::new_spanned(callback, "validator path cannot be empty"))?;
+    if !matches!(function.value().arguments, PathArguments::None) {
         return Err(syn::Error::new_spanned(
-            callback,
-            "validator path cannot be empty",
-        ));
-    };
-    if !matches!(segment.arguments, PathArguments::None) {
-        return Err(syn::Error::new_spanned(
-            segment,
+            function.value(),
             "wire validator paths cannot have generic arguments",
         ));
     }
+    let metadata = format_ident!("__wire_repr_validator_{}", function.value().ident.unraw());
+    marker.segments.push(syn::PathSegment::from(metadata));
     marker
         .segments
         .push(syn::PathSegment::from(format_ident!("Error")));
@@ -34,7 +35,7 @@ pub(super) fn expand(function: ItemFn) -> syn::Result<TokenStream> {
 
     let error = validator_error_type(&function.sig.output)?;
     let visibility = &function.vis;
-    let marker = &function.sig.ident;
+    let marker = format_ident!("__wire_repr_validator_{}", function.sig.ident.unraw());
     let marker_configuration = function.attrs.iter().filter(|attribute| {
         attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
     });
@@ -120,7 +121,7 @@ mod tests {
     #[test]
     fn exposes_the_callback_error_through_hidden_metadata() {
         let function = syn::parse2(quote! {
-            #[cfg(feature = "bytes")]
+            #[cfg(test)]
             pub(crate) fn nonzero(value: u8) -> Result<(), DomainError> {
                 let _ = value;
                 Ok(())
@@ -130,7 +131,7 @@ mod tests {
         let expanded = expand(function).unwrap().to_string();
 
         assert!(expanded.contains("fn nonzero"));
-        assert!(expanded.contains("pub (crate) mod nonzero"));
+        assert!(expanded.contains("pub (crate) mod __wire_repr_validator_nonzero"));
         assert!(expanded.contains("pub type Error = DomainError"));
         assert_eq!(expanded.matches("cfg").count(), 2);
     }
@@ -169,7 +170,7 @@ mod tests {
         let error = error_type(&callback).unwrap();
         assert_eq!(
             quote!(#error).to_string(),
-            "crate :: checks :: nonzero :: Error"
+            "crate :: checks :: __wire_repr_validator_nonzero :: Error"
         );
     }
 }
