@@ -173,7 +173,7 @@ mod manual {
     fn generated_parent_rejects_invalid_manual_extent() {
         assert!(matches!(
             Foo::view([1]),
-            Err(FooViewError::InvalidFrame(error))
+            Err(FooViewError::BarExtent(error))
                 if error.offset == 0 && error.consumed == 2 && error.available == 1
         ));
     }

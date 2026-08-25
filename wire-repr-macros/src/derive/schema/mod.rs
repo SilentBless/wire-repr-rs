@@ -94,11 +94,7 @@ fn fresh_field_ident(schema: &model::Schema, stem: &str) -> syn::Ident {
         } else {
             format_ident!("__wire_repr_{stem}_{suffix}", span = Span::mixed_site())
         };
-        let taken = schema.fields.iter().any(|field| field.name == candidate)
-            || schema
-                .nested
-                .as_ref()
-                .is_some_and(|field| field.name == candidate);
+        let taken = schema.fields.iter().any(|field| field.name == candidate);
         if !taken {
             return candidate;
         }
@@ -128,14 +124,10 @@ fn schema_source_identifiers(schema: &model::Schema) -> BTreeSet<String> {
     collect_token_identifiers(schema.generics.to_token_stream(), &mut identifiers);
     for field in &schema.fields {
         identifiers.insert(field.name.unraw().to_string());
-        let model::FieldKind::Scalar(scalar) = &field.kind;
-        if let Some(constant) = &scalar.constant {
+        collect_token_identifiers(field.ty.to_token_stream(), &mut identifiers);
+        if let Some(constant) = field.kind.constant() {
             collect_token_identifiers(constant.to_token_stream(), &mut identifiers);
         }
-    }
-    if let Some(nested) = &schema.nested {
-        identifiers.insert(nested.name.unraw().to_string());
-        collect_token_identifiers(nested.ty.to_token_stream(), &mut identifiers);
     }
     for validator in &schema.validators {
         collect_token_identifiers(validator.to_token_stream(), &mut identifiers);
@@ -171,6 +163,40 @@ fn snake(identifier: &syn::Ident) -> String {
         }
     }
     output
+}
+fn view_offset(offset: &model::LayoutOffset, runtime: &TokenStream) -> TokenStream {
+    let parts = offset.terms.iter().map(|term| match term {
+        model::SizeTerm::Fixed(width) => quote!(Some(#width)),
+        model::SizeTerm::Expr(width) => quote!(Some(#width)),
+        model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireView>::FIXED_SIZE),
+    });
+    quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
+}
+fn builder_offset(offset: &model::LayoutOffset, runtime: &TokenStream) -> TokenStream {
+    let parts = offset.terms.iter().map(|term| match term {
+        model::SizeTerm::Fixed(width) => quote!(Some(#width)),
+        model::SizeTerm::Expr(width) => quote!(Some(#width)),
+        model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE),
+    });
+    quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
+}
+
+fn view_optional_size(schema: &model::Schema, runtime: &TokenStream) -> TokenStream {
+    let parts = schema.size_terms().into_iter().map(|term| match term {
+        model::SizeTerm::Fixed(width) => quote!(Some(#width)),
+        model::SizeTerm::Expr(width) => quote!(Some(#width)),
+        model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireView>::FIXED_SIZE),
+    });
+    quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
+}
+
+fn builder_optional_size(schema: &model::Schema, runtime: &TokenStream) -> TokenStream {
+    let parts = schema.size_terms().into_iter().map(|term| match term {
+        model::SizeTerm::Fixed(width) => quote!(Some(#width)),
+        model::SizeTerm::Expr(width) => quote!(Some(#width)),
+        model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE),
+    });
+    quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
 }
 
 fn scalar_type_tokens(ty: model::ScalarType) -> TokenStream {

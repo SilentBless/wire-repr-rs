@@ -4,6 +4,8 @@
 mod builder;
 #[path = "behavior/hygiene.rs"]
 mod hygiene;
+#[path = "behavior/layout.rs"]
+mod layout;
 #[path = "behavior/ownership.rs"]
 mod ownership;
 #[path = "behavior/scalar.rs"]

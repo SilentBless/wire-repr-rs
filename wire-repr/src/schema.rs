@@ -63,6 +63,9 @@ pub unsafe trait WireView: Sized {
 
 /// Associates a manual or derived schema with its initial builder state.
 pub trait WireBuilder: Sized {
+    /// Exact width when every representation has one compile-time width.
+    const FIXED_SIZE: Option<usize> = None;
+
     /// Initial builder type.
     type Builder;
 
@@ -82,6 +85,24 @@ pub trait WireWrite<V>: Sized {
     ) -> Result<(), crate::WriteError<Self::Error, O::GrowError>>;
 }
 
+#[doc(hidden)]
+pub const fn checked_optional_sum<const N: usize>(parts: [Option<usize>; N]) -> Option<usize> {
+    let mut total = 0usize;
+    let mut index = 0usize;
+    while index < N {
+        let part = match parts[index] {
+            Some(part) => part,
+            None => return None,
+        };
+        match total.checked_add(part) {
+            Some(next) => total = next,
+            None => return None,
+        }
+        index += 1;
+    }
+    Some(total)
+}
+
 /// Input ended before the parser could establish one representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("need at least {additional_at_least} more bytes at absolute offset {offset}")]
@@ -90,6 +111,14 @@ pub struct NeedMore {
     pub offset: usize,
     /// Proven lower bound on additional required bytes.
     pub additional_at_least: usize,
+}
+
+/// A static field offset or fixed width could not be established.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("fixed layout is unavailable or overflows before field `{field}`")]
+pub struct LayoutError {
+    /// Field whose physical offset could not be established.
+    pub field: &'static str,
 }
 
 /// A stored scalar constant did not match its schema value.

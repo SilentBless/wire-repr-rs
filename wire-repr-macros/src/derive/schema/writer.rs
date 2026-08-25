@@ -6,10 +6,10 @@ use syn::ext::IdentExt;
 use syn::{GenericParam, TypeParam, parse_quote};
 
 use super::builder::{Slot, SlotKind, convert_to_wire, slots, unique_build_variant};
-use super::model::{FieldKind, Schema};
+use super::model::{FieldKind, LayoutOffset, Schema, SizeTerm};
 use super::{
-    fresh_field_ident, fresh_type_ident, pascal, scalar_type_tokens, to_bytes_method,
-    value_type_tokens,
+    builder_offset, builder_optional_size, fresh_field_ident, fresh_type_ident, pascal,
+    private_ident, scalar_type_tokens, to_bytes_method, value_type_tokens,
 };
 
 pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
@@ -103,32 +103,25 @@ fn render_setters(
 ) -> Vec<TokenStream> {
     let vis = &schema.vis;
     let error_name = format_ident!("{}WriteError", schema.name.unraw());
-    let mut used_error_names = BTreeSet::new();
-    let conversion_names = schema
-        .fields
-        .iter()
-        .map(|field| {
-            let FieldKind::Scalar(scalar) = &field.kind;
-            scalar.value_type.is_converted().then(|| {
-                unique_build_variant(
-                    &mut used_error_names,
-                    &format!("{}Value", pascal(&field.name)),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    let nested_variant = schema.nested.as_ref().map(|nested| {
-        unique_build_variant(&mut used_error_names, &pascal(&nested.name).to_string())
-    });
+    let (conversion_names, nested_names) = writer_error_names(schema);
     let has_conversions = conversion_names.iter().any(Option::is_some);
     let mut rendered = Vec::new();
+
     for (target_index, target) in slots.iter().enumerate() {
+        let physical_index = schema
+            .fields
+            .iter()
+            .position(|field| field.name == target.field)
+            .expect("writer slot has one physical field");
+        let physical = &schema.fields[physical_index];
         let mut impl_generics = schema.generics.clone();
         let mut output_parameter = TypeParam::from(output.clone());
         output_parameter.bounds.push(parse_quote!(#runtime::Output));
         impl_generics
             .params
             .push(GenericParam::Type(output_parameter));
+        add_offset_bounds(&mut impl_generics, &physical.offset, runtime);
+
         let build_fn = fresh_type_ident(&impl_generics, "BuildFn");
         let child_builder = fresh_type_ident(&impl_generics, "ChildBuilder");
         let mut current_states = Vec::with_capacity(slots.len());
@@ -137,10 +130,7 @@ fn render_setters(
             if index == target_index {
                 current_states.push(quote!(#runtime::__private::Unset));
                 returned_states.push(match &target.kind {
-                    SlotKind::Scalar(ty) => {
-                        let ty = value_type_tokens(*ty);
-                        quote!(#runtime::__private::Set<#ty>)
-                    }
+                    SlotKind::Value(ty) => quote!(#runtime::__private::Set<#ty>),
                     SlotKind::Nested(_) => quote!(#runtime::__private::Set<#child_builder>),
                 });
             } else {
@@ -152,130 +142,137 @@ fn render_setters(
                 returned_states.push(quote!(#state));
             }
         }
-        let (impl_params, _, impl_where) = impl_generics.split_for_impl();
         let current_writer = writer_type(writer_name, original_arguments, output, &current_states);
         let returned_writer =
             writer_type(writer_name, original_arguments, output, &returned_states);
         let field = &target.field;
+        let offset = builder_offset(&physical.offset, runtime);
+        let offset_local = private_ident(schema, &format!("{}_offset", field.unraw()));
+        let value = private_ident(schema, &format!("{}_value", field.unraw()));
+        let field_name = field.unraw().to_string();
+        let layout_failure = quote! {
+            #runtime::WriteError::Schema(
+                #error_name::Layout(#runtime::LayoutError { field: #field_name }),
+            )
+        };
+        let offset_binding = if schema.layout_can_fail() {
+            quote!(let #offset_local = #offset.ok_or_else(|| #layout_failure)?;)
+        } else {
+            quote!(
+                let #offset_local = #offset.expect("validated fixed layout offset");
+            )
+        };
+        let assignments = quote! {
+            #writer_name {
+                writer: self.writer,
+                #marker: ::core::marker::PhantomData,
+            }
+        };
 
-        match &target.kind {
-            SlotKind::Scalar(value_type) => {
-                let scalar = schema
-                    .fields
-                    .iter()
-                    .find(|candidate| candidate.name == *field)
-                    .map(|field| {
-                        let FieldKind::Scalar(scalar) = &field.kind;
-                        scalar
-                    })
-                    .expect("writer slot must refer to one schema scalar");
-                let offset = schema
-                    .fields
-                    .iter()
-                    .find(|candidate| candidate.name == *field)
-                    .map(|field| field.offset)
-                    .expect("writer slot must have one physical offset");
-                let prefix_width = schema.prefix_width;
-                let value_ty = value_type_tokens(*value_type);
+        match (&target.kind, &physical.kind) {
+            (SlotKind::Value(ty), FieldKind::Scalar(scalar)) => {
+                let schema_error =
+                    writer_error_type(schema, &error_name, has_conversions, None, runtime);
                 let wire_ty = scalar_type_tokens(scalar.wire_type);
                 let encode = to_bytes_method(scalar.endian);
-                let width = scalar.wire_type.width();
-                let field_index = schema
-                    .fields
-                    .iter()
-                    .position(|candidate| candidate.name == *field)
-                    .expect("writer slot must have one schema field");
-                let schema_error = writer_error_type(
-                    schema,
-                    &error_name,
-                    has_conversions,
-                    quote!(::core::convert::Infallible),
-                );
-                if value_type.is_converted() {
-                    let conversion_variant = conversion_names[field_index]
+                let encoded = private_ident(schema, &format!("{}_encoded", field.unraw()));
+                let write = if scalar.value_type.is_converted() {
+                    let conversion = convert_to_wire(scalar, &value, &wire_ty);
+                    let variant = conversion_names[physical_index]
                         .as_ref()
-                        .expect("converted writer field must have one error variant");
-                    let semantic =
-                        fresh_field_ident(schema, &format!("{}_semantic", field.unraw()));
-                    let encoded = fresh_field_ident(schema, &format!("{}_encoded", field.unraw()));
-                    let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
-                    rendered.push(quote! {
-                        impl #impl_params #current_writer #impl_where {
-                            #[doc = concat!("Writes field `", stringify!(#field), "`.")]
-                            #[inline]
-                            #vis fn #field(
-                                mut self,
-                                value: #value_ty,
-                            ) -> Result<
-                                #returned_writer,
-                                #runtime::WriteError<
-                                    #schema_error,
-                                    <#output as #runtime::Output>::GrowError,
-                                >,
-                            > {
-                                let #semantic: #value_ty = value;
-                                let #encoded: #wire_ty = #conversion.ok_or_else(|| {
-                                    #runtime::WriteError::Schema(
-                                        #error_name::#conversion_variant(
-                                            #runtime::ScalarBuildConversionError {
-                                                from: stringify!(#value_ty),
-                                                to: stringify!(#wire_ty),
-                                            },
-                                        ),
-                                    )
-                                })?;
-                                self.writer.ensure(#offset + #width, #prefix_width)?;
-                                self.writer.write_at(#offset, &#encoded.#encode())?;
-                                Ok(#writer_name {
-                                    writer: self.writer,
-                                    #marker: ::core::marker::PhantomData,
-                                })
-                            }
-                        }
-                    });
+                        .expect("converted field has one error variant");
+                    quote! {
+                        let #encoded: #wire_ty = #conversion.ok_or_else(|| {
+                            #runtime::WriteError::Schema(
+                                #error_name::#variant(#runtime::ScalarBuildConversionError {
+                                    from: stringify!(#ty),
+                                    to: stringify!(#wire_ty),
+                                }),
+                            )
+                        })?;
+                        self.writer.write_at(#offset_local, &#encoded.#encode())?;
+                    }
                 } else {
-                    let width = scalar.wire_type.width();
-                    rendered.push(quote! {
-                        impl #impl_params #current_writer #impl_where {
-                            #[doc = concat!("Writes field `", stringify!(#field), "`.")]
-                            #[inline]
-                            #vis fn #field(
-                                mut self,
-                                value: #value_ty,
-                            ) -> Result<
-                                #returned_writer,
-                                #runtime::WriteError<
-                                    #schema_error,
-                                    <#output as #runtime::Output>::GrowError,
-                                >,
-                            > {
-                                let encoded: #wire_ty = value;
-                                self.writer.ensure(#offset + #width, #prefix_width)?;
-                                self.writer.write_at(#offset, &encoded.#encode())?;
-                                Ok(#writer_name {
-                                    writer: self.writer,
-                                    #marker: ::core::marker::PhantomData,
-                                })
-                            }
+                    quote! {
+                        let #encoded: #wire_ty = #value;
+                        self.writer.write_at(#offset_local, &#encoded.#encode())?;
+                    }
+                };
+                let (impl_params, _, impl_where) = impl_generics.split_for_impl();
+                rendered.push(quote! {
+                    impl #impl_params #current_writer #impl_where {
+                        #[doc = concat!("Writes field `", stringify!(#field), "`.")]
+                        #[inline]
+                        #vis fn #field(
+                            mut self,
+                            #value: #ty,
+                        ) -> Result<
+                            #returned_writer,
+                            #runtime::WriteError<
+                                #schema_error,
+                                <#output as #runtime::Output>::GrowError,
+                            >,
+                        > {
+                            #offset_binding
+                            #write
+                            Ok(#assignments)
                         }
-                    });
-                }
+                    }
+                });
             }
-            SlotKind::Nested(ty) => {
-                let offset = schema
-                    .nested
-                    .as_ref()
-                    .map(|nested| nested.offset)
-                    .expect("nested writer slot must have one physical offset");
-                let nested_variant = nested_variant
-                    .as_ref()
-                    .expect("nested writer field must have one error variant");
+            (SlotKind::Value(ty), FieldKind::Bytes(_)) => {
+                let schema_error =
+                    writer_error_type(schema, &error_name, has_conversions, None, runtime);
+                let (impl_params, _, impl_where) = impl_generics.split_for_impl();
+                rendered.push(quote! {
+                    impl #impl_params #current_writer #impl_where {
+                        #[doc = concat!("Writes fixed byte-array field `", stringify!(#field), "`.")]
+                        #[inline]
+                        #vis fn #field(
+                            mut self,
+                            #value: #ty,
+                        ) -> Result<
+                            #returned_writer,
+                            #runtime::WriteError<
+                                #schema_error,
+                                <#output as #runtime::Output>::GrowError,
+                            >,
+                        > {
+                            #offset_binding
+                            self.writer.write_at(#offset_local, &#value)?;
+                            Ok(#assignments)
+                        }
+                    }
+                });
+            }
+            (SlotKind::Nested(ty), FieldKind::Nested(nested)) => {
+                let child_error = quote!(<#ty as #runtime::WireWrite<#child_builder>>::Error);
                 let schema_error = writer_error_type(
                     schema,
                     &error_name,
                     has_conversions,
-                    quote!(<#ty as #runtime::WireWrite<#child_builder>>::Error),
+                    Some((field, child_error)),
+                    runtime,
                 );
+                let variant = nested_names[physical_index]
+                    .as_ref()
+                    .expect("nested field has one error variant");
+                let child_writer = private_ident(schema, &format!("{}_writer", field.unraw()));
+                let create_child = if nested.terminal {
+                    quote! {
+                        match <#ty as #runtime::WireBuilder>::FIXED_SIZE {
+                            Some(size) => self.writer.fixed_child_at(#offset_local, size)?,
+                            None => self.writer.child_at(#offset_local)?,
+                        }
+                    }
+                } else {
+                    quote! {{
+                        let size = <#ty as #runtime::WireBuilder>::FIXED_SIZE
+                            .ok_or_else(|| #layout_failure)?;
+                        self.writer.fixed_child_at(#offset_local, size)?
+                    }}
+                };
+                let (impl_params, _, impl_where) = impl_generics.split_for_impl();
                 rendered.push(quote! {
                     impl #impl_params #current_writer #impl_where {
                         #[doc = concat!("Writes nested field `", stringify!(#field), "`.")]
@@ -296,32 +293,32 @@ fn render_setters(
                                 <#ty as #runtime::WireBuilder>::Builder,
                             ) -> #child_builder,
                         {
+                            #offset_binding
                             {
-                                let mut child_writer = self.writer.child_at(#offset)?;
+                                let mut #child_writer = #create_child;
                                 let value = build(<#ty as #runtime::WireBuilder>::builder());
                                 <#ty as #runtime::WireWrite<#child_builder>>::write(
                                     value,
-                                    &mut child_writer,
+                                    &mut #child_writer,
                                 )
                                 .map_err(|error| match error {
                                     #runtime::WriteError::Schema(error) => {
                                         #runtime::WriteError::Schema(
-                                            #error_name::#nested_variant(error),
+                                            #error_name::#variant(error),
                                         )
                                     }
                                     #runtime::WriteError::Output(error) => {
                                         #runtime::WriteError::Output(error)
                                     }
                                 })?;
+                                #child_writer.finish()?;
                             }
-                            Ok(#writer_name {
-                                writer: self.writer,
-                                #marker: ::core::marker::PhantomData,
-                            })
+                            Ok(#assignments)
                         }
                     }
                 });
             }
+            _ => unreachable!("slot kind must match its physical field"),
         }
     }
     rendered
@@ -337,34 +334,20 @@ fn render_finish(
 ) -> TokenStream {
     let vis = &schema.vis;
     let error_name = format_ident!("{}WriteError", schema.name.unraw());
-    let mut used_error_names = BTreeSet::new();
-    let conversion_names = schema
-        .fields
-        .iter()
-        .map(|field| {
-            let FieldKind::Scalar(scalar) = &field.kind;
-            scalar.value_type.is_converted().then(|| {
-                unique_build_variant(
-                    &mut used_error_names,
-                    &format!("{}Value", pascal(&field.name)),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
+    let (conversion_names, _) = writer_error_names(schema);
     let has_conversions = conversion_names.iter().any(Option::is_some);
-
     let mut impl_generics = schema.generics.clone();
     let mut output_parameter = TypeParam::from(output.clone());
     output_parameter.bounds.push(parse_quote!(#runtime::Output));
     impl_generics
         .params
         .push(GenericParam::Type(output_parameter));
+
     let mut complete_states = Vec::with_capacity(slots.len());
-    let mut child_error = quote!(::core::convert::Infallible);
+    let mut child_errors = Vec::new();
     for slot in slots {
         match &slot.kind {
-            SlotKind::Scalar(ty) => {
-                let ty = value_type_tokens(*ty);
+            SlotKind::Value(ty) => {
                 complete_states.push(quote!(#runtime::__private::Set<#ty>));
             }
             SlotKind::Nested(ty) => {
@@ -377,52 +360,112 @@ fn render_finish(
                     .make_where_clause()
                     .predicates
                     .push(parse_quote!(#ty: #runtime::WireWrite<#child>));
-                child_error = quote!(<#ty as #runtime::WireWrite<#child>>::Error);
                 complete_states.push(quote!(#runtime::__private::Set<#child>));
+                child_errors.push((
+                    slot.field.clone(),
+                    quote!(<#ty as #runtime::WireWrite<#child>>::Error),
+                ));
             }
         }
     }
-    let schema_error = writer_error_type(schema, &error_name, has_conversions, child_error);
+    for field in &schema.fields {
+        add_offset_bounds(&mut impl_generics, &field.offset, runtime);
+    }
     let complete_writer = writer_type(writer_name, original_arguments, output, &complete_states);
-    let (impl_params, _, impl_where) = impl_generics.split_for_impl();
-    let prefix_width = schema.prefix_width;
+    let schema_error =
+        writer_error_type_from_all(schema, &error_name, has_conversions, &child_errors, runtime);
+
     let constant_writes = schema
         .fields
         .iter()
         .zip(&conversion_names)
         .enumerate()
         .filter_map(|(index, (field, conversion_variant))| {
-            let FieldKind::Scalar(scalar) = &field.kind;
-            let constant = scalar.constant.as_ref()?;
-            let value_ty = value_type_tokens(scalar.value_type);
-            let wire_ty = scalar_type_tokens(scalar.wire_type);
-            let encode = to_bytes_method(scalar.endian);
-            let offset = field.offset;
-            if let Some(variant) = conversion_variant {
-                let semantic = fresh_field_ident(schema, &format!("constant_{index}_semantic"));
-                let encoded = fresh_field_ident(schema, &format!("constant_{index}_encoded"));
-                let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
-                Some(quote! {
-                    let #semantic: #value_ty = #constant;
-                    let #encoded: #wire_ty = #conversion.ok_or_else(|| {
-                        #runtime::WriteError::Schema(
-                            #error_name::#variant(
-                                #runtime::ScalarBuildConversionError {
-                                    from: stringify!(#value_ty),
-                                    to: stringify!(#wire_ty),
-                                },
-                            ),
-                        )
-                    })?;
-                    self.writer.write_at(#offset, &#encoded.#encode())?;
-                })
+            let constant = field.kind.constant()?;
+            let offset = builder_offset(&field.offset, runtime);
+            let offset_local = private_ident(schema, &format!("constant_{index}_offset"));
+            let field_name = field.name.unraw().to_string();
+            let layout_failure = quote! {
+                #runtime::WriteError::Schema(
+                    #error_name::Layout(#runtime::LayoutError { field: #field_name }),
+                )
+            };
+            let offset_binding = if schema.layout_can_fail() {
+                quote!(let #offset_local = #offset.ok_or_else(|| #layout_failure)?;)
             } else {
-                Some(quote! {
-                    let encoded: #wire_ty = #constant;
-                    self.writer.write_at(#offset, &encoded.#encode())?;
-                })
-            }
+                quote!(
+                    let #offset_local = #offset.expect("validated fixed layout offset");
+                )
+            };
+            Some(match &field.kind {
+                FieldKind::Scalar(scalar) => {
+                    let value_ty = value_type_tokens(scalar.value_type);
+                    let wire_ty = scalar_type_tokens(scalar.wire_type);
+                    let encode = to_bytes_method(scalar.endian);
+                    if let Some(variant) = conversion_variant {
+                        let semantic = private_ident(schema, &format!("constant_{index}_semantic"));
+                        let encoded = private_ident(schema, &format!("constant_{index}_encoded"));
+                        let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
+                        quote! {
+                            #offset_binding
+                            let #semantic: #value_ty = #constant;
+                            let #encoded: #wire_ty = #conversion.ok_or_else(|| {
+                                #runtime::WriteError::Schema(
+                                    #error_name::#variant(
+                                        #runtime::ScalarBuildConversionError {
+                                            from: stringify!(#value_ty),
+                                            to: stringify!(#wire_ty),
+                                        },
+                                    ),
+                                )
+                            })?;
+                            self.writer.write_at(#offset_local, &#encoded.#encode())?;
+                        }
+                    } else {
+                        quote! {
+                            #offset_binding
+                            let encoded: #wire_ty = #constant;
+                            self.writer.write_at(#offset_local, &encoded.#encode())?;
+                        }
+                    }
+                }
+                FieldKind::Bytes(_) => {
+                    let ty = &field.ty;
+                    let value = private_ident(schema, &format!("constant_{index}_bytes"));
+                    quote! {
+                        #offset_binding
+                        let #value: #ty = #constant;
+                        self.writer.write_at(#offset_local, &#value)?;
+                    }
+                }
+                FieldKind::Nested(_) => unreachable!(),
+            })
         });
+    let ensure_total = if schema
+        .fields
+        .last()
+        .is_some_and(|field| !matches!(field.kind, FieldKind::Nested(_)))
+    {
+        let total = builder_optional_size(schema, runtime);
+        if schema.layout_can_fail() {
+            quote! {
+                let total = #total.ok_or_else(|| {
+                    #runtime::WriteError::Schema(
+                        #error_name::Layout(#runtime::LayoutError { field: "<finish>" }),
+                    )
+                })?;
+                self.writer.ensure(total, total)?;
+            }
+        } else {
+            quote! {
+                let total = #total.expect("validated fixed layout width");
+                self.writer.ensure(total, total)?;
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
+    let (impl_params, _, impl_where) = impl_generics.split_for_impl();
 
     quote! {
         impl #impl_params #complete_writer #impl_where {
@@ -437,7 +480,7 @@ fn render_finish(
                     <#output as #runtime::Output>::GrowError,
                 >,
             > {
-                self.writer.ensure(#prefix_width, #prefix_width)?;
+                #ensure_total
                 #(#constant_writes)*
                 Ok(self.writer.finish())
             }
@@ -445,21 +488,99 @@ fn render_finish(
     }
 }
 
+fn writer_error_names(schema: &Schema) -> (Vec<Option<syn::Ident>>, Vec<Option<syn::Ident>>) {
+    let mut used = BTreeSet::from(["Layout".to_owned()]);
+    let conversions = schema
+        .fields
+        .iter()
+        .map(|field| match &field.kind {
+            FieldKind::Scalar(scalar) if scalar.value_type.is_converted() => Some(
+                unique_build_variant(&mut used, &format!("{}Value", pascal(&field.name))),
+            ),
+            FieldKind::Scalar(_) | FieldKind::Bytes(_) | FieldKind::Nested(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let nested = schema
+        .fields
+        .iter()
+        .map(|field| {
+            matches!(field.kind, FieldKind::Nested(_))
+                .then(|| unique_build_variant(&mut used, &pascal(&field.name).to_string()))
+        })
+        .collect();
+    (conversions, nested)
+}
+
 fn writer_error_type(
     schema: &Schema,
     error: &syn::Ident,
     has_conversions: bool,
-    child_error: TokenStream,
+    target: Option<(&syn::Ident, TokenStream)>,
+    _runtime: &TokenStream,
 ) -> TokenStream {
-    if schema.nested.is_some() {
-        quote!(#error<#child_error>)
-    } else if has_conversions {
-        quote!(#error)
+    let child_errors = schema
+        .nested_fields()
+        .map(|field| {
+            if target
+                .as_ref()
+                .is_some_and(|(name, _)| **name == field.name)
+            {
+                target.as_ref().expect("checked target").1.clone()
+            } else {
+                quote!(::core::convert::Infallible)
+            }
+        })
+        .collect::<Vec<_>>();
+    if child_errors.is_empty() {
+        if has_conversions || schema.layout_can_fail() {
+            quote!(#error)
+        } else {
+            quote!(::core::convert::Infallible)
+        }
     } else {
-        quote!(::core::convert::Infallible)
+        quote!(#error<#(#child_errors),*>)
     }
 }
 
+fn writer_error_type_from_all(
+    schema: &Schema,
+    error: &syn::Ident,
+    has_conversions: bool,
+    child_errors: &[(syn::Ident, TokenStream)],
+    _runtime: &TokenStream,
+) -> TokenStream {
+    let errors = schema
+        .nested_fields()
+        .map(|field| {
+            child_errors
+                .iter()
+                .find(|(name, _)| *name == field.name)
+                .expect("complete writer has every nested error")
+                .1
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        if has_conversions || schema.layout_can_fail() {
+            quote!(#error)
+        } else {
+            quote!(::core::convert::Infallible)
+        }
+    } else {
+        quote!(#error<#(#errors),*>)
+    }
+}
+
+fn add_offset_bounds(generics: &mut syn::Generics, offset: &LayoutOffset, runtime: &TokenStream) {
+    for term in &offset.terms {
+        if let SizeTerm::Nested(ty) = term {
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#ty: #runtime::WireBuilder));
+        }
+    }
+}
 fn writer_type(
     writer: &syn::Ident,
     original_arguments: &[TokenStream],

@@ -2,8 +2,8 @@
 
 This document defines the target production architecture and clean-cutover contract for
 `wire-repr`. The current implementation is the fixed/generic vertical: named structs, fixed
-scalars, constants, explicit logical conversions, schema validators, and one terminal
-nested child with generic and manual capability composition. Later sections describing enums,
+scalars and byte arrays, constants, explicit logical conversions, schema validators, and multiple
+fixed nested children with one optional terminal variable child. Later sections describing enums,
 dynamic geometry, collections, computed fields, selections, and cursors are an implementation
 plan, not claims about the shipped surface. New layout classes extend this one
 model rather than restoring the removed legacy renderer or introducing parallel modes.
@@ -100,6 +100,11 @@ Recursive schemas do not create a separate eager parser. Length-bounded and term
 edges open one level at a time; homogeneous prefix trees use counter scanners; other unambiguous
 layouts replay only when a requested field requires it. Geometry that cannot be decoded
 unambiguously from the declared physical representation is a derive error.
+
+The current fixed-layout vertical cannot inspect a generic child's associated fixed-size capability
+during macro expansion. Instantiating a nonterminal child whose `FIXED_SIZE` is `None` therefore
+returns a field-site `LayoutUnavailable`/`LayoutError` from framing or writing; it never panics.
+The demand-geometry vertical replaces that capability error with lazy endpoint discovery.
 
 Manual `WireView` implementations use the same contract and are `unsafe impl`s. They explicitly
 separate `frame` from `from_validated_parts` and certify that owned, reference-free state remains
@@ -355,18 +360,18 @@ ambiguous are rejected by derive rather than guarded by an arbitrary runtime bud
 
 ## 11. Implementation order
 
-The remaining target is delivered as dependency-ordered verticals:
+The fixed-layout foundation now includes const-generic byte arrays and multiple nested fields. The
+remaining target is delivered as dependency-ordered verticals:
 
-1. generalize the schema IR to fixed byte arrays and multiple nested fields;
-2. add raw bytes, rest, bounded children, padding, alignment, and placement with demand geometry;
-3. add the controller dependency DAG and conditional choice groups;
-4. add range-and-count collection views, streaming array writers, and exact View copying;
-5. add static enums with exact unknown forwarding plus nominal and inline bitfields;
-6. add typed `include`/`exclude` selections, chunk and byte iteration, `computed`, and
+1. add raw bytes, rest, bounded children, padding, alignment, and placement with demand geometry;
+2. add the controller dependency DAG and conditional choice groups;
+3. add range-and-count collection views, streaming array writers, and exact View copying;
+4. add static enums with exact unknown forwarding plus nominal and inline bitfields;
+5. add typed `include`/`exclude` selections, chunk and byte iteration, `computed`, and
    `try_computed`;
-7. add capability-gated `views` and heterogeneous cursors, then compose recursive layouts from the
+6. add capability-gated `views` and heterogeneous cursors, then compose recursive layouts from the
    same lazy child and collection capabilities;
-8. finish fuzzing, protocol fixtures, public examples, and release verification.
+7. finish fuzzing, protocol fixtures, public examples, and release verification.
 
 Each vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads, behavioral
 tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not land as a
@@ -379,10 +384,11 @@ with one semantic oracle. Optional unsafe implementations are informational lowe
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
 
-The current mandatory corpus has five discovered zones and thirteen cases: fixed scalars and
+The current mandatory corpus has six discovered zones and fifteen cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
-lattice, and fixed, automatic, and callback-driven output growth. Each covers read and write paths
-where applicable. The measurement tool inspects final linked consumer symbols for code shape, call
+lattice, fixed byte arrays with multiple nested children, and fixed, automatic, and callback-driven
+output growth. Each covers read and write paths where applicable. The measurement tool inspects
+final linked consumer symbols for code shape, call
 topology, stack, allocation, and dispatch evidence. Runtime performance uses calibrated interleaved
 samples and reports distribution statistics. LLVM IR may explain an optimization result but is not
 treated as a latency oracle. State and artifact-size probes remain isolated from measured hot-path

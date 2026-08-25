@@ -5,25 +5,42 @@ pub(super) struct Schema {
     pub(super) name: Ident,
     pub(super) generics: Generics,
     pub(super) fields: Vec<Field>,
-    pub(super) prefix_width: usize,
-    pub(super) nested: Option<NestedField>,
     pub(super) validators: Vec<Path>,
 }
 
 pub(super) struct Field {
     pub(super) name: Ident,
-    pub(super) kind: FieldKind,
-    pub(super) offset: usize,
-}
-
-pub(super) struct NestedField {
-    pub(super) name: Ident,
     pub(super) ty: Type,
-    pub(super) offset: usize,
+    pub(super) kind: FieldKind,
+    pub(super) offset: LayoutOffset,
 }
 
 pub(super) enum FieldKind {
     Scalar(Scalar),
+    Bytes(FixedBytes),
+    Nested(NestedField),
+}
+
+pub(super) struct FixedBytes {
+    pub(super) len: Expr,
+    pub(super) constant: Option<Expr>,
+}
+
+pub(super) struct NestedField {
+    pub(super) ty: Type,
+    pub(super) terminal: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct LayoutOffset {
+    pub(super) terms: Vec<SizeTerm>,
+}
+
+#[derive(Clone)]
+pub(super) enum SizeTerm {
+    Fixed(usize),
+    Expr(Expr),
+    Nested(Type),
 }
 
 pub(super) struct Scalar {
@@ -57,6 +74,7 @@ pub(super) enum ValueType {
     Bool,
     Char,
 }
+
 #[derive(Clone, Copy)]
 pub(super) enum Endian {
     Native,
@@ -130,6 +148,24 @@ impl Scalar {
     }
 }
 
+impl FieldKind {
+    pub(super) fn constant(&self) -> Option<&Expr> {
+        match self {
+            Self::Scalar(scalar) => scalar.constant.as_ref(),
+            Self::Bytes(bytes) => bytes.constant.as_ref(),
+            Self::Nested(_) => None,
+        }
+    }
+
+    pub(super) fn size_term(&self) -> SizeTerm {
+        match self {
+            Self::Scalar(scalar) => SizeTerm::Fixed(scalar.width()),
+            Self::Bytes(bytes) => SizeTerm::Expr(bytes.len.clone()),
+            Self::Nested(nested) => SizeTerm::Nested(nested.ty.clone()),
+        }
+    }
+}
+
 impl Schema {
     pub(super) fn parse(input: DeriveInput, owner: &str) -> syn::Result<Self> {
         let validators = parse_item_attributes(&input.attrs, owner)?;
@@ -151,10 +187,8 @@ impl Schema {
             }
         };
         let field_count = fields.len();
-
-        let mut parsed = Vec::with_capacity(fields.len());
-        let mut nested = None;
-        let mut offset = 0usize;
+        let mut parsed = Vec::with_capacity(field_count);
+        let mut preceding = Vec::new();
 
         for (index, field) in fields.into_iter().enumerate() {
             let name = field.ident.expect("named fields have identifiers");
@@ -163,30 +197,30 @@ impl Schema {
                 constant,
                 representation,
             } = FieldAttributes::parse(&field.attrs)?;
-            let primitive = primitive_name(&field.ty);
+            let ty = field.ty;
+            let primitive = primitive_name(&ty);
             let value_type = primitive.as_deref().and_then(ValueType::from_name);
-
-            if let Some(value_type) = value_type {
+            let kind = if let Some(value_type) = value_type {
                 let wire_type = match value_type {
-                    ValueType::Scalar(ty) => {
+                    ValueType::Scalar(scalar_type) => {
                         if representation.is_some() {
                             return Err(syn::Error::new_spanned(
-                                &field.ty,
+                                &ty,
                                 "`as` is only used for Rust primitives without an implicit wire width",
                             ));
                         }
-                        ty
+                        scalar_type
                     }
                     ValueType::Usize | ValueType::Bool | ValueType::Char => {
                         let wire_type = representation.ok_or_else(|| {
                             syn::Error::new_spanned(
-                                &field.ty,
+                                &ty,
                                 "this Rust primitive requires an explicit unsigned `as` wire type",
                             )
                         })?;
                         if !wire_type.is_unsigned_integer() {
                             return Err(syn::Error::new_spanned(
-                                &field.ty,
+                                &ty,
                                 "this Rust primitive requires an unsigned integer wire type",
                             ));
                         }
@@ -195,54 +229,55 @@ impl Schema {
                     ValueType::Isize => {
                         let wire_type = representation.ok_or_else(|| {
                             syn::Error::new_spanned(
-                                &field.ty,
+                                &ty,
                                 "isize requires an explicit signed `as` wire type",
                             )
                         })?;
                         if !wire_type.is_signed_integer() {
                             return Err(syn::Error::new_spanned(
-                                &field.ty,
+                                &ty,
                                 "isize requires a signed integer wire type",
                             ));
                         }
                         wire_type
                     }
                 };
-                let endian = scalar_endian(wire_type, endian, &field.ty)?;
-                let scalar = Scalar {
+                let endian = scalar_endian(wire_type, endian, &ty)?;
+                FieldKind::Scalar(Scalar {
                     value_type,
                     wire_type,
                     endian,
                     constant,
-                };
-                let width = scalar.width();
-                parsed.push(Field {
-                    name,
-                    kind: FieldKind::Scalar(scalar),
-                    offset,
-                });
-                offset = offset.checked_add(width).ok_or_else(|| {
-                    syn::Error::new_spanned(&field.ty, "fixed schema width overflows usize")
-                })?;
-                continue;
-            }
+                })
+            } else if let Some(len) = byte_array_len(&ty)? {
+                if endian.is_some() || representation.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &ty,
+                        "fixed byte arrays do not accept endian or `as` attributes",
+                    ));
+                }
+                FieldKind::Bytes(FixedBytes { len, constant })
+            } else {
+                if endian.is_some() || constant.is_some() || representation.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &ty,
+                        "nested schema fields do not accept scalar wire attributes",
+                    ));
+                }
+                FieldKind::Nested(NestedField {
+                    ty: ty.clone(),
+                    terminal: index + 1 == field_count,
+                })
+            };
 
-            if endian.is_some() || constant.is_some() || representation.is_some() {
-                return Err(syn::Error::new_spanned(
-                    field.ty,
-                    "nested schema fields do not accept scalar wire attributes",
-                ));
-            }
-            if nested.is_some() || index + 1 != field_count {
-                return Err(syn::Error::new_spanned(
-                    field.ty,
-                    "schema structs support one terminal nested schema field",
-                ));
-            }
-
-            nested = Some(NestedField {
+            let offset = LayoutOffset {
+                terms: preceding.clone(),
+            };
+            preceding.push(kind.size_term());
+            parsed.push(Field {
                 name,
-                ty: field.ty,
+                ty,
+                kind,
                 offset,
             });
         }
@@ -252,10 +287,27 @@ impl Schema {
             name: input.ident,
             generics: input.generics,
             fields: parsed,
-            prefix_width: offset,
-            nested,
             validators,
         })
+    }
+
+    pub(super) fn nested_fields(&self) -> impl Iterator<Item = &Field> {
+        self.fields
+            .iter()
+            .filter(|field| matches!(field.kind, FieldKind::Nested(_)))
+    }
+
+    pub(super) fn size_terms(&self) -> Vec<SizeTerm> {
+        self.fields
+            .iter()
+            .map(|field| field.kind.size_term())
+            .collect()
+    }
+
+    pub(super) fn layout_can_fail(&self) -> bool {
+        self.size_terms()
+            .iter()
+            .any(|term| !matches!(term, SizeTerm::Fixed(_)))
     }
 }
 
@@ -364,4 +416,17 @@ fn primitive_name(ty: &Type) -> Option<String> {
         return None;
     }
     Some(path.path.segments[0].ident.to_string())
+}
+
+fn byte_array_len(ty: &Type) -> syn::Result<Option<Expr>> {
+    let Type::Array(array) = ty else {
+        return Ok(None);
+    };
+    if primitive_name(&array.elem).as_deref() != Some("u8") {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "fixed wire arrays currently require `u8` elements",
+        ));
+    }
+    Ok(Some(array.len.clone()))
 }

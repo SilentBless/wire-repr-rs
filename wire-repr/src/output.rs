@@ -49,6 +49,20 @@ pub enum OutputError<E> {
         /// Parent high-water mark that must not be overwritten.
         written: usize,
     },
+    /// A fixed-width nested writer exceeded its assigned region.
+    ChildOverflow {
+        /// Attempted child end offset.
+        end: usize,
+        /// Exclusive end of the assigned child region.
+        limit: usize,
+    },
+    /// A fixed-width nested writer stopped before filling its assigned region.
+    ChildIncomplete {
+        /// Actual child end offset.
+        end: usize,
+        /// Required exclusive end of the assigned child region.
+        limit: usize,
+    },
     /// Output length arithmetic overflowed `usize`.
     LengthOverflow,
 }
@@ -79,6 +93,15 @@ impl<E: fmt::Display> fmt::Display for OutputError<E> {
                 formatter,
                 "nested output position {position} precedes written prefix {written}"
             ),
+            Self::ChildOverflow { end, limit } => {
+                write!(
+                    formatter,
+                    "nested output ended at {end}, region ends at {limit}"
+                )
+            }
+            Self::ChildIncomplete { end, limit } => {
+                write!(formatter, "nested output ended at {end}, expected {limit}")
+            }
             Self::LengthOverflow => formatter.write_str("output length overflow"),
         }
     }
@@ -401,7 +424,29 @@ impl<O: Output> Writer<O> {
         }
         self.ensure(position, position)?;
         self.cursor = position;
-        Ok(ChildWriter { writer: self })
+        Ok(ChildWriter {
+            writer: self,
+            cursor: position,
+            limit: None,
+        })
+    }
+
+    /// Creates a fixed-width child cursor that may backfill its disjoint output region.
+    #[doc(hidden)]
+    pub fn fixed_child_at(
+        &mut self,
+        position: usize,
+        len: usize,
+    ) -> Result<ChildWriter<'_, O>, OutputError<O::GrowError>> {
+        let end = position
+            .checked_add(len)
+            .ok_or(OutputError::LengthOverflow)?;
+        self.ensure(end, end.max(self.cursor))?;
+        Ok(ChildWriter {
+            writer: self,
+            cursor: position,
+            limit: Some(end),
+        })
     }
 
     /// Finishes the current representation without clearing unused output bytes.
@@ -417,18 +462,45 @@ impl<O: Output> Writer<O> {
 /// Restricted sequential cursor supplied to detached manual and derived children.
 pub struct ChildWriter<'writer, O> {
     writer: &'writer mut Writer<O>,
+    cursor: usize,
+    limit: Option<usize>,
 }
 
 impl<O: Output> ChildWriter<'_, O> {
     /// Current absolute output offset.
     #[must_use]
-    pub fn position(&self) -> usize {
-        self.writer.position()
+    pub const fn position(&self) -> usize {
+        self.cursor
     }
 
-    /// Writes bytes sequentially and advances the shared parent cursor.
+    /// Writes bytes sequentially and advances this child cursor.
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), OutputError<O::GrowError>> {
-        self.writer.write(bytes)
+        let end = self
+            .cursor
+            .checked_add(bytes.len())
+            .ok_or(OutputError::LengthOverflow)?;
+        if let Some(limit) = self.limit
+            && end > limit
+        {
+            return Err(OutputError::ChildOverflow { end, limit });
+        }
+        self.writer.write_at(self.cursor, bytes)?;
+        self.cursor = end;
+        Ok(())
+    }
+
+    /// Verifies that a fixed-width child filled its complete assigned region.
+    #[doc(hidden)]
+    pub fn finish(self) -> Result<(), OutputError<O::GrowError>> {
+        if let Some(limit) = self.limit
+            && self.cursor != limit
+        {
+            return Err(OutputError::ChildIncomplete {
+                end: self.cursor,
+                limit,
+            });
+        }
+        Ok(())
     }
 }
 

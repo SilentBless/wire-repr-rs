@@ -86,6 +86,8 @@ use wire_repr::{ChildWriter, Output, WireBuilder, WireWrite, WriteError};
 struct LittleEndianWord;
 
 impl WireBuilder for LittleEndianWord {
+    const FIXED_SIZE: Option<usize> = Some(4);
+
     type Builder = ();
 
     fn builder() -> Self::Builder {}
@@ -104,9 +106,11 @@ impl WireWrite<u32> for LittleEndianWord {
 }
 ```
 
-Manual writers receive the same progressive cursor as generated children. They may return semantic
-errors after partially modifying unpublished output; wire-repr never allocates, rolls back, or
-clears bytes.
+Manual writers receive the same progressive cursor as generated children. `FIXED_SIZE` enables a
+manual child before later physical fields; omitting it keeps the manual representation
+variable-width and terminal-only until dynamic geometry is available. Manual writers may return
+semantic errors after partially modifying unpublished output; wire-repr never allocates, rolls
+back, or clears bytes.
 
 Manual `WireView` implementations are an explicit unsafe boundary: retained state must remain
 memory-safe for any immutable span of the framed length. Generated APIs remain safe, retain
@@ -175,11 +179,11 @@ deviation instead of treating LLVM instruction counts as performance truth.
 
 ## Design direction
 
-The implemented surface currently covers fixed scalar structs, constants, explicit logical
-conversions, schema validators, and one terminal generic or manual child with progressive
-typestate writers.
+The implemented surface currently covers fixed scalar and byte-array structs, constants, explicit
+logical conversions, schema validators, multiple fixed generic or manual children, one optional
+terminal variable child, and progressive typestate writers.
 
-The remaining production classes are multiple and variable nested fields, fixed and runtime arrays,
+The remaining production classes are variable nested fields,
 raw bytes and rest spans, controllers and conditional groups, static selectors with exact unknown
 forwarding, nominal and inline bitfields, padding/alignment/placement, demand-framed recursive
 layouts, physical selections, computed fields, and capability-gated `views`/`cursor` traversal.

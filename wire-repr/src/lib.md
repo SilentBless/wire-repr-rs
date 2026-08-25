@@ -75,6 +75,8 @@ use wire_repr::{ChildWriter, Output, WireBuilder, WireWrite, WriteError};
 struct LittleEndianWord;
 
 impl WireBuilder for LittleEndianWord {
+    const FIXED_SIZE: Option<usize> = Some(4);
+
     type Builder = ();
 
     fn builder() -> Self::Builder {}
@@ -95,7 +97,8 @@ impl WireWrite<u32> for LittleEndianWord {
 
 Generated parents configure both derived and manual children through the same closure setter.
 The child exposes its detached initial state through `WireBuilder`; `WireWrite<V>` writes the
-closure result directly into the parent's output.
+closure result directly into the parent's output. A manual `FIXED_SIZE` allows later physical
+fields while bounded child cursors prevent over- or under-writing that declared region.
 
 Primitive schemas support all fixed-width Rust integers and floats. `usize`, `isize`, `bool`, and
 `char` require an explicit physical representation such as `#[wire(as = u32, le)]`; both read and
@@ -108,10 +111,13 @@ write conversions are checked.
 - Derived descriptors are reference-free and `State: 'static`; manual implementations certify the
   same invariant through unsafe `WireView`.
 - Scalar getters decode lazily from exact source bytes.
+- Fixed `[u8; N]` fields and constants preserve their exact bytes without endian conversion.
+- Multiple fixed nested children retain independent state and field-site errors.
 - Fixed writers return `NeedMore`; growable collections use their existing `Extend<u8>` capability.
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-The production design extends the same model to arrays, conditional fields, static and negotiated
-enum selectors, limits, cursors, physical selections, and computed fields. It does not add
-runtime schemas, semantic object materialization, async I/O, or feature-selected renderers.
+The production design extends the same model to arrays, conditional fields, static enum selectors,
+bitfields, cursors, physical selections, and computed fields. It does not add negotiated selector
+maps, hidden indexes, general resource-limit machinery, runtime schemas, semantic object
+materialization, async I/O, or feature-selected renderers.
