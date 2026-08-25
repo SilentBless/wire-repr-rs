@@ -179,9 +179,11 @@ The implemented surface currently covers fixed scalar structs, constants, explic
 conversions, schema validators, and one terminal generic or manual child with progressive
 typestate writers.
 
-Counted arrays, conditional fields, selectors, padding, alignment, placement, resource limits,
-heterogeneous builders, recursive iterative framing, physical-byte selections, and computed fields
-remain planned layout classes. `computed` and `try_computed` are not present in the current
-production renderer; their former implementation belonged to the removed legacy derive. New layout
-classes must extend the progressive writer model and gain behavioral and generated/idiomatic/
-best-safe workloads when implemented.
+The remaining production classes are multiple and variable nested fields, fixed and runtime arrays,
+raw bytes and rest spans, controllers and conditional groups, static selectors with exact unknown
+forwarding, nominal and inline bitfields, padding/alignment/placement, demand-framed recursive
+layouts, physical selections, computed fields, and capability-gated `views`/`cursor` traversal.
+Collections retain only range and count; untouched nested values are not eagerly traversed.
+Negotiated selector maps, hidden indexes, full-tree validation, and a general limits framework are
+not part of the target core. Every new class must extend the progressive writer model and add
+behavioral plus generated/idiomatic/best-safe workload evidence.

@@ -4,8 +4,8 @@ This document defines the target production architecture and clean-cutover contr
 `wire-repr`. The current implementation is the fixed/generic vertical: named structs, fixed
 scalars, constants, explicit logical conversions, schema validators, and one terminal
 nested child with generic and manual capability composition. Later sections describing enums,
-dynamic geometry, collections, computed fields, selections, cursors, and limits are an
-implementation plan, not claims about the shipped surface. New layout classes extend this one
+dynamic geometry, collections, computed fields, selections, and cursors are an implementation
+plan, not claims about the shipped surface. New layout classes extend this one
 model rather than restoring the removed legacy renderer or introducing parallel modes.
 
 ## 1. Product boundary
@@ -62,36 +62,44 @@ backing contract used by slices, `Vec`, `bytes::Bytes`, and ordinary owned wrapp
 `AsRef` implementations that switch or mutate their projection are outside the API contract.
 
 A public generated view trait is lifetime-free. The opaque concrete type captures the backing and
-its lifetime. Nested getters return small views borrowing their parent. They do not clone or slice
-owned backing into independent handles.
+its lifetime. Nested getters return small views borrowing their parent. A getter is infallible when
+the parent can prove its range cheaply; deferred dynamic getters return `Result` and frame only the
+requested range. Nested views do not clone or slice owned backing into independent handles.
 
-`view()` requires one exact representation. `view_unchecked()` skips declared semantic validators,
-not structural safety.
+`view()` treats the supplied span as one exact representation and proves root-local geometry.
+Declared outer extents must match that span. It does not traverse untouched nested values or
+collections merely to validate them. Explicit schema validators run only because the schema author
+requested that domain check; `view_unchecked()` skips them without weakening local memory safety.
 
 ## 3. Framing and descriptors
 
-Framing establishes only the geometry required to locate and safely expose fields. Values remain
-lazy. Fixed scalar getters decode from exact source bytes when called.
+Framing establishes only the geometry required to locate and safely expose the requested fields.
+Values remain lazy. Fixed scalar getters decode from exact source bytes when called.
 
 Every schema has a static read capability with:
 
 - a lifetime-free typed error;
 - a reference-free `State: 'static` descriptor;
-- one leading-frame operation;
 - a borrowed nested-view family;
-- fixed-width metadata when provable.
+- fixed-width and leading-extent metadata when provable.
 
-Top-level view state owns the descriptor. A nested child view borrows its exact input span and the
-corresponding descriptor state. Descriptors never contain input references, self-references,
-runtime schema objects, or dynamic dispatch.
+Top-level view state owns the descriptor. A nested child view borrows its input span and the
+descriptor state already proven for that span. Descriptors never contain input references,
+self-references, runtime schema objects, dynamic dispatch, or per-item indexes.
 
-Generated descriptors are specialized per schema:
+Generated descriptors and getters specialize by geometry:
 
-- fixed offsets occupy no geometry state;
-- terminal child state is stored directly;
-- sequential dynamic geometry stores only necessary endpoints;
-- controller values are retained only when later geometry needs them;
-- recursive and repeated layouts do not allocate per-item indexes by default.
+- fixed and suffix-derived offsets occupy no state;
+- length-bounded and terminal children expose direct ranges;
+- homogeneous prefix grammars use counters;
+- sequential dynamic geometry retains only endpoints actually discovered;
+- a dependent getter may replay earlier variable geometry instead of caching an index;
+- controller values are retained only when later geometry needs them.
+
+Recursive schemas do not create a separate eager parser. Length-bounded and terminal recursive
+edges open one level at a time; homogeneous prefix trees use counter scanners; other unambiguous
+layouts replay only when a requested field requires it. Geometry that cannot be decoded
+unambiguously from the declared physical representation is a derive error.
 
 Manual `WireView` implementations use the same contract and are `unsafe impl`s. They explicitly
 separate `frame` from `from_validated_parts` and certify that owned, reference-free state remains
@@ -150,6 +158,29 @@ Controller setters are omitted.
 Controller paths may be nested but must identify physically earlier values for one-pass framing.
 Generated builder patches are static type-level operations; paths do not exist at runtime.
 
+Bitfields share one representation model in two source forms. A reusable nominal type declares its
+physical integer on the item and its logical ranges on fields:
+
+```rust
+#[derive(WireView, WireBuilder)]
+#[wire(as = u32, le)]
+struct Flags {
+    #[wire(bit = 0)]
+    enabled: bool,
+    #[wire(bits = 1..=3)]
+    kind: u8,
+}
+```
+
+For a few local bits, zero-width logical fields may project an earlier physical integer directly
+with `bits_of = path` rather than requiring a wrapper type. Both forms compile to the same masks,
+checked conversions, and generated state. A fresh builder zeros unassigned bits; exact View copying
+preserves every source bit.
+
+Padding, alignment, and forward-placement gaps are geometry, not implicit canonicality checks.
+Views accept their source bytes, fresh builders write zeroes, and exact View copying preserves the
+original representation. A protocol requiring a specific fill declares constant bytes explicitly.
+
 ## 6. Enums
 
 Static enums declare one general selector representation and per-variant values:
@@ -165,18 +196,14 @@ enum Value {
 }
 ```
 
-Views expose a generated borrowed variant enum for ordinary exhaustive `match`. If an explicit
-`#[wire(unknown)]` variant exists, unknown selectors are preserved; otherwise they are rejected
-with the raw selector and absolute offset.
+Views expose a generated borrowed variant enum for ordinary exhaustive `match`. An explicit
+`#[wire(unknown)]` variant preserves the raw selector and exact bounded or terminal body bytes, so
+it can be forwarded through a writer without semantic reconstruction. Unknown selectors are
+rejected with the raw selector and absolute offset when no unknown variant exists. A nonterminal
+unknown body without a provable physical boundary is a derive error.
 
-A non-generic enum may opt into negotiated runtime selector values with `dynamic_values`.
-The derive generates a typestate values builder with one setter per variant and duplicate-value
-validation. A configured outer schema binds values through `Schema::with(&values)`. Dependencies
-propagate statically through concrete nested schemas. Values are used only during framing or
-progressive writing and are not retained in views after those operations.
-
-Small dynamic enums use inlined comparisons; larger enums use a generated sorted lookup. Both
-strategies require handwritten codegen and latency comparators.
+Selector values are compile-time schema facts. Negotiated runtime selector maps are outside the
+derive contract; a protocol that negotiates opcodes uses a manual wrapper capability.
 
 ## 7. Sequences and cursors
 
@@ -185,10 +212,10 @@ The product concepts are distinct:
 - `views` traverses consecutive representations of one schema;
 - `cursor` retains a position so different schemas can consume consecutive representations.
 
-For a fixed schema, `views` performs one upfront sequence check and returns an infallible
-`ExactSizeIterator`. For a variable schema, `views` returns a facade whose `next` is
-`Result<Option<View>, Error>`. The first invalid item is fail-closed; later boundaries are not
-trusted or skipped.
+For a fixed schema, `views` derives item count arithmetically and returns an infallible
+`ExactSizeIterator`. For a variable schema with a leading-extent capability, `views` returns a
+facade whose `next` is `Result<Option<View>, Error>`. Schemas without a decodable leading extent do
+not expose sequence or cursor entrypoints.
 
 Cursor usage is schema-led:
 
@@ -198,12 +225,12 @@ let body = Body::next(&mut cursor)?;
 let remaining = cursor.remaining();
 ```
 
-Views yielded by a cursor borrow the original backing, not the cursor, and may coexist. Failure,
-`NeedMore`, or resource exhaustion does not advance the cursor.
+Views yielded by a cursor borrow the original backing, not the cursor, and may coexist. Failure or
+`NeedMore` does not advance the cursor.
 
-A runtime array getter returns the element schema's `views` facade directly. Variable collections
-may replay item boundary traversal when accessed after parent framing. A future indexed mode may
-accept caller-owned storage, but the core never allocates an index silently.
+A runtime array getter returns a facade retaining only the collection range and authoritative
+count. Its iterator frames one exact item per `next`; a repeated traversal replays item geometry.
+The core does not retain or allocate a per-item range index.
 
 ## 8. Progressive writers
 
@@ -234,17 +261,40 @@ Derived and manual children use one closure setter. Public `WireBuilder` supplie
 typestate, and `WireWrite<V>` emits the closure result into the parent's progressive cursor. The
 API does not generate field-suffixed `_value` or `_default` methods.
 
+Conditional fields and groups use one collision-free choice closure:
+
+```rust
+packet.details(|details| match value {
+    Some(value) => details.present(|details| details.value(value)),
+    None => details.absent(),
+})?
+```
+
 Generated code writes fixed fields directly at compile-time offsets, retains offsets rather than
 pointers across relocations, and patches controllers or computed destinations when their
-dependencies become available. Runtime collections write items as caller code supplies them; no
-one-shot iterator or per-item plan is buffered silently.
+dependencies become available. Runtime collections use a streaming closure that writes one item at
+a time and patches count or byte controllers without retaining item plans:
+
+```rust
+packet.items(|mut items| {
+    for value in source {
+        items = items.item(|item| item.value(value))?;
+    }
+    Ok(items)
+})?
+```
+
+Generated views implement the same item write capability by copying their exact represented bytes.
+A caller may therefore stream an array facade from one view into another writer or retain views in
+caller-owned storage before writing. No semantic reconstruction, per-item plan, or hidden
+allocation is required.
 
 Errors are reported when discovered. Output may contain a partial unpublished representation;
 wire-repr does not clear, restore, or roll back bytes. `finish()` returns `Written<O>` with the
 exact represented range. Applications requiring atomic publication use staging, double buffering,
 or buffer-pool ownership outside wire-repr.
 
-## 9. Physical byte sources and computed fields
+## 9. Physical byte selections and computed fields
 
 Views and writers expose root-relative typed physical selections:
 
@@ -253,16 +303,33 @@ view.bytes().include(|fields| fields.header | fields.body.payload)
 view.bytes().exclude(|fields| fields.checksum)
 ```
 
-Selections preserve physical order and remain fragmented. They expose borrowed chunks, virtual
-fills, bounded ranges, and byte iteration without packet-sized materialization.
+Selections preserve physical order, merge overlap, and remain fragmented without materialization.
+They expose `len()`, borrowed `chunks()`, byte iteration, and exact copying. A simple byte algorithm
+may fold `selection.bytes()`; an optimized checksum feeds each `selection.chunks()` slice directly
+to its update routine.
 
-For `WireView`, a computed field is the stored decoded value; reading does not recompute it.
-For `WireBuilder`, generated dependency order determines when a computed callback can run.
-Callbacks consume selections over already written output and minimal retained values. Fallible
-computed callbacks may leave partial unpublished output. Self-dependency, cycles, missing fields,
-and geometry cycles remain derive errors.
+Computed callbacks retain the earlier field-expression syntax and may mix logical values with
+physical selections:
 
-## 10. Errors, limits, and incomplete input
+```rust
+#[wire(computed = crc32(exclude(self)))]
+checksum: u32,
+
+#[wire(computed = ordered_count(
+    kind,
+    include(first, tail.payload),
+    exclude(self, second),
+))]
+ordered: u32,
+```
+
+`self` names the computed destination independently of its Rust field name. Including `self` is a
+cycle; excluding it is the ordinary checksum form. `try_computed` uses the same arguments but
+expects a fallible callback. The generated dependency DAG runs each callback as soon as all logical
+values and physical ranges it consumes are ready. Reading returns the stored value and never
+recomputes it. A fallible callback may leave partial unpublished output.
+
+## 10. Errors and incomplete input
 
 Generated read and build errors are nominal field-site enums derived with `thiserror`. Nested
 errors retain their concrete source types. Read errors carry absolute root-input offsets.
@@ -280,55 +347,66 @@ The amount is exact when provable and otherwise a lower bound. wire-repr does no
 `AsyncRead`, segmented input, or resumable parser state. The caller appends to its buffer and
 retries.
 
-Resource policy precedence is:
+The core has no general depth, item, or work-budget API. It performs no hidden full-tree or
+full-collection validation: dynamic traversal happens only through the getter, iterator, or cursor
+operation requested by the caller. Checked arithmetic and input bounds protect geometry; the
+application owns policy for how far it chooses to iterate. Layouts whose physical boundaries are
+ambiguous are rejected by derive rather than guarded by an arbitrary runtime budget.
 
-```text
-library default < schema default < call-site override
-```
+## 11. Implementation order
 
-Configured schemas preserve the complete entrypoint surface:
+The remaining target is delivered as dependency-ordered verticals:
 
-```rust
-Packet::limits(Limits::<64>::new().work(100_000)).view(input)?
-```
+1. generalize the schema IR to fixed byte arrays and multiple nested fields;
+2. add raw bytes, rest, bounded children, padding, alignment, and placement with demand geometry;
+3. add the controller dependency DAG and conditional choice groups;
+4. add range-and-count collection views, streaming array writers, and exact View copying;
+5. add static enums with exact unknown forwarding plus nominal and inline bitfields;
+6. add typed `include`/`exclude` selections, chunk and byte iteration, `computed`, and
+   `try_computed`;
+7. add capability-gated `views` and heterogeneous cursors, then compose recursive layouts from the
+   same lazy child and collection capabilities;
+8. finish fuzzing, protocol fixtures, public examples, and release verification.
 
-Depth capacity is compile-time so no variable-length stack is allocated. Work budget is runtime.
-Simple schemas pay no limits cost after optimization. `LimitExceeded` is fail-closed.
+Each vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads, behavioral
+tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not land as a
+compiling scaffold or with a second temporary renderer.
 
-Recursive grammars compile to iterative state machines. Homogeneous recursive arrays use counters;
-continuation stacks are generated only when the grammar requires them. Recursive Rust calls are
-not the default implementation.
-
-## 11. Performance and verification
+## 12. Performance and verification
 
 Every shipped representation class must have generated, idiomatic, and best-safe implementations
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
 
-The current mandatory corpus has four discovered zones and ten cases: fixed scalars and constants,
-explicit logical conversions, one generic nested child, and a four-level compound generic lattice,
-each covering read and write paths where applicable. The measurement tool inspects final linked
-consumer symbols for code shape, call topology, stack, allocation, and dispatch evidence. Runtime
-performance uses calibrated interleaved samples and reports distribution statistics. LLVM IR may
-explain an optimization result but is not treated as a latency oracle. State and artifact-size
-probes remain isolated from measured hot-path implementations.
+The current mandatory corpus has five discovered zones and thirteen cases: fixed scalars and
+constants, explicit logical conversions, one generic nested child, a four-level compound generic
+lattice, and fixed, automatic, and callback-driven output growth. Each covers read and write paths
+where applicable. The measurement tool inspects final linked consumer symbols for code shape, call
+topology, stack, allocation, and dispatch evidence. Runtime performance uses calibrated interleaved
+samples and reports distribution statistics. LLVM IR may explain an optimization result but is not
+treated as a latency oracle. State and artifact-size probes remain isolated from measured hot-path
+implementations.
 
-Bounded children, conditional groups, arrays, recursive enums, heterogeneous builders, runtime
-collections, selections, and computed fields become mandatory corpus zones when those layout
-classes ship; they are not claimed as current measurement coverage.
+Bounded children, conditional groups, arrays, static enums, bitfields, padding and placement,
+recursive layouts, runtime collections, selections, and computed fields become mandatory corpus
+zones when those layout classes ship; they are not claimed as current measurement coverage.
 
-Behavioral tests cover success, truncation at every field boundary, constant mismatch, trailing
-input, nested error propagation, absolute offsets, retained backing identity, typestate failures,
-manual capability composition, partial-output failure semantics, growth adapters, and generated/
-handwritten equivalence. Fuzzing extends the same invariants to controller overflow, count bombs,
-non-progress items, dependency cycles, and depth/work exhaustion.
+Behavioral tests cover success, truncation at every accessed field boundary, constant mismatch,
+declared outer-extent mismatch, nested error propagation, absolute offsets, retained backing
+identity, typestate failures, manual capability composition, partial-output failure semantics,
+growth adapters, and generated/handwritten equivalence. Fuzzing extends the same invariants to
+controller overflow, count bombs, non-progress items, dependency cycles, malformed deferred
+ranges, and replay termination.
 
-## 12. Explicit non-goals
+## 13. Explicit non-goals
 
 The production core does not provide:
 
 - runtime schema reflection or registries;
+- negotiated runtime selector maps;
+- hidden collection indexes or eager whole-tree validation;
+- a general depth, item, or work-budget framework;
 - dynamic dispatch or resolver frameworks;
 - semantic/domain object materialization;
 - mutable views;
