@@ -117,7 +117,7 @@ write conversions are checked.
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-The production design extends the same model to arrays, conditional fields, static enum selectors,
-bitfields, cursors, physical selections, and computed fields. It does not add negotiated selector
-maps, hidden indexes, general resource-limit machinery, runtime schemas, semantic object
-materialization, async I/O, or feature-selected renderers.
+The production design extends the same model to arrays, conditional fields, forward-only nested
+traversals, static enum selectors, bitfields, cursors, physical selections, and computed fields. It
+does not add negotiated selector maps, hidden indexes, general resource-limit machinery, runtime
+schemas, semantic object materialization, async I/O, or feature-selected renderers.

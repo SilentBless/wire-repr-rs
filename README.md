@@ -183,11 +183,11 @@ The implemented surface currently covers fixed scalar and byte-array structs, co
 logical conversions, schema validators, multiple fixed generic or manual children, one optional
 terminal variable child, and progressive typestate writers.
 
-The remaining production classes are variable nested fields,
-raw bytes and rest spans, controllers and conditional groups, static selectors with exact unknown
-forwarding, nominal and inline bitfields, padding/alignment/placement, demand-framed recursive
-layouts, physical selections, computed fields, and capability-gated `views`/`cursor` traversal.
-Collections retain only range and count; untouched nested values are not eagerly traversed.
+The remaining production classes are variable nested fields, raw bytes and rest spans, controllers
+and conditional groups, forward-only nested traversals, static selectors with exact unknown
+forwarding, nominal and inline bitfields, padding/alignment/placement, recursive sum layouts,
+physical selections, computed fields, and capability-gated `views`/cursor facades. Collections
+retain only range and count; untouched nested values are not eagerly traversed or indexed.
 Negotiated selector maps, hidden indexes, full-tree validation, and a general limits framework are
 not part of the target core. Every new class must extend the progressive writer model and add
 behavioral plus generated/idiomatic/best-safe workload evidence.
