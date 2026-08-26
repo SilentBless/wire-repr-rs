@@ -4,8 +4,8 @@ This document defines the target production architecture and clean-cutover contr
 `wire-repr`. The current implementation is the fixed/generic vertical: named structs, fixed
 scalars and byte arrays, constants, explicit logical conversions, schema validators, and multiple
 fixed nested children with one optional terminal variable child. Later sections describing enums,
-dynamic geometry, collections, traversals, computed fields, selections, and cursors are an
-implementation plan, not claims about the shipped surface. New layout classes extend this one
+dynamic geometry, collections, computed fields, selections, and cursors are an implementation
+plan, not claims about the shipped surface. New layout classes extend this one
 model rather than restoring the removed legacy renderer or introducing parallel modes.
 
 ## 1. Product boundary
@@ -96,11 +96,9 @@ Generated descriptors and getters specialize by geometry:
 - a dependent getter may replay earlier variable geometry instead of caching an index;
 - controller values are retained only when later geometry needs them.
 
-Recursive schemas do not create a separate eager parser. Length-bounded and terminal recursive
-edges open one level at a time; homogeneous prefix trees use counters; interleaved layouts such as
-`left + opcode + right` use a forward traversal whose nested completion advances one shared cursor.
-A replayable getter computes only the range it requests and may rerun that traversal rather than
-storing continuations. Only a physically ambiguous grammar is a derive error.
+General recursive schemas and a public traversal capability are deferred beyond this roadmap. They
+are not prerequisites for demand-framed fields, runtime collections, enums, selections, `views`, or
+cursors, and will be designed independently after those representation classes are complete.
 
 The current fixed-layout vertical cannot inspect a generic child's associated fixed-size capability
 during macro expansion. Instantiating a nonterminal child whose `FIXED_SIZE` is `None` therefore
@@ -211,55 +209,17 @@ unknown body without a provable physical boundary is a derive error.
 Selector values are compile-time schema facts. Negotiated runtime selector maps are outside the
 derive contract; a protocol that negotiates opcodes uses a manual wrapper capability.
 
-## 7. Traversals, sequences, and cursors
+## 7. Sequences and cursors
 
 The product concepts are distinct:
 
-- `view` retains exact source and exposes replayable field access where geometry permits;
-- `traversal` consumes one representation forward through one shared input position;
 - `views` traverses consecutive representations of one schema;
 - `cursor` retains a position so different schemas can consume consecutive representations.
 
-A traversal is the default answer to recursive or sequential geometry that does not need a retained
-index. The ordinary API groups one physical recursive step into a single generated operation:
-
-```rust
-let (left, opcode, right) = node.pair()?.fields(
-    |left| visit(left),
-    |right| visit(right),
-)?;
-```
-
-`fields` invokes the left callback first. Only after that child returns its internal completion
-token does it decode `opcode` and invoke the right callback. The completion token and cursor stages
-are generated machinery, not values the ordinary caller has to name or rebind.
-
-For `Pair { left: Node, opcode, right: Node }`, the left stage starts immediately after the selector;
-the shared cursor reaches `opcode` when the left callback returns its completion token. No parent
-frames or child ranges are indexed. A caller interested only in the leftmost path may consume the
-parent and repeatedly descend left without recursion. A complete recursive visitor may naturally
-use the caller's call stack, or caller-owned storage in an iterative visitor; wire-repr does not
-silently allocate either.
-
-This is the established pull/on-demand parser shape: simdjson's
-[On-Demand design](https://github.com/simdjson/simdjson/blob/master/doc/ondemand_design.md) uses one
-forward index shared by nested iteration and validates only consumed values; Serde's
-[`SeqAccess`](https://docs.rs/serde/latest/serde/de/trait.SeqAccess.html) and
-[`DeserializeSeed`](https://docs.rs/serde/latest/serde/de/trait.DeserializeSeed.html) let nested
-visitors consume the same deserializer without constructing a DOM. Classical constant-space tree
-traversals instead reuse or reorder pointer fields in a mutable tree, as documented by Hirschberg
-and Seiden's
-[bounded-space traversal](https://ics.uci.edu/~dhirschb/pubs/trav.pdf); immutable wire bytes do not
-offer that scratch representation.
-
-Completion records the traversed start and end offsets. Exact View forwarding, physical selection,
-or a later sibling can therefore request a range by running only the necessary traversal. A
-replayable view may repeat that work; a forward-only traversal never promises restart or random
-access.
-
 For a fixed schema, `views` derives item count arithmetically and returns an infallible
-`ExactSizeIterator`. For a variable schema with a leading-extent or traversal capability, `views`
-returns a facade whose `next` is `Result<Option<View>, Error>`.
+`ExactSizeIterator`. For a variable schema with a leading-extent capability, `views` returns a
+facade whose `next` is `Result<Option<View>, Error>`. Schemas without a decodable leading extent do
+not expose sequence or cursor entrypoints.
 
 Cursor usage is schema-led:
 
@@ -272,9 +232,9 @@ let remaining = cursor.remaining();
 Views yielded by a cursor borrow the original backing, not the cursor, and may coexist. Failure or
 `NeedMore` does not advance the cursor.
 
-A runtime array getter returns a facade retaining only its available range and authoritative count.
-Its traversal frames one exact item per `next`; repeated View access replays item geometry. The core
-does not retain or allocate a per-item range index.
+A runtime array getter returns a facade retaining only the collection range and authoritative
+count. Its iterator frames one exact item per `next`; a repeated traversal replays item geometry.
+The core does not retain or allocate a per-item range index.
 
 ## 8. Progressive writers
 
@@ -391,11 +351,11 @@ The amount is exact when provable and otherwise a lower bound. wire-repr does no
 `AsyncRead`, segmented input, or resumable parser state. The caller appends to its buffer and
 retries.
 
-The core has no general depth, item, or work-budget API. It performs no hidden full-tree or
-full-collection validation: dynamic traversal happens only through the getter, iterator, or cursor
-operation requested by the caller. Checked arithmetic and input bounds protect geometry; the
-application owns policy for how far it chooses to iterate. Layouts whose physical boundaries are
-ambiguous are rejected by derive rather than guarded by an arbitrary runtime budget.
+The core performs no hidden full-collection validation: dynamic iteration happens only through the
+getter, iterator, or cursor operation requested by the caller. Checked arithmetic and input bounds
+protect geometry; the application owns policy for how far it chooses to iterate. Layouts whose
+physical boundaries are ambiguous are rejected by derive rather than guarded by an arbitrary
+runtime budget.
 
 ## 11. Implementation order
 
@@ -404,14 +364,11 @@ remaining target is delivered as dependency-ordered verticals:
 
 1. add raw bytes, rest, bounded children, padding, alignment, and placement with demand geometry;
 2. add the controller dependency DAG and conditional choice groups;
-3. add the forward-only traversal primitive, then range-and-count collection traversals, streaming
-   array writers, and exact View copying;
-4. add static enums with exact unknown forwarding plus nominal and inline bitfields, then compose
-   recursive sum layouts through the same traversal stages;
+3. add range-and-count collection views, streaming array writers, and exact View copying;
+4. add static enums with exact unknown forwarding plus nominal and inline bitfields;
 5. add typed `include`/`exclude` selections, chunk and byte iteration, `computed`, and
    `try_computed`;
-6. add homogeneous `views` and heterogeneous cursors as capability facades over fixed extents and
-   completed traversals;
+6. add capability-gated homogeneous `views` and heterogeneous cursors;
 7. finish fuzzing, protocol fixtures, public examples, and release verification.
 
 Each vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads, behavioral
@@ -436,15 +393,15 @@ treated as a latency oracle. State and artifact-size probes remain isolated from
 implementations.
 
 Bounded children, conditional groups, arrays, static enums, bitfields, padding and placement,
-recursive layouts, runtime collections, selections, and computed fields become mandatory corpus
-zones when those layout classes ship; they are not claimed as current measurement coverage.
+runtime collections, selections, and computed fields become mandatory corpus zones when those
+layout classes ship; they are not claimed as current measurement coverage.
 
 Behavioral tests cover success, truncation at every accessed field boundary, constant mismatch,
 declared outer-extent mismatch, nested error propagation, absolute offsets, retained backing
 identity, typestate failures, manual capability composition, partial-output failure semantics,
 growth adapters, and generated/handwritten equivalence. Fuzzing extends the same invariants to
 controller overflow, count bombs, non-progress items, dependency cycles, malformed deferred
-ranges, and replay termination.
+ranges, and iteration termination.
 
 ## 13. Explicit non-goals
 
