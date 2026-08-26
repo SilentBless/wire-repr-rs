@@ -4,10 +4,10 @@ This document defines the target production architecture and clean-cutover contr
 `wire-repr`. The current implementation covers named structs, fixed scalars and byte arrays,
 constants, explicit logical conversions, validators, nested children, demand geometry, controller
 dependencies, conditional choice groups, counted runtime arrays, static enums, nominal and inline
-bitfields, root-relative physical selections, computed fields, and exact View forwarding. Later
-sections describing nested selection paths and cursors are an implementation plan, not claims about
-the shipped surface. New layout classes extend this one model rather than restoring the removed
-legacy renderer or introducing parallel modes.
+bitfields, root-relative physical selections, computed fields, homogeneous views, heterogeneous
+cursors, and exact View forwarding. Nested selection paths remain planned composition work. New
+layout classes extend this one model rather than restoring the removed legacy renderer or
+introducing parallel modes.
 
 ## 1. Product boundary
 
@@ -223,10 +223,12 @@ The product concepts are distinct:
 - `views` traverses consecutive representations of one schema;
 - `cursor` retains a position so different schemas can consume consecutive representations.
 
-For a fixed schema, `views` derives item count arithmetically and returns an infallible
-`ExactSizeIterator`. For a variable schema with a leading-extent capability, `views` returns a
-facade whose `next` is `Result<Option<View>, Error>`. Schemas without a decodable leading extent do
-not expose sequence or cursor entrypoints.
+For a syntactically fixed struct or nominal bitfield, `views` prevalidates the complete input and
+returns an infallible `ExactSizeIterator`. Closed enums and variable structs with a leading-extent
+capability return a facade whose `next` is `Result<Option<View>, Error>`.
+Direct `rest`, terminal arrays, and unknown enum bodies expose no helpers. A terminal child or
+closed enum whose transitive body lacks a leading extent returns `SequenceError::Unavailable`
+before consuming input.
 
 Cursor usage is schema-led:
 
@@ -371,11 +373,11 @@ runtime budget.
 
 ## 11. Implementation order
 
-The fixed, demand-geometry, dependency, collection, enum, bitfield, selection, and computed
-foundations are complete. The remaining target is delivered as dependency-ordered verticals:
+The fixed, demand-geometry, dependency, collection, enum, bitfield, selection, computed, sequence,
+and cursor foundations are complete. The remaining target is delivered as dependency-ordered
+verticals:
 
-1. add nested physical selection paths plus capability-gated homogeneous `views` and heterogeneous
-   cursors;
+1. add nested physical selection paths;
 2. finish fuzzing, protocol fixtures, public examples, and release verification.
 
 Each vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads, behavioral
@@ -388,17 +390,18 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has thirteen discovered zones and thirty-one cases: fixed scalars and
+The current mandatory corpus has fourteen discovered zones and thirty-four cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, controller and
 conditional dependencies, runtime collection decode/build/copy, static enum decode/build/copy,
 nominal and inline bitfields, fragmented physical selections, fixed and dynamic computed fields,
-and fixed, automatic, and callback-driven output growth. Each covers read and write paths where
-applicable. The measurement tool inspects final linked consumer symbols for code shape, call
-topology, stack, allocation, and dispatch evidence. Runtime performance uses calibrated interleaved
-samples and reports distribution statistics. LLVM IR may explain an optimization result but is not
-treated as a latency oracle. State and artifact-size probes remain isolated from measured hot-path
-implementations.
+fixed and variable homogeneous views, heterogeneous cursors, and fixed, automatic, and
+callback-driven output growth. Each covers read and write paths where applicable. The measurement
+tool inspects final linked consumer symbols for code shape, call topology, stack, allocation, and
+dispatch evidence.
+Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
+IR may explain an optimization result but is not treated as a latency oracle. State and
+artifact-size probes remain isolated from measured hot-path implementations.
 Nested selections become mandatory corpus coverage when that composition class ships.
 
 Behavioral tests cover success, truncation at every accessed field boundary, constant mismatch,

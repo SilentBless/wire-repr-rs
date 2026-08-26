@@ -148,6 +148,29 @@ demand-derived offsets, while their selections may consume demand-framed fields.
 Schemas that write computed fields derive both `WireView` and `WireBuilder`; the generated read
 capability supplies the exact structural ranges used during the final patch pass.
 
+## Consecutive views and cursors
+
+Syntactically fixed structs and nominal bitfields prevalidate the complete input and return an
+infallible `ExactSizeIterator`. Closed enums and variable structs with a leading extent return a
+lazy facade whose `next()` reports the first bad item. Heterogeneous cursors advance only after
+successful framing:
+
+```rust
+for item in Foo::views(&fixed_input)? {
+    consume(item);
+}
+
+let (header, mut cursor) = Header::cursor(&input)?;
+let body = Body::next(&mut cursor)?;
+let remaining = cursor.remaining();
+```
+
+Yielded views borrow the original input rather than the facade or cursor, so they may coexist.
+
+Direct terminal `rest`, terminal arrays, and unknown enum bodies expose no sequence or cursor
+helpers. A terminal child or closed enum whose transitive body lacks a leading extent returns
+`SequenceError::Unavailable` before consuming input.
+
 ## Manual wire types
 
 
@@ -256,11 +279,10 @@ deviation instead of treating LLVM instruction counts as performance truth.
 The implemented surface currently covers fixed scalars and byte arrays, constants, explicit
 logical conversions, validators, nested children, demand geometry, controller dependencies,
 conditional groups, runtime arrays, static enums with exact unknown forwarding, nominal and inline
-bitfields, root-relative physical selections, computed fields, exact View forwarding, and
-progressive typestate writers.
+bitfields, root-relative physical selections, computed fields, homogeneous `views`, heterogeneous
+cursors, exact View forwarding, and progressive typestate writers.
 
-The remaining production classes are nested physical selection paths, homogeneous `views`, and
-heterogeneous cursors.
+Nested physical selection paths remain planned composition work.
 
 General recursive schemas and a public traversal capability are deferred until this roadmap is
 complete. Negotiated selector maps, hidden indexes, eager full-collection validation, and a general

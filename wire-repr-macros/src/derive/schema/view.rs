@@ -70,10 +70,21 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
 
     let error_names = error_names(schema);
     let error_declaration = render_error(schema, &error, &error_names, &error_parameters, runtime);
-    let validator_calls = schema.validators.iter().zip(&error_names.validators).map(
-        |(validator, variant)| quote!(#validator(&#retained_value).map_err(#error::#variant)?;),
-    );
+    let validator_calls = schema
+        .validators
+        .iter()
+        .zip(&error_names.validators)
+        .map(
+            |(validator, variant)| quote!(#validator(&#retained_value).map_err(#error::#variant)?;),
+        )
+        .collect::<Vec<_>>();
 
+    let validator_view_calls = schema
+        .validators
+        .iter()
+        .zip(&error_names.validators)
+        .map(|(validator, variant)| quote!(#validator(view).map_err(#error::#variant)?;))
+        .collect::<Vec<_>>();
     let retained_char_fields = schema
         .fields
         .iter()
@@ -241,6 +252,18 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         &frame_offset,
         runtime,
     );
+    let leading_extent = match schema.fields.last().map(|field| &field.kind) {
+        Some(FieldKind::RawBytes(super::model::RawBytes {
+            extent: super::model::DynamicExtent::Rest,
+        }))
+        | Some(FieldKind::Array(_)) => quote!(false),
+        Some(FieldKind::Nested(super::model::NestedField {
+            terminal: true,
+            extent: None,
+            ty,
+        })) => quote!(<#ty as #runtime::WireView>::LEADING_EXTENT),
+        _ => quote!(true),
+    };
     let consumed = if schema.has_explicit_geometry() {
         let cursor = private_ident(schema, "geometry_cursor");
         quote!(#cursor)
@@ -347,6 +370,87 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             quote!(#index => Some(#start..#end),)
         })
         .collect::<Vec<_>>();
+    let sequence_lifetime = fresh_schema_lifetime(schema, &bounded, "sequence");
+    let views_method = if schema.is_syntactically_fixed() {
+        quote! {
+            /// Validates consecutive fixed-width representations and returns an exact iterator.
+            #vis fn views<#sequence_lifetime>(
+                input: &#sequence_lifetime [u8],
+            ) -> Result<
+                #runtime::FixedViews<#sequence_lifetime, Self>,
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            >
+            where
+                Self: #runtime::__private::LeadingWire,
+            {
+                #runtime::FixedViews::new(input)
+            }
+        }
+    } else if schema.has_leading_extent() {
+        quote! {
+            /// Returns a lazy facade over consecutive variable-width representations.
+            #vis fn views<#sequence_lifetime>(
+                input: &#sequence_lifetime [u8],
+            ) -> Result<
+                #runtime::VariableViews<#sequence_lifetime, Self>,
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            > {
+                if !<Self as #runtime::WireView>::LEADING_EXTENT {
+                    return Err(#runtime::SequenceError::Unavailable);
+                }
+                Ok(#runtime::VariableViews::new(input))
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
+    let cursor_methods = if schema.has_leading_extent() {
+        quote! {
+            /// Frames the first representation and returns a cursor over the suffix.
+            #vis fn cursor<#sequence_lifetime>(
+                input: &#sequence_lifetime [u8],
+            ) -> Result<
+                (
+                    <Self as #runtime::__private::WireSelect>::Root<&#sequence_lifetime [u8]>,
+                    #runtime::Cursor<#sequence_lifetime>,
+                ),
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            > {
+                if !<Self as #runtime::WireView>::LEADING_EXTENT {
+                    return Err(#runtime::SequenceError::Unavailable);
+                }
+                let mut cursor = #runtime::Cursor::new(input);
+                let view = cursor.read::<Self>()?;
+                Ok((view, cursor))
+            }
+
+            /// Frames this schema at the cursor without advancing on failure.
+            #vis fn next<#sequence_lifetime>(
+                cursor: &mut #runtime::Cursor<#sequence_lifetime>,
+            ) -> Result<
+                <Self as #runtime::__private::WireSelect>::Root<&#sequence_lifetime [u8]>,
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            > {
+                if !<Self as #runtime::WireView>::LEADING_EXTENT {
+                    return Err(#runtime::SequenceError::Unavailable);
+                }
+                cursor.read::<Self>()
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
+
+    let leading_impl = if schema.is_syntactically_fixed() {
+        quote! {
+            // SAFETY: generated fixed framing is deterministic for one immutable span; the
+            // sequence constructor rejects a zero width before iteration.
+            #[allow(unsafe_code)]
+            unsafe impl #impl_generics #runtime::__private::LeadingWire for #self_type #where_clause {}
+        }
+    } else {
+        TokenStream::new()
+    };
 
     Ok(quote! {
         #error_declaration
@@ -459,6 +563,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             type View<#view_lifetime> = #projected_type;
 
             const FIXED_SIZE: Option<usize> = #fixed_size;
+            const LEADING_EXTENT: bool = #leading_extent;
 
             #[inline]
             fn frame(
@@ -519,9 +624,65 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     #view_marker: ::core::marker::PhantomData,
                 })
             }
+
+            #[inline]
+            fn validated_view<#backing: AsRef<[u8]>>(
+                #view_input: #backing,
+            ) -> Result<Self::Root<#backing>, Self::Error> {
+                let #current_input = #view_input.as_ref();
+                let #input_length = #current_input.len();
+                let #frame_result = <Self as #runtime::WireView>::frame(#current_input, 0)?;
+                let (#framed_descriptor, #framed_consumed) = #frame_result.into_parts();
+                if #framed_consumed > #input_length {
+                    return Err(#error::InvalidFrame(#runtime::InvalidFrameExtent {
+                        offset: 0,
+                        consumed: #framed_consumed,
+                        available: #input_length,
+                    }));
+                }
+                let #retained_value = #view_impl {
+                    #input_field: #view_input,
+                    #represented_length_field: #framed_consumed,
+                    descriptor: #framed_descriptor,
+                    #view_marker: ::core::marker::PhantomData,
+                };
+                #(#validator_calls)*
+                if #framed_consumed < #input_length {
+                    return Err(#error::Trailing(#runtime::TrailingBytes {
+                        offset: #framed_consumed,
+                        trailing: #input_length - #framed_consumed,
+                    }));
+                }
+                Ok(#retained_value)
+            }
+            #[allow(unsafe_code)]
+            unsafe fn framed_view<#backing: AsRef<[u8]>>(
+                #view_input: #backing,
+                state: Self::State,
+            ) -> Self::Root<#backing> {
+                let #input_length = #view_input.as_ref().len();
+                #view_impl {
+                    #input_field: #view_input,
+                    #represented_length_field: #input_length,
+                    descriptor: state,
+                    #view_marker: ::core::marker::PhantomData,
+                }
+            }
+
+            fn validate_view<#backing: AsRef<[u8]>>(
+                view: &Self::Root<#backing>,
+            ) -> Result<(), Self::Error> {
+                #(#validator_view_calls)*
+                Ok(())
+            }
         }
 
+        #leading_impl
+
         impl #impl_generics #self_type #where_clause {
+            #views_method
+            #cursor_methods
+
             /// Validates one exact representation, including schema validators.
             #[inline]
             #vis fn view<#backing: AsRef<[u8]>>(

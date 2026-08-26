@@ -124,10 +124,13 @@ write conversions are checked.
 - Nominal and inline bitfields use checked logical ranges while fresh writers zero undeclared bits.
 - Root-relative typed selections expose merged chunks and physical-order byte iteration.
 - Computed scalar destinations patch from logical fields and physical selections in DAG order.
+- Syntactically fixed structs/bitfields expose prevalidated `ExactSizeIterator` views; closed enums
+  and variable structs frame lazily.
+- Heterogeneous cursors yield coexisting views and never advance on failure.
 - Fixed writers return `NeedMore`; growable collections use their existing `Extend<u8>` capability.
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-The production design extends the same model to nested selection paths and cursors. It does not add
-negotiated selector maps, hidden indexes, general resource-limit machinery, runtime schemas,
-semantic object materialization, async I/O, or feature-selected renderers.
+The production design extends the same model to nested selection paths. It does not add negotiated
+selector maps, hidden indexes, general resource-limit machinery, runtime schemas, semantic object
+materialization, async I/O, or feature-selected renderers.

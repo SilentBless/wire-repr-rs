@@ -21,9 +21,9 @@ pub mod wire {
 pub mod __private {
     pub use crate::schema::{
         ArrayError, ArrayItem, ArrayView, ConstantMismatch, FieldExpr, Frame, InvalidFrameExtent,
-        IsSet, LayoutError, NeedMore, ScalarBuildConversionError, ScalarConversionError, Set,
-        TrailingBytes, Unset, WireFields, WireSelect, checked_align, checked_optional_equal,
-        checked_optional_sum, frame_array_extent,
+        IsSet, LayoutError, LeadingWire, NeedMore, ScalarBuildConversionError,
+        ScalarConversionError, Set, TrailingBytes, Unset, WireFields, WireSelect, checked_align,
+        checked_optional_equal, checked_optional_sum, frame_array_extent,
     };
     pub use thiserror::Error as ThisError;
 }
@@ -32,10 +32,11 @@ pub use output::{
     ArrayWriter, ChildWriter, GrowthRequest, Output, OutputError, WriteError, Writer, Written,
 };
 pub use schema::{
-    ArrayError, ArrayItem, ArrayIter, ArrayView, ByteSelection, ConstantMismatch, ExactWire,
-    FieldPath, FieldUnion, Frame, InvalidFrameExtent, LayoutError, NeedMore,
-    ScalarBuildConversionError, ScalarConversionError, Selection, SelectionBytes, SelectionChunks,
-    TrailingBytes, WireBuilder, WireBytes, WireView, WireWrite, select,
+    ArrayError, ArrayItem, ArrayIter, ArrayView, ByteSelection, ConstantMismatch, Cursor,
+    ExactWire, FieldPath, FieldUnion, FixedViews, Frame, InvalidFrameExtent, LayoutError, NeedMore,
+    NextView, ScalarBuildConversionError, ScalarConversionError, Selection, SelectionBytes,
+    SelectionChunks, SequenceError, TrailingBytes, VariableViews, WireBuilder, WireBytes, WireView,
+    WireWrite, select,
 };
 #[doc(inline)]
 pub use wire_repr_macros::{WireBuilder, WireView, computed, validator};

@@ -26,5 +26,7 @@ mod ownership;
 mod scalar;
 #[path = "behavior/selection.rs"]
 mod selection;
+#[path = "behavior/sequence.rs"]
+mod sequence;
 #[path = "behavior/view.rs"]
 mod view;

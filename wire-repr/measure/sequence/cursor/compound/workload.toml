@@ -1,0 +1,72 @@
+name = "sequence/cursor/compound"
+
+[roles]
+generated = "generated.rs"
+idiomatic = "idiomatic.rs"
+best_latency = "best/latency.rs"
+
+[[cases]]
+name = "fixed"
+entry = "fixed"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "direct dispatch"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0"
+[[cases.rules]]
+name = "latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2.00"
+message = "prevalidated fixed views have safe optimization headroom"
+
+[[cases]]
+name = "variable"
+entry = "variable"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "direct dispatch"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0"
+[[cases.rules]]
+name = "latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2.00"
+message = "lazy variable views have safe optimization headroom"
+
+[[cases]]
+name = "cursor"
+entry = "cursor"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "direct dispatch"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0"
+[[cases.rules]]
+name = "latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2.00"
+message = "heterogeneous cursor has safe optimization headroom"

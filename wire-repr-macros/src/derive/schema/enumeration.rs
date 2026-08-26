@@ -24,6 +24,7 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
     let view_error = format_ident!("{}ViewError", name.unraw());
     let variant_view = format_ident!("{}Variant", name.unraw());
     let state = format_ident!("__WireRepr{}ViewState", name.unraw());
+    let fields_type = format_ident!("{}Fields", name.unraw());
     let view_impl = format_ident!("__WireRepr{}ViewImpl", name.unraw());
     let selector_ty = scalar_type_tokens(schema.selector);
     let selector_width = schema.selector.width();
@@ -31,6 +32,7 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
     let view_lifetime = fresh_lifetime(&schema.generics, "enum_view");
     let variant_lifetime = fresh_lifetime(&schema.generics, "enum_variant");
     let method_lifetime = fresh_lifetime(&schema.generics, "enum_field");
+    let sequence_lifetime = fresh_lifetime(&schema.generics, "enum_sequence");
     let backing = fresh_type_ident(&schema.generics, "Backing");
 
     let known = schema.known_variants().collect::<Vec<_>>();
@@ -302,7 +304,10 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
     };
     let trait_declaration = quote! {
         #[doc = "Exact-source view API generated for this static enum schema."]
-        #vis trait #view_trait #impl_generics #where_clause {
+        #vis trait #view_trait #impl_generics:
+            #runtime::__private::WireFields<Fields = #fields_type>
+            #where_clause
+        {
             fn as_bytes(&self) -> &[u8];
             fn selector(&self) -> #selector_ty;
             fn variant<#method_lifetime>(
@@ -351,6 +356,15 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
         )
     };
     let mut common_generics = bounded.clone();
+    let leading_extent = if schema.unknown().is_some() {
+        quote!(false)
+    } else {
+        let body_extents = known.iter().map(|variant| {
+            let body = &variant.body;
+            quote!(<#body as #runtime::WireView>::LEADING_EXTENT)
+        });
+        quote!(true #(&& #body_extents)*)
+    };
     common_generics.params.push(parse_quote!(#backing));
     common_generics.params.push(parse_quote!(#holder));
     common_generics.params.push(parse_quote!(#marker_type));
@@ -361,10 +375,67 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
     let (common_impl, common_types, common_where) = common_generics.split_for_impl();
     let trait_path = quote!(#view_trait #type_generics);
 
+    let sequence_methods = if schema.unknown().is_none() {
+        quote! {
+            /// Returns a lazy facade over consecutive static enum representations.
+            #vis fn views<#sequence_lifetime>(
+                input: &#sequence_lifetime [u8],
+            ) -> Result<
+                #runtime::VariableViews<#sequence_lifetime, Self>,
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            > {
+                if !<Self as #runtime::WireView>::LEADING_EXTENT {
+                    return Err(#runtime::SequenceError::Unavailable);
+                }
+                Ok(#runtime::VariableViews::new(input))
+            }
+
+            /// Frames the first enum and returns a cursor over the suffix.
+            #vis fn cursor<#sequence_lifetime>(
+                input: &#sequence_lifetime [u8],
+            ) -> Result<
+                (
+                    <Self as #runtime::__private::WireSelect>::Root<&#sequence_lifetime [u8]>,
+                    #runtime::Cursor<#sequence_lifetime>,
+                ),
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            > {
+                if !<Self as #runtime::WireView>::LEADING_EXTENT {
+                    return Err(#runtime::SequenceError::Unavailable);
+                }
+                let mut cursor = #runtime::Cursor::new(input);
+                let view = cursor.read::<Self>()?;
+                Ok((view, cursor))
+            }
+
+            /// Frames this enum at the cursor without advancing on failure.
+            #vis fn next<#sequence_lifetime>(
+                cursor: &mut #runtime::Cursor<#sequence_lifetime>,
+            ) -> Result<
+                <Self as #runtime::__private::WireSelect>::Root<&#sequence_lifetime [u8]>,
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            > {
+                if !<Self as #runtime::WireView>::LEADING_EXTENT {
+                    return Err(#runtime::SequenceError::Unavailable);
+                }
+                cursor.read::<Self>()
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
+    let leading_impl = TokenStream::new();
+
     Ok(quote! {
         #state_declaration
         #variant_declaration
         #error_declaration
+
+        #[doc = "Typed physical enum paths generated for this schema."]
+        #vis struct #fields_type {
+            pub selector: #runtime::FieldPath,
+            pub body: #runtime::FieldPath,
+        }
 
         #[doc(hidden)]
         #vis struct #view_impl #common_impl #common_where {
@@ -392,12 +463,52 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             #retained_view_methods
         }
 
+        impl #retained_impl #runtime::__private::WireFields for #retained_type #retained_where {
+            type Fields = #fields_type;
+            const FIELD_COUNT: usize = 2;
+
+            fn fields(&self, base: usize) -> Self::Fields {
+                #fields_type {
+                    selector: #runtime::FieldPath::new(base),
+                    body: #runtime::FieldPath::new(base + 1),
+                }
+            }
+
+            fn field_range(&self, index: usize) -> Option<::core::ops::Range<usize>> {
+                match index {
+                    0 => Some(0..#selector_width),
+                    1 => Some(#selector_width..self.represented_length),
+                    _ => None,
+                }
+            }
+        }
+
         impl #projected_impl #trait_path for #projected_type #projected_where {
             #[inline(always)]
             fn as_bytes(&self) -> &[u8] {
                 <Self as AsRef<[u8]>>::as_ref(self)
             }
             #projected_view_methods
+        }
+
+        impl #projected_impl #runtime::__private::WireFields for #projected_type #projected_where {
+            type Fields = #fields_type;
+            const FIELD_COUNT: usize = 2;
+
+            fn fields(&self, base: usize) -> Self::Fields {
+                #fields_type {
+                    selector: #runtime::FieldPath::new(base),
+                    body: #runtime::FieldPath::new(base + 1),
+                }
+            }
+
+            fn field_range(&self, index: usize) -> Option<::core::ops::Range<usize>> {
+                match index {
+                    0 => Some(0..#selector_width),
+                    1 => Some(#selector_width..self.represented_length),
+                    _ => None,
+                }
+            }
         }
 
         impl #common_impl #runtime::ExactWire<#self_type>
@@ -422,6 +533,7 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
                 #selector_validation
                 #fixed_size
             };
+            const LEADING_EXTENT: bool = #leading_extent;
 
             #[inline]
             fn frame(
@@ -462,7 +574,69 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             }
         }
 
+        impl #impl_generics #runtime::__private::WireSelect for #self_type #where_clause {
+            type Root<#backing> = #retained_type
+            where
+                #backing: AsRef<[u8]>;
+
+            fn select_view<#backing: AsRef<[u8]>>(
+                input: #backing,
+            ) -> Result<Self::Root<#backing>, Self::Error> {
+                let bytes = input.as_ref();
+                let frame = <Self as #runtime::WireView>::frame(bytes, 0)?;
+                let (state, consumed) = frame.into_parts();
+                if consumed > bytes.len() {
+                    return Err(#view_error::InvalidFrame(#runtime::InvalidFrameExtent {
+                        offset: 0,
+                        consumed,
+                        available: bytes.len(),
+                    }));
+                }
+                if consumed < bytes.len() {
+                    return Err(#view_error::Trailing(#runtime::TrailingBytes {
+                        offset: consumed,
+                        trailing: bytes.len() - consumed,
+                    }));
+                }
+                Ok(#view_impl {
+                    input,
+                    represented_length: consumed,
+                    state,
+                    marker: ::core::marker::PhantomData,
+                })
+            }
+
+            fn validated_view<#backing: AsRef<[u8]>>(
+                input: #backing,
+            ) -> Result<Self::Root<#backing>, Self::Error> {
+                Self::select_view(input)
+            }
+            #[allow(unsafe_code)]
+            unsafe fn framed_view<#backing: AsRef<[u8]>>(
+                input: #backing,
+                state: Self::State,
+            ) -> Self::Root<#backing> {
+                let represented_length = input.as_ref().len();
+                #view_impl {
+                    input,
+                    represented_length,
+                    state,
+                    marker: ::core::marker::PhantomData,
+                }
+            }
+
+            fn validate_view<#backing: AsRef<[u8]>>(
+                _view: &Self::Root<#backing>,
+            ) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+
+        #leading_impl
+
         impl #impl_generics #self_type #where_clause {
+            #sequence_methods
+
             #[inline]
             #vis fn view<#backing: AsRef<[u8]>>(
                 input: #backing,

@@ -688,6 +688,28 @@ impl Schema {
                 .any(|term| !matches!(term, SizeTerm::Fixed(_)))
     }
 
+    pub(super) fn is_syntactically_fixed(&self) -> bool {
+        !self.has_explicit_geometry()
+            && self.fields.iter().all(|field| {
+                matches!(
+                    field.kind,
+                    FieldKind::Scalar(_) | FieldKind::Bytes(_) | FieldKind::BitProjection(_)
+                )
+            })
+    }
+
+    pub(super) fn has_leading_extent(&self) -> bool {
+        if self.is_syntactically_fixed() {
+            return true;
+        }
+        !matches!(
+            self.fields.last().map(|field| &field.kind),
+            Some(FieldKind::RawBytes(RawBytes {
+                extent: DynamicExtent::Rest,
+            })) | Some(FieldKind::Array(_))
+        )
+    }
+
     pub(super) fn is_length_controller(&self, name: &Ident) -> bool {
         self.fields.iter().any(|field| match &field.kind {
             FieldKind::RawBytes(RawBytes {
