@@ -107,10 +107,18 @@ mod bounded_child {
         tail: u8,
     }
 
+    #[derive(WireView, WireBuilder)]
+    struct Variable {
+        head: u8,
+        #[wire(rest)]
+        body: wire_repr::wire::Bytes,
+    }
+
     #[derive(WireBuilder)]
     struct Baz<T> {
         value: T,
     }
+
     #[test]
     fn bounded_nested_child_must_consume_its_declared_extent() -> TestResult {
         let input = [3, 0x11, 0x22, 7, 9];
@@ -137,6 +145,23 @@ mod bounded_child {
             .value(|foo| foo.child(|bar| bar.value(7)).tail(9))?
             .finish()?;
         assert_eq!(output, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn variable_width_bounded_child_preserves_the_following_getter() -> TestResult {
+        let input = [3, 7, 1, 2, 9];
+        let view = Foo::<Variable>::view(input)?;
+        assert_eq!(view.child().head(), 7);
+        assert_eq!(view.child().body(), &[1, 2]);
+        assert_eq!(view.tail(), 9);
+
+        let mut output = [0u8; 5];
+        Foo::<Variable>::builder(&mut output[..])
+            .child(|child| child.head(7).body(&[1, 2][..]))?
+            .tail(9)?
+            .finish()?;
+        assert_eq!(output, input);
         Ok(())
     }
 }
@@ -331,7 +356,7 @@ mod placement {
     }
 
     #[test]
-    fn static_forward_placement_has_no_runtime_descriptor_state() -> TestResult {
+    fn static_forward_placement_round_trips_exact_geometry() -> TestResult {
         let input = [1, 0xaa, 0xbb, 0xcc, 0x12, 0x34, 2];
         let view = Static::view(input)?;
         assert_eq!(view.value(), 0x1234);

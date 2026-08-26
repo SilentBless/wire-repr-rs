@@ -2,9 +2,9 @@
 
 This document defines the target production architecture and clean-cutover contract for
 `wire-repr`. The current implementation covers named structs, fixed scalars and byte arrays,
-constants, explicit logical conversions, validators, multiple nested children, raw bounded and
-terminal bytes, bounded children, padding, alignment, forward placement, and progressive writers.
-Later sections describing enums, collections, computed fields, selections, and cursors are an
+constants, explicit logical conversions, validators, multiple nested children, demand geometry,
+shared byte-length controllers, and conditional choice groups with direct scalar dependents. Later
+sections describing enums, collections, computed fields, selections, and cursors are an
 implementation plan, not claims about the shipped surface. New layout classes extend this one
 model rather than restoring the removed legacy renderer or introducing parallel modes.
 
@@ -159,10 +159,10 @@ Read controllers are authoritative. Write payload intent is authoritative: array
 length, conditional presence, and computed values derive or patch their controllers while writing.
 Controller setters are omitted.
 
-The shipped demand-geometry vertical accepts one top-level byte-length controller per payload. That
-controller must itself have fixed sequential geometry and cannot simultaneously control placement.
-The next dependency-DAG vertical removes these composition restrictions instead of adding ad hoc
-runtime patch cases.
+The shipped dependency vertical accepts top-level byte-length and presence controllers with fixed
+sequential geometry. Multiple payloads may share one byte-length controller, but their write
+lengths must agree. A controller cannot simultaneously control placement. Nested controller paths,
+cross-role dependencies, and non-scalar conditional bodies extend the same DAG in later verticals.
 
 Controller paths may be nested but must identify physically earlier values for one-pass framing.
 Generated builder patches are static type-level operations; paths do not exist at runtime.
@@ -364,16 +364,15 @@ runtime budget.
 
 ## 11. Implementation order
 
-The fixed and demand-geometry foundations are complete. The remaining target is delivered as
-dependency-ordered verticals:
+The fixed, demand-geometry, and dependency foundations are complete. The remaining target is
+delivered as dependency-ordered verticals:
 
-1. add the controller dependency DAG and conditional choice groups;
-2. add range-and-count collection views, streaming array writers, and exact View copying;
-3. add static enums with exact unknown forwarding plus nominal and inline bitfields;
-4. add typed `include`/`exclude` selections, chunk and byte iteration, `computed`, and
+1. add range-and-count collection views, streaming array writers, and exact View copying;
+2. add static enums with exact unknown forwarding plus nominal and inline bitfields;
+3. add typed `include`/`exclude` selections, chunk and byte iteration, `computed`, and
    `try_computed`;
-5. add capability-gated homogeneous `views` and heterogeneous cursors;
-6. finish fuzzing, protocol fixtures, public examples, and release verification.
+4. add capability-gated homogeneous `views` and heterogeneous cursors;
+5. finish fuzzing, protocol fixtures, public examples, and release verification.
 
 Each vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads, behavioral
 tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not land as a
@@ -386,19 +385,19 @@ with one semantic oracle. Optional unsafe implementations are informational lowe
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
 
-The current mandatory corpus has seven discovered zones and seventeen cases: fixed scalars and
+The current mandatory corpus has eight discovered zones and nineteen cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, bounded/positioned/aligned dynamic
-geometry, and fixed, automatic, and callback-driven output growth. Each covers read and write paths
-where applicable. The measurement tool inspects final linked consumer symbols for code shape, call
-topology, stack, allocation, and dispatch evidence. Runtime performance uses calibrated interleaved
-samples and reports distribution statistics. LLVM IR may explain an optimization result but is not
-treated as a latency oracle. State and artifact-size probes remain isolated from measured hot-path
-implementations.
+geometry, shared controllers with conditional choices, and fixed, automatic, and callback-driven
+output growth. Each covers read and write paths where applicable. The measurement tool inspects
+final linked consumer symbols for code shape, call topology, stack, allocation, and dispatch
+evidence. Runtime performance uses calibrated interleaved samples and reports distribution
+statistics. LLVM IR may explain an optimization result but is not treated as a latency oracle.
+State and artifact-size probes remain isolated from measured hot-path implementations.
 
-Conditional groups, arrays, static enums, bitfields, runtime collections, selections, and computed
-fields become mandatory corpus zones when those layout classes ship; they are not claimed as
-current measurement coverage.
+Arrays, static enums, bitfields, runtime collections, selections, and computed fields become
+mandatory corpus zones when those layout classes ship; they are not claimed as current measurement
+coverage.
 
 Behavioral tests cover success, truncation at every accessed field boundary, constant mismatch,
 declared outer-extent mismatch, nested error propagation, absolute offsets, retained backing

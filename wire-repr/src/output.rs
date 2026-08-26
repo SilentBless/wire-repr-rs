@@ -537,6 +537,16 @@ impl<O: Output> ChildWriter<'_, O> {
         Ok(())
     }
 
+    /// Copies one fixed-width span already emitted within this child.
+    #[doc(hidden)]
+    pub fn read_at<const N: usize>(&self, offset: usize) -> Option<[u8; N]> {
+        let end = offset.checked_add(N)?;
+        if offset < self.start || end > self.cursor {
+            return None;
+        }
+        self.writer.read_at(offset)
+    }
+
     /// Patches bytes within the portion already emitted by this child.
     #[doc(hidden)]
     pub fn patch_at(

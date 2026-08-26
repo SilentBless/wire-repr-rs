@@ -78,6 +78,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         &slots,
         runtime,
     );
+    let choice_groups = render_choice_groups(schema, runtime);
 
     let fixed_size = if schema.has_explicit_geometry() {
         quote!(None)
@@ -85,6 +86,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         builder_optional_size(schema, runtime)
     };
     Ok(quote! {
+        #choice_groups
         const _: () = {
             #(#validator_references)*
         };
@@ -123,6 +125,7 @@ pub(super) struct Slot {
 pub(super) enum SlotKind {
     Value(TokenStream),
     RawBytes,
+    Choice(syn::Ident),
     Nested(Box<syn::Type>),
 }
 
@@ -130,7 +133,11 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
     let mut used = schema.generics.clone();
     let mut slots = Vec::new();
     for field in &schema.fields {
-        if field.kind.constant().is_some() || schema.is_length_controller(&field.name) {
+        if field.kind.constant().is_some()
+            || schema.is_length_controller(&field.name)
+            || schema.is_presence_controller(&field.name)
+            || field.layout.condition.is_some()
+        {
             continue;
         }
         let state = fresh_type_ident(&used, &format!("{}State", pascal(&field.name)));
@@ -143,6 +150,7 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
                 SlotKind::Value(quote!(#ty))
             }
             FieldKind::RawBytes(_) => SlotKind::RawBytes,
+            FieldKind::Flag(_) => SlotKind::Choice(field.name.clone()),
             FieldKind::Nested(nested) => SlotKind::Nested(Box::new(nested.ty.clone())),
         };
         slots.push(Slot {
@@ -152,6 +160,234 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
         });
     }
     slots
+}
+pub(super) fn choice_trait_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
+    let index = schema
+        .fields
+        .iter()
+        .position(|field| field.name == *flag)
+        .expect("flag belongs to schema");
+    format_ident!("__WireRepr{}Choice{index}Value", schema.name.unraw())
+}
+
+pub(super) fn choice_start_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
+    let index = schema
+        .fields
+        .iter()
+        .position(|field| field.name == *flag)
+        .expect("flag belongs to schema");
+    format_ident!("__WireRepr{}Choice{index}", schema.name.unraw())
+}
+
+fn choice_state_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
+    let index = schema
+        .fields
+        .iter()
+        .position(|field| field.name == *flag)
+        .expect("flag belongs to schema");
+    format_ident!("__WireRepr{}Choice{index}State", schema.name.unraw())
+}
+
+pub(super) fn choice_final_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
+    let index = schema
+        .fields
+        .iter()
+        .position(|field| field.name == *flag)
+        .expect("flag belongs to schema");
+    format_ident!("__WireRepr{}Choice{index}Final", schema.name.unraw())
+}
+
+fn render_choice_groups(schema: &Schema, runtime: &TokenStream) -> TokenStream {
+    let vis = &schema.vis;
+    let groups = schema.flag_fields().map(|flag| {
+        let name = &flag.name;
+        let start = choice_start_ident(schema, name);
+        let state = choice_state_ident(schema, name);
+        let final_value = choice_final_ident(schema, name);
+        let choice_trait = choice_trait_ident(schema, name);
+        let present_field = private_ident(schema, &format!("choice_{}_present", name.unraw()));
+        let dependents = schema.condition_dependents(name).collect::<Vec<_>>();
+        let parameters = dependents
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format_ident!("__WireReprField{index}"))
+            .collect::<Vec<_>>();
+        let initial_states = dependents
+            .iter()
+            .map(|_| quote!(#runtime::__private::Unset))
+            .collect::<Vec<_>>();
+        let complete_states = dependents
+            .iter()
+            .map(|field| {
+                let FieldKind::Scalar(scalar) = &field.kind else {
+                    unreachable!("validated conditional field is scalar")
+                };
+                let ty = value_type_tokens(scalar.value_type);
+                quote!(#runtime::__private::Set<#ty>)
+            })
+            .collect::<Vec<_>>();
+        let state_fields = dependents
+            .iter()
+            .zip(&parameters)
+            .map(|(field, parameter)| {
+                let field = &field.name;
+                quote!(#field: #parameter,)
+            });
+        let final_fields = dependents.iter().map(|field| {
+            let field_name = &field.name;
+            let FieldKind::Scalar(scalar) = &field.kind else {
+                unreachable!("validated conditional field is scalar")
+            };
+            let ty = value_type_tokens(scalar.value_type);
+            quote!(#field_name: Option<#ty>,)
+        });
+        let initial_values = dependents.iter().map(|field| {
+            let field = &field.name;
+            quote!(#field: #runtime::__private::Unset,)
+        });
+        let absent_values = dependents.iter().map(|field| {
+            let field = &field.name;
+            quote!(#field: None,)
+        });
+        let present_values = dependents.iter().map(|field| {
+            let field = &field.name;
+            quote!(#field: Some(value.#field.0),)
+        });
+        let setters = dependents.iter().enumerate().map(|(target_index, target)| {
+            let field = &target.name;
+            let FieldKind::Scalar(scalar) = &target.kind else {
+                unreachable!("validated conditional field is scalar")
+            };
+            let ty = value_type_tokens(scalar.value_type);
+            let impl_parameters = parameters
+                .iter()
+                .enumerate()
+                .filter_map(|(index, parameter)| (index != target_index).then_some(parameter))
+                .collect::<Vec<_>>();
+            let impl_generics = if impl_parameters.is_empty() {
+                TokenStream::new()
+            } else {
+                quote!(<#(#impl_parameters),*>)
+            };
+            let current = parameters.iter().enumerate().map(|(index, parameter)| {
+                if index == target_index {
+                    quote!(#runtime::__private::Unset)
+                } else {
+                    quote!(#parameter)
+                }
+            });
+            let returned = parameters.iter().enumerate().map(|(index, parameter)| {
+                if index == target_index {
+                    quote!(#runtime::__private::Set<#ty>)
+                } else {
+                    quote!(#parameter)
+                }
+            });
+            let assignments = dependents.iter().enumerate().map(|(index, dependent)| {
+                let dependent = &dependent.name;
+                if index == target_index {
+                    quote!(#dependent: #runtime::__private::Set(value),)
+                } else {
+                    quote!(#dependent: self.#dependent,)
+                }
+            });
+            quote! {
+                impl #impl_generics #state<#(#current),*> {
+                    #[doc = concat!("Sets conditional field `", stringify!(#field), "`.")]
+                    #[inline(always)]
+                    #vis fn #field(self, value: #ty) -> #state<#(#returned),*> {
+                        #state {
+                            #(#assignments)*
+                        }
+                    }
+                }
+            }
+        });
+        let writes = dependents.iter().map(|field| {
+            let field_name = &field.name;
+            let FieldKind::Scalar(scalar) = &field.kind else {
+                unreachable!("validated conditional field is scalar")
+            };
+            let wire_ty = scalar_type_tokens(scalar.wire_type);
+            let encode = to_bytes_method(scalar.endian);
+            quote! {
+                let value: #wire_ty =
+                    self.#field_name.expect("present choice has every field");
+                writer.write(&value.#encode())?;
+            }
+        });
+        quote! {
+            #[doc(hidden)]
+            #vis struct #start;
+
+            #[doc(hidden)]
+            #vis struct #state<#(#parameters),*> {
+                #(#state_fields)*
+            }
+
+            #[doc(hidden)]
+            #vis struct #final_value {
+                #present_field: bool,
+                #(#final_fields)*
+            }
+
+            #[doc(hidden)]
+            #vis trait #choice_trait {
+                fn is_present(&self) -> bool;
+                fn write<O: #runtime::Output>(
+                    self,
+                    writer: &mut #runtime::ChildWriter<'_, O>,
+                ) -> Result<(), #runtime::OutputError<O::GrowError>>;
+            }
+
+            impl #start {
+                #[inline(always)]
+                #vis fn absent(self) -> #final_value {
+                    #final_value {
+                        #present_field: false,
+                        #(#absent_values)*
+                    }
+                }
+
+                #[inline(always)]
+                #vis fn present<__WireReprBuild>(self, build: __WireReprBuild) -> #final_value
+                where
+                    __WireReprBuild: FnOnce(
+                        #state<#(#initial_states),*>
+                    ) -> #state<#(#complete_states),*>,
+                {
+                    let value = build(#state {
+                        #(#initial_values)*
+                    });
+                    #final_value {
+                        #present_field: true,
+                        #(#present_values)*
+                    }
+                }
+            }
+
+            #(#setters)*
+
+            impl #choice_trait for #final_value {
+                #[inline(always)]
+                fn is_present(&self) -> bool {
+                    self.#present_field
+                }
+
+                #[inline]
+                fn write<O: #runtime::Output>(
+                    self,
+                    writer: &mut #runtime::ChildWriter<'_, O>,
+                ) -> Result<(), #runtime::OutputError<O::GrowError>> {
+                    if self.#present_field {
+                        #(#writes)*
+                    }
+                    Ok(())
+                }
+            }
+        }
+    });
+    quote!(#(#groups)*)
 }
 
 fn render_setters(
@@ -177,6 +413,10 @@ fn render_setters(
                 returned_states.push(match &target.kind {
                     SlotKind::Value(ty) => quote!(#runtime::__private::Set<#ty>),
                     SlotKind::RawBytes => quote!(#runtime::__private::Set<#raw_bytes>),
+                    SlotKind::Choice(flag) => {
+                        let final_value = choice_final_ident(schema, flag);
+                        quote!(#runtime::__private::Set<#final_value>)
+                    }
                     SlotKind::Nested(_) => quote!(#runtime::__private::Set<#child_builder>),
                 });
             } else {
@@ -233,6 +473,29 @@ fn render_setters(
                     }
                 });
             }
+            SlotKind::Choice(flag) => {
+                let start = choice_start_ident(schema, flag);
+                let final_value = choice_final_ident(schema, flag);
+                rendered.push(quote! {
+                    impl #impl_params #current_builder #impl_where {
+                        #[doc = concat!("Chooses conditional group `", stringify!(#field), "`.")]
+                        #[inline(always)]
+                        #vis fn #field<#build_fn>(
+                            self,
+                            choose: #build_fn,
+                        ) -> #returned_builder
+                        where
+                            #build_fn: FnOnce(#start) -> #final_value,
+                        {
+                            let value = choose(#start);
+                            #builder {
+                                #(#assignments)*
+                                #marker: ::core::marker::PhantomData,
+                            }
+                        }
+                    }
+                });
+            }
             SlotKind::Nested(ty) => {
                 rendered.push(quote! {
                     impl #impl_params #current_builder #impl_where {
@@ -275,6 +538,7 @@ fn render_complete(
     let mut impl_generics = schema.generics.clone();
     let mut complete_states = Vec::with_capacity(slots.len());
     let mut nested_builders = Vec::new();
+    let mut choice_values = Vec::new();
     for slot in slots {
         match &slot.kind {
             SlotKind::Value(ty) => {
@@ -291,6 +555,12 @@ fn render_complete(
                     .predicates
                     .push(parse_quote!(#parameter: AsRef<[u8]>));
                 complete_states.push(quote!(#runtime::__private::Set<#parameter>));
+            }
+            SlotKind::Choice(flag) => {
+                let final_value = choice_final_ident(schema, flag);
+                let choice_trait = choice_trait_ident(schema, flag);
+                complete_states.push(quote!(#runtime::__private::Set<#final_value>));
+                choice_values.push((flag.clone(), final_value, choice_trait));
             }
             SlotKind::Nested(ty) => {
                 let parameter =
@@ -316,7 +586,7 @@ fn render_complete(
     let self_type = quote!(#name #schema_types);
     let build_value = private_ident(schema, "write_value");
 
-    let mut used_error_names = BTreeSet::from(["Layout".to_owned()]);
+    let mut used_error_names = BTreeSet::from(["Layout".to_owned(), "LengthConflict".to_owned()]);
     let conversion_names = schema
         .fields
         .iter()
@@ -330,6 +600,7 @@ fn render_complete(
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
+            | FieldKind::Flag(_)
             | FieldKind::Nested(_) => None,
         })
         .collect::<Vec<_>>();
@@ -351,6 +622,25 @@ fn render_complete(
         .zip(&nested_names)
         .enumerate()
         .map(|(index, ((field, conversion_variant), nested_variant))| {
+            if let Some(condition) = &field.layout.condition {
+                let first = schema
+                    .condition_dependents(condition)
+                    .next()
+                    .expect("validated conditional group has fields");
+                if first.name != field.name {
+                    return TokenStream::new();
+                }
+                let (_, parameter, choice_trait) = choice_values
+                    .iter()
+                    .find(|(flag, _, _)| flag == condition)
+                    .expect("conditional group has one choice value");
+                return quote! {
+                    <#parameter as #choice_trait>::write(
+                        #build_value.#condition.0,
+                        writer,
+                    )?;
+                };
+            }
             let geometry = if schema.has_explicit_geometry() {
                 render_detached_geometry(
                     schema,
@@ -370,28 +660,66 @@ fn render_complete(
                     let encode = to_bytes_method(scalar.endian);
                     let source = if let Some(constant) = &scalar.constant {
                         quote!(#constant)
-                    } else if let Some(dependent) = schema.length_dependent(&field.name) {
-                        match &dependent.kind {
-                            FieldKind::RawBytes(_) => {
+                    } else if schema.is_presence_controller(&field.name) {
+                        let flag = schema
+                            .flag_fields()
+                            .find(|flag| {
+                                matches!(
+                                    &flag.kind,
+                                    FieldKind::Flag(flag) if flag.controller == field.name
+                                )
+                            })
+                            .expect("presence controller has one flag");
+                        let (_, parameter, choice_trait) = choice_values
+                            .iter()
+                            .find(|(name, _, _)| name == &flag.name)
+                            .expect("flag has one choice value");
+                        let flag_name = &flag.name;
+                        quote!(
+                            <#parameter as #choice_trait>::is_present(
+                                &#build_value.#flag_name.0
+                            )
+                        )
+                    } else {
+                        let dependents = schema.length_dependents(&field.name).collect::<Vec<_>>();
+                        if dependents.is_empty() {
+                            let field = &field.name;
+                            quote!(#build_value.#field.0)
+                        } else if matches!(dependents[0].kind, FieldKind::RawBytes(_)) {
+                            let controller_name = field.name.unraw().to_string();
+                            let first = &dependents[0].name;
+                            let checks = dependents.iter().skip(1).filter_map(|dependent| {
+                                if !matches!(dependent.kind, FieldKind::RawBytes(_)) {
+                                    return None;
+                                }
                                 let dependent_name = &dependent.name;
-                                let controller_name = field.name.unraw().to_string();
-                                quote! {
-                                    #value_ty::try_from(
-                                        #build_value.#dependent_name.0.as_ref().len()
-                                    )
-                                    .map_err(|_| #runtime::WriteError::Schema(
+                                Some(quote! {
+                                    let actual = #build_value.#dependent_name.0.as_ref().len();
+                                    if actual != expected {
+                                        return Err(#runtime::WriteError::Schema(
+                                            #error::LengthConflict {
+                                                controller: #controller_name,
+                                                expected,
+                                                actual,
+                                            },
+                                        ));
+                                    }
+                                })
+                            });
+                            quote! {{
+                                let expected = #build_value.#first.0.as_ref().len();
+                                #(#checks)*
+                                #value_ty::try_from(expected).map_err(|_| {
+                                    #runtime::WriteError::Schema(
                                         #error::Layout(#runtime::LayoutError {
                                             field: #controller_name,
                                         }),
-                                    ))?
-                                }
-                            }
-                            FieldKind::Nested(_) => quote!(0 as #value_ty),
-                            FieldKind::Scalar(_) | FieldKind::Bytes(_) => unreachable!(),
+                                    )
+                                })?
+                            }}
+                        } else {
+                            quote!(0 as #value_ty)
                         }
-                    } else {
-                        let field = &field.name;
-                        quote!(#build_value.#field.0)
                     };
                     if let Some(variant) = conversion_variant {
                         let semantic = private_ident(schema, &format!("scalar_{index}_value"));
@@ -434,13 +762,74 @@ fn render_complete(
                         writer.write(&#value)?;
                     }
                 }
-                FieldKind::RawBytes(_) => {
+                FieldKind::RawBytes(raw) => {
                     let field_name = &field.name;
+                    let consistency = match &raw.extent {
+                        super::model::DynamicExtent::Bounded(controller)
+                            if schema
+                                .length_dependents(controller)
+                                .next()
+                                .is_none_or(|dependent| dependent.name != field.name) =>
+                        {
+                            let controller_field = schema
+                                .fields
+                                .iter()
+                                .find(|candidate| candidate.name == *controller)
+                                .expect("validated length controller");
+                            let FieldKind::Scalar(controller_scalar) = &controller_field.kind else {
+                                unreachable!("validated length controller is scalar")
+                            };
+                            let relative =
+                                super::builder_offset(&controller_field.offset, runtime);
+                            let controller_name = controller.unraw().to_string();
+                            let wire_ty = scalar_type_tokens(controller_scalar.wire_type);
+                            let decode = super::from_bytes_method(controller_scalar.endian);
+                            let width = controller_scalar.width();
+                            quote! {
+                                let controller_offset = #relative
+                                    .and_then(|offset| #schema_start.checked_add(offset))
+                                    .ok_or_else(|| #runtime::WriteError::Schema(
+                                        #error::Layout(#runtime::LayoutError {
+                                            field: #controller_name,
+                                        }),
+                                    ))?;
+                                let controller_bytes = writer
+                                    .read_at::<#width>(controller_offset)
+                                    .ok_or_else(|| #runtime::WriteError::Schema(
+                                        #error::Layout(#runtime::LayoutError {
+                                            field: #controller_name,
+                                        }),
+                                    ))?;
+                                let expected = usize::try_from(
+                                    #wire_ty::#decode(controller_bytes)
+                                )
+                                .map_err(|_| #runtime::WriteError::Schema(
+                                    #error::Layout(#runtime::LayoutError {
+                                        field: #controller_name,
+                                    }),
+                                ))?;
+                                let actual = #build_value.#field_name.0.as_ref().len();
+                                if actual != expected {
+                                    return Err(#runtime::WriteError::Schema(
+                                        #error::LengthConflict {
+                                            controller: #controller_name,
+                                            expected,
+                                            actual,
+                                        },
+                                    ));
+                                }
+                            }
+                        }
+                        super::model::DynamicExtent::Bounded(_)
+                        | super::model::DynamicExtent::Rest => TokenStream::new(),
+                    };
                     quote! {
                         #geometry
+                        #consistency
                         writer.write(#build_value.#field_name.0.as_ref())?;
                     }
                 }
+                FieldKind::Flag(_) => TokenStream::new(),
                 FieldKind::Nested(nested) => {
                     let field_name = &field.name;
                     let field_label = field.name.unraw().to_string();
@@ -484,17 +873,59 @@ fn render_complete(
                             let controller_name = controller.unraw().to_string();
                             let wire_ty = scalar_type_tokens(controller_scalar.wire_type);
                             let encode = to_bytes_method(controller_scalar.endian);
+                            let decode = super::from_bytes_method(controller_scalar.endian);
+                            let width = controller_scalar.width();
+                            let is_first = schema
+                                .length_dependents(controller)
+                                .next()
+                                .is_some_and(|dependent| dependent.name == field.name);
+                            let apply = if is_first {
+                                quote! {
+                                    let controller_value =
+                                        #wire_ty::try_from(child_length).map_err(|_| {
+                                            #runtime::WriteError::Schema(
+                                                #error::Layout(#runtime::LayoutError {
+                                                    field: #controller_name,
+                                                }),
+                                            )
+                                        })?;
+                                    writer.patch_at(
+                                        controller_offset,
+                                        &controller_value.#encode(),
+                                    )?;
+                                }
+                            } else {
+                                quote! {
+                                    let controller_bytes = writer
+                                        .read_at::<#width>(controller_offset)
+                                        .ok_or_else(|| #runtime::WriteError::Schema(
+                                            #error::Layout(#runtime::LayoutError {
+                                                field: #controller_name,
+                                            }),
+                                        ))?;
+                                    let expected = usize::try_from(
+                                        #wire_ty::#decode(controller_bytes)
+                                    )
+                                    .map_err(|_| #runtime::WriteError::Schema(
+                                        #error::Layout(#runtime::LayoutError {
+                                            field: #controller_name,
+                                        }),
+                                    ))?;
+                                    if child_length != expected {
+                                        return Err(#runtime::WriteError::Schema(
+                                            #error::LengthConflict {
+                                                controller: #controller_name,
+                                                expected,
+                                                actual: child_length,
+                                            },
+                                        ));
+                                    }
+                                }
+                            };
                             quote! {
                                 let child_length = #actual_end.checked_sub(#start).ok_or_else(|| {
                                     #runtime::WriteError::Schema(
                                         #error::Layout(#runtime::LayoutError { field: #field_label }),
-                                    )
-                                })?;
-                                let controller_value = #wire_ty::try_from(child_length).map_err(|_| {
-                                    #runtime::WriteError::Schema(
-                                        #error::Layout(#runtime::LayoutError {
-                                            field: #controller_name,
-                                        }),
                                     )
                                 })?;
                                 let controller_offset = #relative
@@ -504,7 +935,7 @@ fn render_complete(
                                             field: #controller_name,
                                         }),
                                     ))?;
-                                writer.patch_at(controller_offset, &controller_value.#encode())?;
+                                #apply
                             }
                         })
                         .unwrap_or_default();
@@ -599,7 +1030,25 @@ fn render_complete(
             Layout(#[source] #runtime::LayoutError),
         }
     });
+    let has_shared_length = schema
+        .fields
+        .iter()
+        .any(|field| schema.length_dependents(&field.name).nth(1).is_some());
+    let length_conflict_variant = has_shared_length.then(|| {
+        quote! {
+            #[doc = "Payloads governed by one length controller disagree."]
+            #[error(
+                "controller `{controller}` expected length {expected}, got {actual}"
+            )]
+            LengthConflict {
+                controller: &'static str,
+                expected: usize,
+                actual: usize,
+            },
+        }
+    });
     let has_errors = schema.layout_can_fail()
+        || has_shared_length
         || !conversion_error_variants.is_empty()
         || !nested_builders.is_empty();
     let error_declaration = if !has_errors {
@@ -611,6 +1060,7 @@ fn render_complete(
             #vis enum #error {
                 #(#conversion_error_variants)*
                 #layout_error_variant
+                #length_conflict_variant
             }
         }
     } else {
@@ -620,6 +1070,7 @@ fn render_complete(
             #vis enum #error<#(#nested_error_parameters: ::core::error::Error + 'static),*> {
                 #(#conversion_error_variants)*
                 #layout_error_variant
+                #length_conflict_variant
                 #(#nested_error_variants)*
             }
         }

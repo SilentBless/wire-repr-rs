@@ -5,7 +5,10 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, TypeParam, parse_quote};
 
-use super::builder::{Slot, SlotKind, convert_to_wire, slots, unique_build_variant};
+use super::builder::{
+    Slot, SlotKind, choice_start_ident, choice_trait_ident, convert_to_wire, slots,
+    unique_build_variant,
+};
 use super::model::{DynamicExtent, FieldKind, LayoutOffset, Position, Schema, SizeTerm};
 use super::{
     builder_offset, builder_optional_size, fresh_field_ident, fresh_type_ident, pascal,
@@ -133,6 +136,10 @@ fn render_setters(
                 returned_states.push(match &target.kind {
                     SlotKind::Value(ty) => quote!(#runtime::__private::Set<#ty>),
                     SlotKind::RawBytes => quote!(#runtime::__private::Set<#raw_bytes>),
+                    SlotKind::Choice(flag) => {
+                        let final_value = super::builder::choice_final_ident(schema, flag);
+                        quote!(#runtime::__private::Set<#final_value>)
+                    }
                     SlotKind::Nested(_) => quote!(#runtime::__private::Set<#child_builder>),
                 });
             } else {
@@ -278,6 +285,7 @@ fn render_setters(
                     DynamicExtent::Bounded(controller) => render_length_patch(
                         schema,
                         controller,
+                        field,
                         quote!(bytes.len()),
                         &error_name,
                         runtime,
@@ -307,6 +315,54 @@ fn render_setters(
                             let bytes = #value.as_ref();
                             #patch
                             self.writer.write_at(#offset_local, bytes)?;
+                            Ok(#assignments)
+                        }
+                    }
+                });
+            }
+            (SlotKind::Choice(flag), FieldKind::Flag(_)) => {
+                let schema_error =
+                    writer_error_type(schema, &error_name, has_conversions, None, runtime);
+                let start = choice_start_ident(schema, flag);
+                let final_value = super::builder::choice_final_ident(schema, flag);
+                let choice_trait = choice_trait_ident(schema, flag);
+                let patch =
+                    render_presence_patch(schema, flag, quote!(present), &error_name, runtime);
+                let choice_writer =
+                    private_ident(schema, &format!("{}_choice_writer", flag.unraw()));
+                let (impl_params, _, impl_where) = impl_generics.split_for_impl();
+                rendered.push(quote! {
+                    impl #impl_params #current_writer #impl_where {
+                        #[doc = concat!("Chooses conditional group `", stringify!(#field), "`.")]
+                        #[inline]
+                        #vis fn #field<#build_fn>(
+                            mut self,
+                            choose: #build_fn,
+                        ) -> Result<
+                            #returned_writer,
+                            #runtime::WriteError<
+                                #schema_error,
+                                <#output as #runtime::Output>::GrowError,
+                            >,
+                        >
+                        where
+                            #build_fn: FnOnce(#start) -> #final_value,
+                        {
+                            #pending_constants
+                            #offset_binding
+                            let choice = choose(#start);
+                            let present =
+                                <#final_value as #choice_trait>::is_present(&choice);
+                            #patch
+                            {
+                                let mut #choice_writer =
+                                    self.writer.child_at(#offset_local)?;
+                                <#final_value as #choice_trait>::write(
+                                    choice,
+                                    &mut #choice_writer,
+                                )?;
+                                #choice_writer.finish()?;
+                            }
                             Ok(#assignments)
                         }
                     }
@@ -348,6 +404,7 @@ fn render_setters(
                         render_length_patch(
                             schema,
                             controller,
+                            field,
                             quote!(child_length),
                             &error_name,
                             runtime,
@@ -448,6 +505,10 @@ fn render_finish(
                     .predicates
                     .push(parse_quote!(#bytes: AsRef<[u8]>));
                 complete_states.push(quote!(#runtime::__private::Set<#bytes>));
+            }
+            SlotKind::Choice(flag) => {
+                let final_value = super::builder::choice_final_ident(schema, flag);
+                complete_states.push(quote!(#runtime::__private::Set<#final_value>));
             }
             SlotKind::Nested(ty) => {
                 let child =
@@ -550,7 +611,9 @@ fn render_finish(
                         self.writer.write_at(#offset_local, &#value)?;
                     }
                 }
-                FieldKind::RawBytes(_) | FieldKind::Nested(_) => unreachable!(),
+                FieldKind::RawBytes(_) | FieldKind::Flag(_) | FieldKind::Nested(_) => {
+                    unreachable!()
+                }
             })
         });
     let ensure_total = if schema.has_explicit_geometry() {
@@ -603,7 +666,7 @@ fn render_finish(
 }
 
 fn writer_error_names(schema: &Schema) -> (Vec<Option<syn::Ident>>, Vec<Option<syn::Ident>>) {
-    let mut used = BTreeSet::from(["Layout".to_owned()]);
+    let mut used = BTreeSet::from(["Layout".to_owned(), "LengthConflict".to_owned()]);
     let conversions = schema
         .fields
         .iter()
@@ -614,6 +677,7 @@ fn writer_error_names(schema: &Schema) -> (Vec<Option<syn::Ident>>, Vec<Option<s
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
+            | FieldKind::Flag(_)
             | FieldKind::Nested(_) => None,
         })
         .collect::<Vec<_>>();
@@ -759,7 +823,9 @@ fn render_pending_constants(
                         self.writer.write_at(#offset, &value)?;
                     }
                 }
-                FieldKind::RawBytes(_) | FieldKind::Nested(_) => unreachable!(),
+                FieldKind::RawBytes(_) | FieldKind::Flag(_) | FieldKind::Nested(_) => {
+                    unreachable!()
+                }
             })
         });
     quote!(#(#writes)*)
@@ -878,6 +944,7 @@ fn render_writer_start(
 fn render_length_patch(
     schema: &Schema,
     controller: &syn::Ident,
+    dependent: &syn::Ident,
     length: TokenStream,
     error: &syn::Ident,
     runtime: &TokenStream,
@@ -894,17 +961,89 @@ fn render_length_patch(
     let controller_offset = builder_offset(&controller_field.offset, runtime);
     let wire_ty = scalar_type_tokens(scalar.wire_type);
     let encode = to_bytes_method(scalar.endian);
+    let decode = super::from_bytes_method(scalar.endian);
+    let is_first = schema
+        .length_dependents(controller)
+        .next()
+        .is_some_and(|field| field.name == *dependent);
+    if is_first {
+        quote! {
+            let controller_offset = #controller_offset.ok_or_else(|| {
+                #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
+                )
+            })?;
+            let controller_value = #wire_ty::try_from(#length).map_err(|_| {
+                #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
+                )
+            })?;
+            self.writer
+                .write_at(controller_offset, &controller_value.#encode())?;
+        }
+    } else {
+        quote! {
+            let controller_offset = #controller_offset.ok_or_else(|| {
+                #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
+                )
+            })?;
+            let controller_bytes = self.writer
+                .read_at::<{ ::core::mem::size_of::<#wire_ty>() }>(controller_offset)
+                .ok_or_else(|| #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
+                ))?;
+            let expected = usize::try_from(#wire_ty::#decode(controller_bytes)).map_err(|_| {
+                #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
+                )
+            })?;
+            let actual = #length;
+            if actual != expected {
+                return Err(#runtime::WriteError::Schema(#error::LengthConflict {
+                    controller: #controller_name,
+                    expected,
+                    actual,
+                }));
+            }
+        }
+    }
+}
+fn render_presence_patch(
+    schema: &Schema,
+    flag: &syn::Ident,
+    present: TokenStream,
+    error: &syn::Ident,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let flag_field = schema
+        .fields
+        .iter()
+        .find(|field| field.name == *flag)
+        .expect("validated logical flag");
+    let FieldKind::Flag(flag_field) = &flag_field.kind else {
+        unreachable!("validated logical flag kind")
+    };
+    let controller = &flag_field.controller;
+    let controller_field = schema
+        .fields
+        .iter()
+        .find(|field| field.name == *controller)
+        .expect("validated presence controller");
+    let FieldKind::Scalar(scalar) = &controller_field.kind else {
+        unreachable!("validated presence controller is scalar")
+    };
+    let controller_name = controller.unraw().to_string();
+    let controller_offset = builder_offset(&controller_field.offset, runtime);
+    let wire_ty = scalar_type_tokens(scalar.wire_type);
+    let encode = to_bytes_method(scalar.endian);
     quote! {
         let controller_offset = #controller_offset.ok_or_else(|| {
             #runtime::WriteError::Schema(
                 #error::Layout(#runtime::LayoutError { field: #controller_name }),
             )
         })?;
-        let controller_value = #wire_ty::try_from(#length).map_err(|_| {
-            #runtime::WriteError::Schema(
-                #error::Layout(#runtime::LayoutError { field: #controller_name }),
-            )
-        })?;
+        let controller_value: #wire_ty = if #present { 1 } else { 0 };
         self.writer
             .write_at(controller_offset, &controller_value.#encode())?;
     }

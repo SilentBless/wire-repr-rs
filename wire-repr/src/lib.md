@@ -116,11 +116,13 @@ write conversions are checked.
 - `wire::Bytes` exposes bounded or terminal source spans without copying.
 - Padding and placement gaps remain opaque on read and are zero-filled by fresh writers.
 - Bounded raw and nested payloads patch their physically earlier length controllers.
+- Shared byte-length controllers reject conflicting write intent without hidden plans.
+- `flag` and `depends_on` generate one present/absent choice closure for coherent groups.
 - Fixed writers return `NeedMore`; growable collections use their existing `Extend<u8>` capability.
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-The production design extends the same model to general controller dependencies, conditions,
-arrays, static enum selectors, bitfields, cursors, physical selections, and computed fields. It
-does not add negotiated selector maps, hidden indexes, general resource-limit machinery, runtime
-schemas, semantic object materialization, async I/O, or feature-selected renderers.
+The production design extends the same model to arrays, static enum selectors, bitfields, cursors,
+physical selections, and computed fields. It does not add negotiated selector maps, hidden
+indexes, general resource-limit machinery, runtime schemas, semantic object materialization,
+async I/O, or feature-selected renderers.

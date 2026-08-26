@@ -80,36 +80,58 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             })
         })
         .collect::<Vec<_>>();
-    let retained_ranges = if schema.has_explicit_geometry() {
-        schema
-            .fields
-            .iter()
-            .enumerate()
-            .map(|(index, _)| private_ident(schema, &format!("field_{index}_range")))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let descriptor_range_fields = retained_ranges
+    let retained_flags = schema
+        .flag_fields()
+        .map(|field| {
+            (
+                field.name.clone(),
+                private_ident(schema, &format!("flag_{}_value", field.name.unraw())),
+            )
+        })
+        .collect::<Vec<_>>();
+    let retained_starts = schema
+        .fields
         .iter()
-        .map(|field| quote!(#field: ::core::ops::Range<usize>,));
+        .enumerate()
+        .filter(|(index, _)| retains_geometry_start(schema, *index))
+        .map(|(index, _)| private_ident(schema, &format!("field_{index}_start")))
+        .collect::<Vec<_>>();
+    let retained_ends = schema
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| retains_geometry_end(schema, *index))
+        .map(|(index, _)| private_ident(schema, &format!("field_{index}_end")))
+        .collect::<Vec<_>>();
     let descriptor_char_fields = retained_char_fields
         .iter()
         .map(|(field, _)| quote!(#field: char,));
+    let descriptor_flag_fields = retained_flags
+        .iter()
+        .map(|(field, _)| quote!(#field: bool,));
+    let descriptor_geometry_fields = retained_starts
+        .iter()
+        .chain(&retained_ends)
+        .map(|field| quote!(#field: usize,));
     let descriptor_nested_fields =
         nested_fields
             .iter()
             .zip(&descriptor_parameters)
             .map(|(nested, state)| {
                 let field = &nested.name;
-                quote!(#field: #state,)
+                if nested.layout.condition.is_some() {
+                    quote!(#field: Option<#state>,)
+                } else {
+                    quote!(#field: #state,)
+                }
             });
     let descriptor_declaration = if descriptor_parameters.is_empty() {
         quote! {
             #[doc(hidden)]
             #vis struct #descriptor {
                 #(#descriptor_char_fields)*
-                #(#descriptor_range_fields)*
+                #(#descriptor_flag_fields)*
+                #(#descriptor_geometry_fields)*
             }
         }
     } else {
@@ -117,8 +139,9 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #[doc(hidden)]
             #vis struct #descriptor<#(#descriptor_parameters),*> {
                 #(#descriptor_char_fields)*
+                #(#descriptor_flag_fields)*
                 #(#descriptor_nested_fields)*
-                #(#descriptor_range_fields)*
+                #(#descriptor_geometry_fields)*
             }
         }
     };
@@ -138,28 +161,43 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let borrowed_char_fields = retained_char_fields
         .iter()
         .map(|(field, _)| quote!(#field: char,));
+    let borrowed_flag_fields = retained_flags
+        .iter()
+        .map(|(field, _)| quote!(#field: bool,));
     let borrowed_nested_fields = nested_fields.iter().map(|field| {
         let name = &field.name;
         let FieldKind::Nested(nested) = &field.kind else {
             unreachable!()
         };
         let ty = &nested.ty;
-        quote!(#name: &#view_lifetime <#ty as #runtime::WireView>::State,)
+        if field.layout.condition.is_some() {
+            quote!(#name: &#view_lifetime Option<<#ty as #runtime::WireView>::State>,)
+        } else {
+            quote!(#name: &#view_lifetime <#ty as #runtime::WireView>::State,)
+        }
     });
-    let borrowed_range_fields = retained_ranges
+    let borrowed_geometry_fields = retained_starts
         .iter()
-        .map(|field| quote!(#field: &#view_lifetime ::core::ops::Range<usize>,));
+        .chain(&retained_ends)
+        .map(|field| quote!(#field: usize,));
     let borrowed_char_values = retained_char_fields
+        .iter()
+        .map(|(field, _)| quote!(#field: state.#field,));
+    let borrowed_flag_values = retained_flags
         .iter()
         .map(|(field, _)| quote!(#field: state.#field,));
     let borrowed_nested_values = nested_fields.iter().map(|field| {
         let name = &field.name;
         quote!(#name: &state.#name,)
     });
-    let borrowed_range_values = retained_ranges
+    let borrowed_geometry_values = retained_starts
         .iter()
-        .map(|field| quote!(#field: &state.#field,));
+        .chain(&retained_ends)
+        .map(|field| quote!(#field: state.#field,));
     let descriptor_char_values = retained_char_fields
+        .iter()
+        .map(|(field, value)| quote!(#field: #value,));
+    let descriptor_flag_values = retained_flags
         .iter()
         .map(|(field, value)| quote!(#field: #value,));
     let descriptor_nested_values = nested_fields.iter().map(|field| {
@@ -167,12 +205,16 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         let state = private_ident(schema, &format!("{}_state", name.unraw()));
         quote!(#name: #state,)
     });
-    let descriptor_range_values = retained_ranges.iter().map(|field| quote!(#field: #field,));
+    let descriptor_geometry_values = retained_starts
+        .iter()
+        .chain(&retained_ends)
+        .map(|field| quote!(#field: #field,));
     let descriptor_value = quote! {
         #descriptor {
             #(#descriptor_char_values)*
+            #(#descriptor_flag_values)*
             #(#descriptor_nested_values)*
-            #(#descriptor_range_values)*
+            #(#descriptor_geometry_values)*
         }
     };
 
@@ -202,7 +244,9 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 let total = view_offset_for_end(schema, last, runtime);
                 quote!(#total.expect("framed fixed schema width"))
             }
-            FieldKind::RawBytes(_) => unreachable!("raw bytes use explicit geometry"),
+            FieldKind::RawBytes(_) | FieldKind::Flag(_) => {
+                unreachable!("dynamic fields use explicit geometry")
+            }
         }
     } else {
         quote!(0usize)
@@ -251,10 +295,10 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         #vis struct #borrowed_view #borrowed_impl #borrowed_where {
             #input_field: &#view_lifetime [u8],
             #(#borrowed_char_fields)*
+            #(#borrowed_flag_fields)*
             #(#borrowed_nested_fields)*
-            #(#borrowed_range_fields)*
+            #(#borrowed_geometry_fields)*
         }
-
         #[doc = "Exact-source view API generated for this schema."]
         #vis trait #view_trait #impl_generics #where_clause {
             /// Returns the exact represented bytes.
@@ -325,8 +369,9 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 #borrowed_view {
                     #input_field: input,
                     #(#borrowed_char_values)*
+                    #(#borrowed_flag_values)*
                     #(#borrowed_nested_values)*
-                    #(#borrowed_range_values)*
+                    #(#borrowed_geometry_values)*
                 }
             }
         }
@@ -446,6 +491,7 @@ fn error_names(schema: &Schema) -> ErrorNames {
                 FieldKind::Scalar(_)
                 | FieldKind::Bytes(_)
                 | FieldKind::RawBytes(_)
+                | FieldKind::Flag(_)
                 | FieldKind::Nested(_) => None,
             };
             let nested = matches!(field.kind, FieldKind::Nested(_))
@@ -529,7 +575,9 @@ fn render_error(
                         #mismatch(#[source] #runtime::ConstantMismatch<#ty>),
                     });
                 }
-                FieldKind::RawBytes(_) | FieldKind::Nested(_) => unreachable!(),
+                FieldKind::RawBytes(_) | FieldKind::Flag(_) | FieldKind::Nested(_) => {
+                    unreachable!()
+                }
             }
         }
         if let Some(conversion) = &names.conversion {
@@ -799,6 +847,7 @@ fn render_frame_steps(
                 });
             }
             FieldKind::RawBytes(_) => unreachable!("explicit geometry uses its own frame renderer"),
+            FieldKind::Flag(_) => unreachable!("explicit geometry uses its own frame renderer"),
         }
     }
     steps
@@ -825,7 +874,6 @@ fn render_explicit_frame_steps(
         let start = private_ident(schema, &format!("field_{index}_start"));
         let end = private_ident(schema, &format!("field_{index}_end"));
         let absolute = private_ident(schema, &format!("field_{index}_absolute"));
-        let range = private_ident(schema, &format!("field_{index}_range"));
         let position = match &field.layout.position {
             Some(Position::Static(position)) => quote!(#position),
             Some(Position::Field(controller)) => {
@@ -863,6 +911,15 @@ fn render_explicit_frame_steps(
                 }}
             }
         };
+        let present =
+            field.layout.condition.as_ref().map(|condition| {
+                private_ident(schema, &format!("flag_{}_value", condition.unraw()))
+            });
+        let present_value = present
+            .as_ref()
+            .map(|present| quote!(#present))
+            .unwrap_or_else(|| quote!(true));
+        let position = quote!(if #present_value { #position } else { #cursor });
         steps.push(quote! {
             let #start: usize = #position;
             if #start < #cursor {
@@ -931,9 +988,13 @@ fn render_explicit_frame_steps(
                             .map_err(|_| #error::LayoutUnavailable { field: #field_name })?;
                     }
                 });
-                steps.push(quote! {
-                    let #end = #start.checked_add(#width)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                let presence_controller_value =
+                    schema.is_presence_controller(&field.name).then(|| {
+                        let presence =
+                            private_ident(schema, &format!("presence_{}", field.name.unraw()));
+                        quote!(let #presence = #value;)
+                    });
+                let decode_value = quote! {
                     let #bytes: [u8; #width] = #frame_input
                         .get(#start..#end)
                         .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
@@ -946,6 +1007,35 @@ fn render_explicit_frame_steps(
                     #converted
                     #constant_check
                     #controller_value
+                    #presence_controller_value
+                };
+                if field.layout.condition.is_some() {
+                    steps.push(quote! {
+                        let #end = if #present_value {
+                            #start.checked_add(#width)
+                                .ok_or(#error::LayoutUnavailable { field: #field_name })?
+                        } else {
+                            #start
+                        };
+                        if #present_value {
+                            #decode_value
+                        }
+                    });
+                } else {
+                    steps.push(quote! {
+                        let #end = #start.checked_add(#width)
+                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                        #decode_value
+                    });
+                }
+            }
+            FieldKind::Flag(flag) => {
+                let value = private_ident(schema, &format!("flag_{}_value", field.name.unraw()));
+                let controller =
+                    private_ident(schema, &format!("presence_{}", flag.controller.unraw()));
+                steps.push(quote! {
+                    let #end = #start;
+                    let #value = #controller;
                 });
             }
             FieldKind::Bytes(bytes_field) => {
@@ -1084,7 +1174,6 @@ fn render_explicit_frame_steps(
             }
         }
         steps.push(quote! {
-            let #range = #start..#end;
             #cursor = #end;
         });
     }
@@ -1100,6 +1189,11 @@ fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStre
             match &field.kind {
                 FieldKind::Scalar(scalar) => {
                     let ty = value_type_tokens(scalar.value_type);
+                    let ty = if field.layout.condition.is_some() {
+                        quote!(Option<#ty>)
+                    } else {
+                        ty
+                    };
                     quote! {
                         #[doc = concat!("Returns decoded field `", stringify!(#name), "`.")]
                         fn #name(&self) -> #ty;
@@ -1118,18 +1212,125 @@ fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStre
                         fn #name(&self) -> &[u8];
                     }
                 }
+                FieldKind::Flag(_) => {
+                    quote! {
+                        #[doc = concat!("Returns logical presence flag `", stringify!(#name), "`.")]
+                        fn #name(&self) -> bool;
+                    }
+                }
                 FieldKind::Nested(nested) => {
                     let ty = &nested.ty;
                     let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
+                    let ty = if field.layout.condition.is_some() {
+                        quote!(Option<<#ty as #runtime::WireView>::View<#field_lifetime>>)
+                    } else {
+                        quote!(<#ty as #runtime::WireView>::View<#field_lifetime>)
+                    };
                     quote! {
                         #[doc = concat!("Returns nested field `", stringify!(#name), "`.")]
-                        fn #name<#field_lifetime>(&#field_lifetime self)
-                            -> <#ty as #runtime::WireView>::View<#field_lifetime>;
+                        fn #name<#field_lifetime>(&#field_lifetime self) -> #ty;
                     }
                 }
             }
         })
         .collect()
+}
+fn retains_geometry_start(schema: &Schema, index: usize) -> bool {
+    let field = &schema.fields[index];
+    schema.has_explicit_geometry()
+        && (field.layout.pad_before.is_some()
+            || field.layout.align_before.is_some()
+            || field.layout.position.is_some())
+}
+
+fn retains_geometry_end(schema: &Schema, index: usize) -> bool {
+    if !schema.has_explicit_geometry() {
+        return false;
+    }
+    let field = &schema.fields[index];
+    if matches!(field.kind, FieldKind::Flag(_)) {
+        return false;
+    }
+    matches!(field.kind, FieldKind::RawBytes(_) | FieldKind::Nested(_))
+        || field.layout.condition.is_some()
+        || field.layout.pad_before.is_some()
+        || field.layout.align_before.is_some()
+        || field.layout.position.is_some()
+}
+
+fn geometry_state_value(
+    schema: &Schema,
+    index: usize,
+    suffix: &str,
+    borrowed: bool,
+) -> TokenStream {
+    let field = private_ident(schema, &format!("field_{index}_{suffix}"));
+    if borrowed {
+        quote!(self.#field)
+    } else {
+        quote!(self.descriptor.#field)
+    }
+}
+
+fn geometry_start(
+    schema: &Schema,
+    index: usize,
+    borrowed: bool,
+    runtime: &TokenStream,
+) -> TokenStream {
+    if retains_geometry_start(schema, index) {
+        return geometry_state_value(schema, index, "start", borrowed);
+    }
+    if index > 0 && retains_geometry_end(schema, index - 1) {
+        return geometry_end(schema, index - 1, borrowed, runtime);
+    }
+    let field = &schema.fields[index];
+    if !field
+        .offset
+        .terms
+        .iter()
+        .any(|term| matches!(term, super::model::SizeTerm::Dynamic))
+    {
+        let offset = view_offset(&field.offset, runtime);
+        return quote!(#offset.expect("validated static field offset"));
+    }
+    geometry_end(schema, index - 1, borrowed, runtime)
+}
+
+fn geometry_end(
+    schema: &Schema,
+    index: usize,
+    borrowed: bool,
+    runtime: &TokenStream,
+) -> TokenStream {
+    if retains_geometry_end(schema, index) {
+        return geometry_state_value(schema, index, "end", borrowed);
+    }
+    let start = geometry_start(schema, index, borrowed, runtime);
+    match &schema.fields[index].kind {
+        FieldKind::Scalar(scalar) => {
+            let width = scalar.width();
+            quote!(#start + #width)
+        }
+        FieldKind::Bytes(bytes) => {
+            let width = &bytes.len;
+            quote!(#start + #width)
+        }
+        FieldKind::Flag(_) => start,
+        FieldKind::Nested(nested) => {
+            let ty = &nested.ty;
+            if nested.terminal {
+                quote!(self.as_bytes().len())
+            } else {
+                quote!(
+                    #start
+                        + <#ty as #runtime::WireView>::FIXED_SIZE
+                            .expect("framed nonterminal child has fixed width")
+                )
+            }
+        }
+        FieldKind::RawBytes(_) => unreachable!("raw byte end is retained"),
+    }
 }
 
 fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -> Vec<TokenStream> {
@@ -1140,17 +1341,15 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
         .map(|(index, field)| {
             let name = &field.name;
             let offset_value = view_offset(&field.offset, runtime);
-            let retained_range = private_ident(schema, &format!("field_{index}_range"));
-            let dynamic_start = if borrowed {
-                quote!(self.#retained_range.start)
-            } else {
-                quote!(self.descriptor.#retained_range.start)
-            };
-            let dynamic_end = if borrowed {
-                quote!(self.#retained_range.end)
-            } else {
-                quote!(self.descriptor.#retained_range.end)
-            };
+            let dynamic_start = geometry_start(schema, index, borrowed, runtime);
+            let dynamic_end = geometry_end(schema, index, borrowed, runtime);
+            let condition = field.layout.condition.as_ref().map(|condition| {
+                if borrowed {
+                    quote!(self.#condition)
+                } else {
+                    quote!(self.descriptor.#condition)
+                }
+            });
             match &field.kind {
                 FieldKind::Scalar(scalar) => {
                     let width = scalar.width();
@@ -1199,9 +1398,23 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                             }
                         }
                     };
+                    let (return_ty, body) = if let Some(condition) = condition {
+                        (
+                            quote!(Option<#value_ty>),
+                            quote! {
+                                if #condition {
+                                    Some({ #body })
+                                } else {
+                                    None
+                                }
+                            },
+                        )
+                    } else {
+                        (value_ty, body)
+                    };
                     quote! {
                         #[inline(always)]
-                        fn #name(&self) -> #value_ty {
+                        fn #name(&self) -> #return_ty {
                             #body
                         }
                     }
@@ -1232,6 +1445,19 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                         #[inline(always)]
                         fn #name(&self) -> #ty {
                             #body
+                        }
+                    }
+                }
+                FieldKind::Flag(_) => {
+                    let value = if borrowed {
+                        quote!(self.#name)
+                    } else {
+                        quote!(self.descriptor.#name)
+                    };
+                    quote! {
+                        #[inline(always)]
+                        fn #name(&self) -> bool {
+                            #value
                         }
                     }
                 }
@@ -1308,7 +1534,7 @@ fn view_offset_for_end(
             let len = &bytes.len;
             quote!(#len)
         }
-        FieldKind::RawBytes(_) | FieldKind::Nested(_) => unreachable!(),
+        FieldKind::RawBytes(_) | FieldKind::Flag(_) | FieldKind::Nested(_) => unreachable!(),
     };
     quote!(#offset.and_then(|offset| offset.checked_add(#width)))
 }
