@@ -118,6 +118,16 @@ geometry without allocating an index. Writers stream items through one closure a
 afterward; `item_view` and `item_result` copy exact generated or traversed views without rebuilding
 semantic values.
 
+## Static enums and bitfields
+
+Static enums use one physical selector and expose a borrowed exhaustive variant enum. An
+`#[wire(unknown)]` variant retains the raw selector and exact bounded or terminal body, so
+`item_view` can forward it unchanged.
+
+Nominal bitfields declare `#[wire(as = u32, le)]` on the type and `bit`/`bits` on logical fields.
+For local projections, `#[wire(bits_of = raw, ...)]` derives zero-width getters and builder setters
+from an earlier unsigned scalar. Fresh builders zero undeclared bits; exact views preserve them.
+
 ## Manual wire types
 
 Manual representations implement the same independent read and write capabilities as derived
@@ -224,11 +234,11 @@ deviation instead of treating LLVM instruction counts as performance truth.
 
 The implemented surface currently covers fixed scalars and byte arrays, constants, explicit
 logical conversions, validators, nested children, demand geometry, controller dependencies,
-conditional groups, runtime arrays, exact View forwarding, and progressive typestate writers.
+conditional groups, runtime arrays, static enums with exact unknown forwarding, nominal and inline
+bitfields, exact View forwarding, and progressive typestate writers.
 
-The remaining production classes are static selectors with exact unknown forwarding, nominal and
-inline bitfields, physical selections, computed fields, homogeneous `views`, and heterogeneous
-cursors.
+The remaining production classes are physical selections, computed fields, homogeneous `views`,
+and heterogeneous cursors.
 
 General recursive schemas and a public traversal capability are deferred until this roadmap is
 complete. Negotiated selector maps, hidden indexes, eager full-collection validation, and a general

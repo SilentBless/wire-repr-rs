@@ -138,6 +138,7 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
             || schema.is_length_controller(&field.name)
             || schema.is_count_controller(&field.name)
             || schema.is_presence_controller(&field.name)
+            || schema.is_bit_controller(&field.name)
             || field.layout.condition.is_some()
         {
             continue;
@@ -154,6 +155,10 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
             FieldKind::RawBytes(_) => SlotKind::RawBytes,
             FieldKind::Array(array) => SlotKind::Array(Box::new(array.item.clone())),
             FieldKind::Flag(_) => SlotKind::Choice(field.name.clone()),
+            FieldKind::BitProjection(_) => {
+                let ty = &field.ty;
+                SlotKind::Value(quote!(#ty))
+            }
             FieldKind::Nested(nested) => SlotKind::Nested(Box::new(nested.ty.clone())),
         };
         slots.push(Slot {
@@ -610,6 +615,7 @@ fn render_complete(
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Flag(_)
+            | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => None,
         })
         .collect::<Vec<_>>();
@@ -690,6 +696,15 @@ fn render_complete(
                             <#parameter as #choice_trait>::is_present(
                                 &#build_value.#flag_name.0
                             )
+                        )
+                    } else if schema.is_bit_controller(&field.name) {
+                        render_bit_controller_source(
+                            schema,
+                            &field.name,
+                            &build_value,
+                            &value_ty,
+                            error,
+                            runtime,
                         )
                     } else {
                         let dependents = schema.length_dependents(&field.name).collect::<Vec<_>>();
@@ -841,6 +856,7 @@ fn render_complete(
                     }
                 }
                 FieldKind::Array(_) => TokenStream::new(),
+                FieldKind::BitProjection(_) => TokenStream::new(),
                 FieldKind::Flag(_) => TokenStream::new(),
                 FieldKind::Nested(nested) => {
                     let field_name = &field.name;
@@ -1285,4 +1301,59 @@ pub(super) fn convert_to_wire(
         })),
         ValueType::Char => quote!(<#wire_type>::try_from(u32::from(#value)).ok()),
     }
+}
+
+fn render_bit_controller_source(
+    schema: &Schema,
+    controller: &syn::Ident,
+    build_value: &syn::Ident,
+    value_ty: &TokenStream,
+    error: &syn::Ident,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let parts = schema
+        .bit_projection_fields()
+        .filter_map(|field| {
+            let FieldKind::BitProjection(projection) = &field.kind else {
+                return None;
+            };
+            if projection.controller != *controller {
+                return None;
+            }
+            let name = &field.name;
+            let start = projection.start;
+            let width = projection.end - projection.start + 1;
+            let mask = if width == 128 {
+                u128::MAX
+            } else {
+                (1u128 << width) - 1
+            };
+            let is_bool = matches!(
+                &field.ty,
+                syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident("bool")
+            );
+            let raw = if is_bool {
+                quote!(if #build_value.#name.0 { 1u128 } else { 0u128 })
+            } else {
+                quote!(#build_value.#name.0 as u128)
+            };
+            Some(quote! {
+                let part = #raw;
+                if part > #mask {
+                    return Err(#runtime::WriteError::Schema(
+                        #error::Layout(#runtime::LayoutError {
+                            field: stringify!(#name),
+                        }),
+                    ));
+                }
+                raw |= ((part as #value_ty) << #start)
+                    & ((#mask as #value_ty) << #start);
+            })
+        })
+        .collect::<Vec<_>>();
+    quote! {{
+        let mut raw: #value_ty = 0;
+        #(#parts)*
+        raw
+    }}
 }

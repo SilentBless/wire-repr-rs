@@ -120,11 +120,12 @@ write conversions are checked.
 - `flag` and `depends_on` generate one present/absent choice closure for coherent groups.
 - `wire::Array<T>` exposes replayable range-and-count facades without retaining item indexes.
 - Streaming array writers patch count and accept exact generated or traversed item views.
+- Static enums expose borrowed exhaustive variants and preserve exact unknown bodies.
+- Nominal and inline bitfields use checked logical ranges while fresh writers zero undeclared bits.
 - Fixed writers return `NeedMore`; growable collections use their existing `Extend<u8>` capability.
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-The production design extends the same model to static enum selectors, bitfields, cursors, physical
-selections, and computed fields. It does not add negotiated selector maps, hidden indexes, general
-resource-limit machinery, runtime schemas, semantic object materialization, async I/O, or
-feature-selected renderers.
+The production design extends the same model to cursors, physical selections, and computed fields.
+It does not add negotiated selector maps, hidden indexes, general resource-limit machinery,
+runtime schemas, semantic object materialization, async I/O, or feature-selected renderers.

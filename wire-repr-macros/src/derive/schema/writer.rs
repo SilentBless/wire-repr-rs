@@ -24,6 +24,13 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
     let output = fresh_type_ident(&schema.generics, "Output");
     let original_arguments = generic_arguments(&schema.generics);
     let state_markers = slots.iter().map(|slot| &slot.state).collect::<Vec<_>>();
+    let bit_controller_states = bit_controller_states(schema);
+    let bit_controller_fields = bit_controller_states
+        .iter()
+        .map(|(_, state, ty)| quote!(#state: #ty,));
+    let bit_controller_initializers = bit_controller_states
+        .iter()
+        .map(|(_, state, _)| quote!(#state: 0,));
 
     let mut writer_generics = schema.generics.clone();
     for parameter in &mut writer_generics.params {
@@ -74,6 +81,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
         #[doc(hidden)]
         #vis struct #writer_name #writer_declaration_generics {
             writer: #runtime::Writer<#output>,
+            #(#bit_controller_fields)*
             #marker: ::core::marker::PhantomData<
                 fn() -> (#self_type, #(#state_markers,)*)
             >,
@@ -85,6 +93,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
             #vis fn builder<#output: #runtime::Output>(output: #output) -> #initial_writer {
                 #writer_name {
                     writer: #runtime::Writer::new(output),
+                    #(#bit_controller_initializers)*
                     #marker: ::core::marker::PhantomData,
                 }
             }
@@ -108,6 +117,7 @@ fn render_setters(
     let error_name = format_ident!("{}WriteError", schema.name.unraw());
     let (conversion_names, nested_names) = writer_error_names(schema);
     let has_conversions = conversion_names.iter().any(Option::is_some);
+    let bit_controller_states = bit_controller_states(schema);
     let mut rendered = Vec::new();
 
     for (target_index, target) in slots.iter().enumerate() {
@@ -196,9 +206,13 @@ fn render_setters(
         } else {
             TokenStream::new()
         };
+        let bit_controller_assignments = bit_controller_states
+            .iter()
+            .map(|(_, state, _)| quote!(#state: self.#state,));
         let assignments = quote! {
             #writer_name {
                 writer: self.writer,
+                #(#bit_controller_assignments)*
                 #marker: ::core::marker::PhantomData,
             }
         };
@@ -277,6 +291,93 @@ fn render_setters(
                             #offset_binding
                             self.writer.write_at(#offset_local, &#value)?;
                             Ok(#assignments)
+                        }
+                    }
+                });
+            }
+            (SlotKind::Value(ty), FieldKind::BitProjection(projection)) => {
+                let schema_error =
+                    writer_error_type(schema, &error_name, has_conversions, None, runtime);
+                let controller = schema
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.name == projection.controller)
+                    .expect("validated bit controller");
+                let FieldKind::Scalar(controller_scalar) = &controller.kind else {
+                    unreachable!("validated bit controller is scalar")
+                };
+                let controller_offset = super::builder_offset(&controller.offset, runtime);
+                let controller_ty = scalar_type_tokens(controller_scalar.wire_type);
+                let encode = to_bytes_method(controller_scalar.endian);
+                let start = projection.start;
+                let bit_width = projection.end - projection.start + 1;
+                let mask = if bit_width == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << bit_width) - 1
+                };
+                let part = if matches!(ty.to_string().as_str(), "bool") {
+                    quote!(if #value { 1u128 } else { 0u128 })
+                } else {
+                    quote!(#value as u128)
+                };
+                let controller_state = bit_controller_states
+                    .iter()
+                    .find(|(name, _, _)| *name == projection.controller)
+                    .map(|(_, state, _)| state)
+                    .expect("bit controller has retained writer state");
+                let returned_controller_assignments =
+                    bit_controller_states.iter().map(|(_, state, _)| {
+                        if state == controller_state {
+                            quote!(#state: raw,)
+                        } else {
+                            quote!(#state: self.#state,)
+                        }
+                    });
+                let returned = quote! {
+                    #writer_name {
+                        writer: self.writer,
+                        #(#returned_controller_assignments)*
+                        #marker: ::core::marker::PhantomData,
+                    }
+                };
+                let (impl_params, _, impl_where) = impl_generics.split_for_impl();
+                rendered.push(quote! {
+                    impl #impl_params #current_writer #impl_where {
+                        #[doc = concat!("Writes logical bit projection `", stringify!(#field), "`.")]
+                        #[inline]
+                        #vis fn #field(
+                            mut self,
+                            #value: #ty,
+                        ) -> Result<
+                            #returned_writer,
+                            #runtime::WriteError<
+                                #schema_error,
+                                <#output as #runtime::Output>::GrowError,
+                            >,
+                        > {
+                            #pending_constants
+                            let part = #part;
+                            if part > #mask {
+                                return Err(#runtime::WriteError::Schema(
+                                    #error_name::Layout(#runtime::LayoutError {
+                                        field: stringify!(#field),
+                                    }),
+                                ));
+                            }
+                            let controller_offset = #controller_offset
+                                .ok_or_else(|| #runtime::WriteError::Schema(
+                                    #error_name::Layout(#runtime::LayoutError {
+                                        field: stringify!(#field),
+                                    }),
+                                ))?;
+                            let raw = self.#controller_state;
+                            let shifted_mask =
+                                ((#mask as #controller_ty) << #start);
+                            let raw = (raw & !shifted_mask)
+                                | (((part as #controller_ty) << #start) & shifted_mask);
+                            self.writer.write_at(controller_offset, &raw.#encode())?;
+                            Ok(#returned)
                         }
                     }
                 });
@@ -700,6 +801,7 @@ fn render_finish(
                 FieldKind::RawBytes(_)
                 | FieldKind::Array(_)
                 | FieldKind::Flag(_)
+                | FieldKind::BitProjection(_)
                 | FieldKind::Nested(_) => unreachable!(),
             })
         });
@@ -766,6 +868,7 @@ fn writer_error_names(schema: &Schema) -> (Vec<Option<syn::Ident>>, Vec<Option<s
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Flag(_)
+            | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => None,
         })
         .collect::<Vec<_>>();
@@ -917,6 +1020,7 @@ fn render_pending_constants(
                 FieldKind::RawBytes(_)
                 | FieldKind::Array(_)
                 | FieldKind::Flag(_)
+                | FieldKind::BitProjection(_)
                 | FieldKind::Nested(_) => unreachable!(),
             })
         });
@@ -1263,6 +1367,37 @@ fn generic_arguments(generics: &syn::Generics) -> Vec<TokenStream> {
                 let ident = &parameter.ident;
                 quote!(#ident)
             }
+        })
+        .collect()
+}
+
+fn bit_controller_states(schema: &Schema) -> Vec<(syn::Ident, syn::Ident, TokenStream)> {
+    let mut seen = BTreeSet::new();
+    schema
+        .bit_projection_fields()
+        .filter_map(|field| {
+            let FieldKind::BitProjection(projection) = &field.kind else {
+                return None;
+            };
+            if !seen.insert(projection.controller.to_string()) {
+                return None;
+            }
+            let controller = schema
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == projection.controller)
+                .expect("validated bit controller");
+            let FieldKind::Scalar(scalar) = &controller.kind else {
+                unreachable!("validated bit controller is scalar")
+            };
+            Some((
+                projection.controller.clone(),
+                private_ident(
+                    schema,
+                    &format!("{}_bit_value", projection.controller.unraw()),
+                ),
+                scalar_type_tokens(scalar.wire_type),
+            ))
         })
         .collect()
 }

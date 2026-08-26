@@ -249,7 +249,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 let total = private_ident(schema, &format!("{}_total", last.name.unraw()));
                 quote!(#total)
             }
-            FieldKind::Scalar(_) | FieldKind::Bytes(_) => {
+            FieldKind::Scalar(_) | FieldKind::Bytes(_) | FieldKind::BitProjection(_) => {
                 let total = view_offset_for_end(schema, last, runtime);
                 quote!(#total.expect("framed fixed schema width"))
             }
@@ -537,6 +537,7 @@ fn error_names(schema: &Schema) -> ErrorNames {
                 | FieldKind::RawBytes(_)
                 | FieldKind::Array(_)
                 | FieldKind::Flag(_)
+                | FieldKind::BitProjection(_)
                 | FieldKind::Nested(_) => None,
             };
             let nested = matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_))
@@ -623,6 +624,7 @@ fn render_error(
                 FieldKind::RawBytes(_)
                 | FieldKind::Array(_)
                 | FieldKind::Flag(_)
+                | FieldKind::BitProjection(_)
                 | FieldKind::Nested(_) => unreachable!(),
             }
         }
@@ -895,6 +897,7 @@ fn render_frame_steps(
             FieldKind::Array(_) => unreachable!("explicit geometry uses its own frame renderer"),
             FieldKind::RawBytes(_) => unreachable!("explicit geometry uses its own frame renderer"),
             FieldKind::Flag(_) => unreachable!("explicit geometry uses its own frame renderer"),
+            FieldKind::BitProjection(_) => {}
         }
     }
     steps
@@ -1084,6 +1087,11 @@ fn render_explicit_frame_steps(
                 steps.push(quote! {
                     let #end = #start;
                     let #value = #controller;
+                });
+            }
+            FieldKind::BitProjection(_) => {
+                steps.push(quote! {
+                    let #end = #start;
                 });
             }
             FieldKind::Bytes(bytes_field) => {
@@ -1307,6 +1315,13 @@ fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStre
                         fn #name(&self) -> bool;
                     }
                 }
+                FieldKind::BitProjection(_) => {
+                    let ty = &field.ty;
+                    quote! {
+                        #[doc = concat!("Returns logical bit projection `", stringify!(#name), "`.")]
+                        fn #name(&self) -> #ty;
+                    }
+                }
                 FieldKind::Nested(nested) => {
                     let ty = &nested.ty;
                     let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
@@ -1337,7 +1352,7 @@ fn retains_geometry_end(schema: &Schema, index: usize) -> bool {
         return false;
     }
     let field = &schema.fields[index];
-    if matches!(field.kind, FieldKind::Flag(_)) {
+    if matches!(field.kind, FieldKind::Flag(_) | FieldKind::BitProjection(_)) {
         return false;
     }
     matches!(
@@ -1388,7 +1403,7 @@ fn geometry_end(schema: &Schema, index: usize, runtime: &TokenStream) -> TokenSt
             let width = &bytes.len;
             quote!(#start + #width)
         }
-        FieldKind::Flag(_) => start,
+        FieldKind::Flag(_) | FieldKind::BitProjection(_) => start,
         FieldKind::Nested(nested) => {
             let ty = &nested.ty;
             if nested.terminal {
@@ -1543,6 +1558,40 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                         }
                     }
                 }
+                FieldKind::BitProjection(projection) => {
+                    let ty = &field.ty;
+                    let controller = &projection.controller;
+                    let controller_field = schema
+                        .fields
+                        .iter()
+                        .find(|candidate| candidate.name == *controller)
+                        .expect("validated bit controller");
+                    let FieldKind::Scalar(controller_scalar) = &controller_field.kind else {
+                        unreachable!("validated bit controller is scalar")
+                    };
+                    let controller_ty = scalar_type_tokens(controller_scalar.wire_type);
+                    let start = projection.start;
+                    let width = projection.end - projection.start + 1;
+                    let mask = if width == 128 {
+                        u128::MAX
+                    } else {
+                        (1u128 << width) - 1
+                    };
+                    let body = if matches!(
+                        primitive_name_for_projection(ty).as_deref(),
+                        Some("bool")
+                    ) {
+                        quote!(((self.#controller() >> #start) & 1) != 0)
+                    } else {
+                        quote!(((self.#controller() >> #start) & (#mask as #controller_ty)) as #ty)
+                    };
+                    quote! {
+                        #[inline(always)]
+                        fn #name(&self) -> #ty {
+                            #body
+                        }
+                    }
+                }
                 FieldKind::RawBytes(_) => {
                     quote! {
                         #[inline(always)]
@@ -1612,6 +1661,7 @@ fn view_offset_for_end(
             let len = &bytes.len;
             quote!(#len)
         }
+        FieldKind::BitProjection(_) => quote!(0usize),
         FieldKind::RawBytes(_)
         | FieldKind::Array(_)
         | FieldKind::Flag(_)
@@ -1653,4 +1703,14 @@ fn convert_from_wire(scalar: &Scalar, raw: &syn::Ident) -> TokenStream {
         }),
         ValueType::Char => quote!(u32::try_from(#raw).ok().and_then(char::from_u32)),
     }
+}
+
+fn primitive_name_for_projection(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    if path.qself.is_some() || path.path.segments.len() != 1 {
+        return None;
+    }
+    Some(path.path.segments[0].ident.unraw().to_string())
 }

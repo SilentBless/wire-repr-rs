@@ -3,10 +3,11 @@
 This document defines the target production architecture and clean-cutover contract for
 `wire-repr`. The current implementation covers named structs, fixed scalars and byte arrays,
 constants, explicit logical conversions, validators, nested children, demand geometry, controller
-dependencies, conditional choice groups, counted runtime arrays, and exact View forwarding. Later
-sections describing enums, computed fields, selections, and cursors are an implementation plan,
-not claims about the shipped surface. New layout classes extend this one model rather than
-restoring the removed legacy renderer or introducing parallel modes.
+dependencies, conditional choice groups, counted runtime arrays, static enums, nominal and inline
+bitfields, and exact View forwarding. Later sections describing computed fields, selections, and
+cursors are an implementation plan, not claims about the shipped surface. New layout classes
+extend this one model rather than restoring the removed legacy renderer or introducing parallel
+modes.
 
 ## 1. Product boundary
 
@@ -209,7 +210,8 @@ Views expose a generated borrowed variant enum for ordinary exhaustive `match`. 
 `#[wire(unknown)]` variant preserves the raw selector and exact bounded or terminal body bytes, so
 it can be forwarded through a writer without semantic reconstruction. Unknown selectors are
 rejected with the raw selector and absolute offset when no unknown variant exists. A nonterminal
-unknown body without a provable physical boundary is a derive error.
+unknown body must receive a provable physical boundary; otherwise composition fails at its field
+site.
 
 Selector values are compile-time schema facts. Negotiated runtime selector maps are outside the
 derive contract; a protocol that negotiates opcodes uses a manual wrapper capability.
@@ -364,14 +366,13 @@ runtime budget.
 
 ## 11. Implementation order
 
-The fixed, demand-geometry, dependency, and collection foundations are complete. The remaining
-target is delivered as dependency-ordered verticals:
+The fixed, demand-geometry, dependency, collection, enum, and bitfield foundations are complete.
+The remaining target is delivered as dependency-ordered verticals:
 
-1. add static enums with exact unknown forwarding plus nominal and inline bitfields;
-2. add typed `include`/`exclude` selections, chunk and byte iteration, `computed`, and
+1. add typed `include`/`exclude` selections, chunk and byte iteration, `computed`, and
    `try_computed`;
-3. add capability-gated homogeneous `views` and heterogeneous cursors;
-4. finish fuzzing, protocol fixtures, public examples, and release verification.
+2. add capability-gated homogeneous `views` and heterogeneous cursors;
+3. finish fuzzing, protocol fixtures, public examples, and release verification.
 
 Each vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads, behavioral
 tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not land as a
@@ -384,18 +385,19 @@ with one semantic oracle. Optional unsafe implementations are informational lowe
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
 
-The current mandatory corpus has nine discovered zones and twenty-two cases: fixed scalars and
+The current mandatory corpus has eleven discovered zones and twenty-seven cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, controller and
-conditional dependencies, runtime collection decode/build/copy, and fixed, automatic, and
-callback-driven output growth. Each covers read and write paths where applicable. The measurement
-tool inspects final linked consumer symbols for code shape, call topology, stack, allocation, and
-dispatch evidence. Runtime performance uses calibrated interleaved samples and reports distribution
-statistics. LLVM IR may explain an optimization result but is not treated as a latency oracle.
-State and artifact-size probes remain isolated from measured hot-path implementations.
+conditional dependencies, runtime collection decode/build/copy, static enum decode/build/copy,
+nominal and inline bitfields, and fixed, automatic, and callback-driven output growth. Each covers
+read and write paths where applicable. The measurement tool inspects final linked consumer symbols
+for code shape, call topology, stack, allocation, and dispatch evidence. Runtime performance uses
+calibrated interleaved samples and reports distribution statistics. LLVM IR may explain an
+optimization result but is not treated as a latency oracle. State and artifact-size probes remain
+isolated from measured hot-path implementations.
 
-Static enums, bitfields, selections, and computed fields become mandatory corpus zones when those
-layout classes ship; they are not claimed as current measurement coverage.
+Selections and computed fields become mandatory corpus zones when those layout classes ship; they
+are not claimed as current measurement coverage.
 
 Behavioral tests cover success, truncation at every accessed field boundary, constant mismatch,
 declared outer-extent mismatch, nested error propagation, absolute offsets, retained backing

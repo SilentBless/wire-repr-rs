@@ -104,6 +104,23 @@ pub const fn checked_optional_sum<const N: usize>(parts: [Option<usize>; N]) -> 
 }
 
 #[doc(hidden)]
+pub const fn checked_optional_equal<const N: usize>(parts: [Option<usize>; N]) -> Option<usize> {
+    let first = match parts.first() {
+        Some(Some(value)) => *value,
+        Some(None) | None => return None,
+    };
+    let mut index = 1usize;
+    while index < N {
+        match parts[index] {
+            Some(value) if value == first => {}
+            Some(_) | None => return None,
+        }
+        index += 1;
+    }
+    Some(first)
+}
+
+#[doc(hidden)]
 pub const fn checked_align(position: usize, alignment: usize) -> Option<usize> {
     if alignment == 0 {
         return None;

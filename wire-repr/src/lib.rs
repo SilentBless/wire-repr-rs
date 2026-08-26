@@ -22,7 +22,8 @@ pub mod __private {
     pub use crate::schema::{
         ArrayError, ArrayItem, ArrayView, ConstantMismatch, Frame, InvalidFrameExtent, IsSet,
         LayoutError, NeedMore, ScalarBuildConversionError, ScalarConversionError, Set,
-        TrailingBytes, Unset, checked_align, checked_optional_sum, frame_array_extent,
+        TrailingBytes, Unset, checked_align, checked_optional_equal, checked_optional_sum,
+        frame_array_extent,
     };
     pub use thiserror::Error as ThisError;
 }

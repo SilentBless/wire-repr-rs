@@ -25,6 +25,7 @@ pub(super) enum FieldKind {
     Array(ArrayField),
     Flag(FlagField),
     Nested(NestedField),
+    BitProjection(BitProjection),
 }
 
 pub(super) struct FixedBytes {
@@ -60,6 +61,12 @@ pub(super) enum Position {
 
 pub(super) struct FlagField {
     pub(super) controller: Ident,
+}
+
+pub(super) struct BitProjection {
+    pub(super) controller: Ident,
+    pub(super) start: u32,
+    pub(super) end: u32,
 }
 
 pub(super) struct NestedField {
@@ -145,7 +152,7 @@ impl ScalarType {
         )
     }
 
-    fn from_name(name: &str) -> Option<Self> {
+    pub(super) fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "u8" => Self::U8,
             "i8" => Self::I8,
@@ -191,7 +198,11 @@ impl FieldKind {
         match self {
             Self::Scalar(scalar) => scalar.constant.as_ref(),
             Self::Bytes(bytes) => bytes.constant.as_ref(),
-            Self::RawBytes(_) | Self::Array(_) | Self::Flag(_) | Self::Nested(_) => None,
+            Self::RawBytes(_)
+            | Self::Array(_)
+            | Self::Flag(_)
+            | Self::BitProjection(_)
+            | Self::Nested(_) => None,
         }
     }
 
@@ -200,7 +211,7 @@ impl FieldKind {
             Self::Scalar(scalar) => SizeTerm::Fixed(scalar.width()),
             Self::Bytes(bytes) => SizeTerm::Expr(bytes.len.clone()),
             Self::RawBytes(_) | Self::Array(_) => SizeTerm::Dynamic,
-            Self::Flag(_) => SizeTerm::Fixed(0),
+            Self::Flag(_) | Self::BitProjection(_) => SizeTerm::Fixed(0),
             Self::Nested(nested) => SizeTerm::Nested(nested.ty.clone()),
         }
     }
@@ -243,6 +254,9 @@ impl Schema {
                 position,
                 flag,
                 condition,
+                bits_of,
+                bit,
+                bits,
                 counted_by,
             } = FieldAttributes::parse(&field.attrs)?;
             if bytes.is_some() && rest {
@@ -268,7 +282,43 @@ impl Schema {
             let ty = field.ty;
             let primitive = primitive_name(&ty);
             let value_type = primitive.as_deref().and_then(ValueType::from_name);
-            let kind = if let Some(controller) = flag {
+            let bit_range = match (bit, bits) {
+                (Some(bit), None) => Some((bit, bit)),
+                (None, Some(bits)) => Some(bits),
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!("parser rejects conflicting bit ranges"),
+            };
+            let kind = if let Some(controller) = bits_of {
+                let (start, end) = bit_range.ok_or_else(|| {
+                    syn::Error::new_spanned(&name, "`bits_of` requires `bit = N` or `bits = A..=B`")
+                })?;
+                validate_bit_projection(
+                    &parsed,
+                    &name,
+                    &ty,
+                    value_type,
+                    &controller,
+                    start,
+                    end,
+                    endian,
+                    constant.as_ref(),
+                    representation,
+                    bytes.as_ref(),
+                    rest,
+                    counted_by.as_ref(),
+                    &layout,
+                )?;
+                FieldKind::BitProjection(BitProjection {
+                    controller,
+                    start,
+                    end,
+                })
+            } else if bit_range.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "`bit` and `bits` require `bits_of = earlier_field`",
+                ));
+            } else if let Some(controller) = flag {
                 if !matches!(value_type, Some(ValueType::Bool))
                     || endian.is_some()
                     || constant.is_some()
@@ -453,6 +503,7 @@ impl Schema {
 
         validate_geometry_controllers(&parsed)?;
         validate_arrays(&parsed)?;
+        validate_bit_controller_roles(&parsed)?;
 
         Ok(Self {
             vis: input.vis,
@@ -491,6 +542,21 @@ impl Schema {
             .filter(|field| matches!(field.kind, FieldKind::Flag(_)))
     }
 
+    pub(super) fn bit_projection_fields(&self) -> impl Iterator<Item = &Field> {
+        self.fields
+            .iter()
+            .filter(|field| matches!(field.kind, FieldKind::BitProjection(_)))
+    }
+
+    pub(super) fn is_bit_controller(&self, name: &Ident) -> bool {
+        self.bit_projection_fields().any(|field| {
+            matches!(
+                &field.kind,
+                FieldKind::BitProjection(projection) if projection.controller == *name
+            )
+        })
+    }
+
     pub(super) fn condition_dependents<'schema>(
         &'schema self,
         name: &Ident,
@@ -508,7 +574,6 @@ impl Schema {
             )
         })
     }
-
     pub(super) fn array_fields(&self) -> impl Iterator<Item = &Field> {
         self.fields
             .iter()
@@ -517,6 +582,7 @@ impl Schema {
 
     pub(super) fn layout_can_fail(&self) -> bool {
         self.has_explicit_geometry()
+            || self.bit_projection_fields().next().is_some()
             || self
                 .size_terms()
                 .iter()
@@ -537,6 +603,7 @@ impl Schema {
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Flag(_)
+            | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => false,
         })
     }
@@ -559,6 +626,7 @@ impl Schema {
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Flag(_)
+            | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => false,
         })
     }
@@ -649,6 +717,105 @@ fn static_geometry_end(terms: &[SizeTerm]) -> Option<usize> {
     }
     Some(position)
 }
+#[allow(clippy::too_many_arguments)]
+fn validate_bit_projection(
+    fields: &[Field],
+    name: &Ident,
+    ty: &Type,
+    value_type: Option<ValueType>,
+    controller: &Ident,
+    start: u32,
+    end: u32,
+    endian: Option<Endian>,
+    constant: Option<&Expr>,
+    representation: Option<ScalarType>,
+    bytes: Option<&Ident>,
+    rest: bool,
+    counted_by: Option<&Ident>,
+    layout: &FieldLayout,
+) -> syn::Result<()> {
+    if start > end {
+        return Err(syn::Error::new_spanned(
+            name,
+            "bit range start must not exceed end",
+        ));
+    }
+    let width = end - start + 1;
+    let valid_logical = match value_type {
+        Some(ValueType::Bool) => width == 1,
+        Some(ValueType::Scalar(scalar)) => {
+            scalar.is_unsigned_integer() && width <= (scalar.width() * 8) as u32
+        }
+        Some(ValueType::Usize) => width <= usize::BITS,
+        Some(ValueType::Isize | ValueType::Char) | None => false,
+    };
+    if !valid_logical {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "bit projections require bool for one bit or a sufficiently wide unsigned integer",
+        ));
+    }
+    if endian.is_some()
+        || constant.is_some()
+        || representation.is_some()
+        || bytes.is_some()
+        || rest
+        || counted_by.is_some()
+        || layout.pad_before.is_some()
+        || layout.align_before.is_some()
+        || layout.position.is_some()
+        || layout.condition.is_some()
+    {
+        return Err(syn::Error::new_spanned(
+            name,
+            "bit projection fields cannot declare independent physical attributes",
+        ));
+    }
+    if !fields.iter().any(|field| field.name == *controller) {
+        return Err(syn::Error::new_spanned(
+            controller,
+            "bit projection controller must be physically earlier",
+        ));
+    }
+    validate_unsigned_controller(fields, fields.len(), controller, "bit projection")?;
+    let controller_field = fields
+        .iter()
+        .find(|field| field.name == *controller)
+        .expect("validated bit projection controller");
+    let FieldKind::Scalar(scalar) = &controller_field.kind else {
+        unreachable!("validated bit projection controller is scalar")
+    };
+    if !matches!(
+        scalar.value_type,
+        ValueType::Scalar(value) if value.is_unsigned_integer()
+    ) {
+        return Err(syn::Error::new_spanned(
+            controller,
+            "bit projection controller must be an unsigned fixed-width scalar",
+        ));
+    }
+    if end >= (scalar.width() * 8) as u32 {
+        return Err(syn::Error::new_spanned(
+            controller,
+            "bit projection controller is not wide enough for the range",
+        ));
+    }
+    if fields.iter().any(|field| {
+        matches!(
+            &field.kind,
+            FieldKind::BitProjection(projection)
+                if projection.controller == *controller
+                    && start <= projection.end
+                    && projection.start <= end
+        )
+    }) {
+        return Err(syn::Error::new_spanned(
+            name,
+            "bit projection ranges cannot overlap",
+        ));
+    }
+    Ok(())
+}
 
 fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
     let length_roles = fields
@@ -667,6 +834,7 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Flag(_)
+            | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => None,
         })
         .collect::<Vec<_>>();
@@ -721,6 +889,7 @@ fn validate_arrays(fields: &[Field]) -> syn::Result<()> {
                 ..
             }) => controller == &array.controller,
             FieldKind::Flag(flag) => flag.controller == array.controller,
+            FieldKind::BitProjection(projection) => projection.controller == array.controller,
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
@@ -739,7 +908,49 @@ fn validate_arrays(fields: &[Field]) -> syn::Result<()> {
                 "item count controller cannot control another dependency role",
             ));
         }
+
         validate_unsigned_controller(fields, index, &array.controller, "item count")?;
+    }
+    Ok(())
+}
+fn validate_bit_controller_roles(fields: &[Field]) -> syn::Result<()> {
+    let controllers = fields
+        .iter()
+        .filter_map(|field| {
+            let FieldKind::BitProjection(projection) = &field.kind else {
+                return None;
+            };
+            Some(projection.controller.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    for controller in controllers {
+        let shared = fields.iter().any(|field| match &field.kind {
+            FieldKind::RawBytes(RawBytes {
+                extent: DynamicExtent::Bounded(other),
+            })
+            | FieldKind::Nested(NestedField {
+                extent: Some(other),
+                ..
+            }) => *other == controller,
+            FieldKind::Array(array) => array.controller == controller,
+            FieldKind::Flag(flag) => flag.controller == controller,
+            FieldKind::Scalar(_)
+            | FieldKind::Bytes(_)
+            | FieldKind::RawBytes(_)
+            | FieldKind::BitProjection(_)
+            | FieldKind::Nested(_) => false,
+        }) || fields.iter().any(|field| {
+            matches!(
+                &field.layout.position,
+                Some(Position::Field(other)) if *other == controller
+            )
+        });
+        if shared {
+            return Err(syn::Error::new_spanned(
+                controller,
+                "bit projection controller cannot control another dependency role",
+            ));
+        }
     }
     Ok(())
 }
@@ -955,7 +1166,11 @@ fn classify_position(position: Expr, previous: &[Field]) -> Position {
     Position::Static(position)
 }
 
-fn scalar_endian(ty: ScalarType, declared: Option<Endian>, source: &Type) -> syn::Result<Endian> {
+pub(super) fn scalar_endian(
+    ty: ScalarType,
+    declared: Option<Endian>,
+    source: &Type,
+) -> syn::Result<Endian> {
     if ty.width() == 1 {
         if declared.is_some() {
             return Err(syn::Error::new_spanned(
@@ -1005,6 +1220,9 @@ struct FieldAttributes {
     flag: Option<Ident>,
     condition: Option<Ident>,
     counted_by: Option<Ident>,
+    bits_of: Option<Ident>,
+    bit: Option<u32>,
+    bits: Option<(u32, u32)>,
 }
 
 impl FieldAttributes {
@@ -1109,6 +1327,29 @@ impl FieldAttributes {
                     result.condition = Some(meta.value()?.parse()?);
                     return Ok(());
                 }
+                if meta.path.is_ident("bits_of") {
+                    if result.bits_of.is_some() {
+                        return Err(meta.error("duplicate `bits_of` controller"));
+                    }
+                    result.bits_of = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
+                if meta.path.is_ident("bit") {
+                    if result.bit.is_some() || result.bits.is_some() {
+                        return Err(meta.error("duplicate or conflicting bit range"));
+                    }
+                    let value: syn::LitInt = meta.value()?.parse()?;
+                    result.bit = Some(value.base10_parse()?);
+                    return Ok(());
+                }
+                if meta.path.is_ident("bits") {
+                    if result.bit.is_some() || result.bits.is_some() {
+                        return Err(meta.error("duplicate or conflicting bit range"));
+                    }
+                    let expression: Expr = meta.value()?.parse()?;
+                    result.bits = Some(parse_bit_range(expression)?);
+                    return Ok(());
+                }
                 Err(meta.error("unsupported schema field attribute"))
             })?;
         }
@@ -1130,6 +1371,7 @@ fn byte_array_len(ty: &Type) -> syn::Result<Option<Expr>> {
     let Type::Array(array) = ty else {
         return Ok(None);
     };
+
     if primitive_name(&array.elem).as_deref() != Some("u8") {
         return Err(syn::Error::new_spanned(
             ty,
@@ -1137,6 +1379,65 @@ fn byte_array_len(ty: &Type) -> syn::Result<Option<Expr>> {
         ));
     }
     Ok(Some(array.len.clone()))
+}
+fn parse_bit_range(expression: Expr) -> syn::Result<(u32, u32)> {
+    let Expr::Range(range) = expression else {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`bits` requires an inclusive integer range",
+        ));
+    };
+    if !matches!(range.limits, syn::RangeLimits::Closed(_)) {
+        return Err(syn::Error::new_spanned(
+            range,
+            "`bits` range must be inclusive",
+        ));
+    }
+    let Some(start) = range.start else {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`bits` range requires a start",
+        ));
+    };
+    let Some(end) = range.end else {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`bits` range requires an end",
+        ));
+    };
+    let Expr::Lit(start) = *start else {
+        return Err(syn::Error::new_spanned(
+            start,
+            "bit bounds must be integer literals",
+        ));
+    };
+    let Expr::Lit(end) = *end else {
+        return Err(syn::Error::new_spanned(
+            end,
+            "bit bounds must be integer literals",
+        ));
+    };
+    let syn::Lit::Int(start) = start.lit else {
+        return Err(syn::Error::new_spanned(
+            start,
+            "bit bounds must be integer literals",
+        ));
+    };
+    let syn::Lit::Int(end) = end.lit else {
+        return Err(syn::Error::new_spanned(
+            end,
+            "bit bounds must be integer literals",
+        ));
+    };
+    let start = start.base10_parse()?;
+    let end = end.base10_parse()?;
+    if start > end {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "bit range start must not exceed end",
+        ));
+    }
+    Ok((start, end))
 }
 fn is_raw_bytes(ty: &Type) -> bool {
     let Type::Path(path) = ty else {

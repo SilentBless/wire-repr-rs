@@ -1,4 +1,6 @@
+mod bitfield;
 mod builder;
+mod enumeration;
 mod model;
 mod view;
 mod writer;
@@ -13,18 +15,30 @@ pub(super) fn render_view(
     input: syn::DeriveInput,
     runtime: &TokenStream,
 ) -> syn::Result<TokenStream> {
-    let schema = model::Schema::parse(input, "WireView")?;
-    view::render(&schema, runtime)
+    if enumeration::is_enum(&input) {
+        enumeration::render_view(input, runtime)
+    } else if bitfield::is_bitfield(&input) {
+        bitfield::render_view(input, runtime)
+    } else {
+        let schema = model::Schema::parse(input, "WireView")?;
+        view::render(&schema, runtime)
+    }
 }
 
 pub(super) fn render_builder(
     input: syn::DeriveInput,
     runtime: &TokenStream,
 ) -> syn::Result<TokenStream> {
-    let schema = model::Schema::parse(input, "WireBuilder")?;
-    let detached = builder::render(&schema, runtime)?;
-    let progressive = writer::render(&schema, runtime);
-    Ok(quote!(#detached #progressive))
+    if enumeration::is_enum(&input) {
+        enumeration::render_builder(input, runtime)
+    } else if bitfield::is_bitfield(&input) {
+        bitfield::render_builder(input, runtime)
+    } else {
+        let schema = model::Schema::parse(input, "WireBuilder")?;
+        let detached = builder::render(&schema, runtime)?;
+        let progressive = writer::render(&schema, runtime);
+        Ok(quote!(#detached #progressive))
+    }
 }
 
 fn pascal(identifier: &syn::Ident) -> syn::Ident {

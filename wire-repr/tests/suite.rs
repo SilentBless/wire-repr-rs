@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+#[path = "behavior/bitfield.rs"]
+mod bitfield;
 #[path = "behavior/builder.rs"]
 mod builder;
 #[path = "behavior/collection.rs"]
@@ -8,6 +10,8 @@ mod collection;
 mod dependency;
 #[path = "behavior/dependency_hygiene.rs"]
 mod dependency_hygiene;
+#[path = "behavior/enumeration.rs"]
+mod enumeration;
 #[path = "behavior/geometry.rs"]
 mod geometry;
 #[path = "behavior/hygiene.rs"]
