@@ -16,8 +16,8 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let name = &schema.name;
     let view_trait = format_ident!("{}View", name.unraw());
     let descriptor = format_ident!("__WireRepr{}ViewDescriptor", name.unraw());
-    let borrowed_view = format_ident!("__WireRepr{}BorrowedView", name.unraw());
-    let owned_view = format_ident!("__WireRepr{}ViewState", name.unraw());
+    let view_impl = format_ident!("__WireRepr{}ViewImpl", name.unraw());
+    let state_holder = super::fresh_type_ident(&schema.generics, "StateHolder");
     let error = format_ident!("{}ViewError", name.unraw());
 
     let bounded = bounded_generics(schema, runtime);
@@ -36,7 +36,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let frame_result = private_ident(schema, "frame_result");
     let framed_descriptor = private_ident(schema, "framed_descriptor");
     let framed_consumed = private_ident(schema, "framed_consumed");
-    let owned_value = private_ident(schema, "owned_value");
+    let retained_value = private_ident(schema, "retained_value");
 
     let nested_fields = schema.nested_fields().collect::<Vec<_>>();
     let error_fields = schema
@@ -69,10 +69,9 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
 
     let error_names = error_names(schema);
     let error_declaration = render_error(schema, &error, &error_names, &error_parameters, runtime);
-    let validator_calls =
-        schema.validators.iter().zip(&error_names.validators).map(
-            |(validator, variant)| quote!(#validator(&#owned_value).map_err(#error::#variant)?;),
-        );
+    let validator_calls = schema.validators.iter().zip(&error_names.validators).map(
+        |(validator, variant)| quote!(#validator(&#retained_value).map_err(#error::#variant)?;),
+    );
 
     let retained_char_fields = schema
         .fields
@@ -196,54 +195,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         quote!(#descriptor<#(#descriptor_states),*>)
     };
 
-    let borrowed_char_fields = retained_char_fields
-        .iter()
-        .map(|(field, _)| quote!(#field: char,));
-    let borrowed_flag_fields = retained_flags
-        .iter()
-        .map(|(field, _)| quote!(#field: bool,));
-    let borrowed_nested_fields = nested_fields.iter().map(|field| {
-        let name = &field.name;
-        let FieldKind::Nested(nested) = &field.kind else {
-            unreachable!()
-        };
-        let ty = &nested.ty;
-        if field.layout.condition.is_some() {
-            quote!(#name: &#view_lifetime Option<<#ty as #runtime::WireView>::State>,)
-        } else {
-            quote!(#name: &#view_lifetime <#ty as #runtime::WireView>::State,)
-        }
-    });
-    let borrowed_geometry_fields = retained_starts
-        .iter()
-        .chain(&retained_ends)
-        .map(|field| quote!(#field: usize,));
-    let borrowed_array_base_field = retained_array_base
-        .iter()
-        .map(|field| quote!(#field: usize,));
-    let borrowed_array_count_fields = retained_array_counts
-        .iter()
-        .map(|(field, _)| quote!(#field: usize,));
-    let borrowed_char_values = retained_char_fields
-        .iter()
-        .map(|(field, _)| quote!(#field: state.#field,));
-    let borrowed_flag_values = retained_flags
-        .iter()
-        .map(|(field, _)| quote!(#field: state.#field,));
-    let borrowed_nested_values = nested_fields.iter().map(|field| {
-        let name = &field.name;
-        quote!(#name: &state.#name,)
-    });
-    let borrowed_geometry_values = retained_starts
-        .iter()
-        .chain(&retained_ends)
-        .map(|field| quote!(#field: state.#field,));
-    let borrowed_array_base_value = retained_array_base
-        .iter()
-        .map(|field| quote!(#field: state.#field,));
-    let borrowed_array_count_values = retained_array_counts
-        .iter()
-        .map(|(field, _)| quote!(#field: state.#field,));
     let descriptor_char_values = retained_char_fields
         .iter()
         .map(|(field, value)| quote!(#field: #value,));
@@ -311,31 +262,60 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     };
 
     let trait_methods = render_trait_methods(schema, runtime);
-    let owned_methods = render_view_methods(schema, false, runtime);
-    let borrowed_methods = render_view_methods(schema, true, runtime);
+    let retained_methods = render_view_methods(schema, runtime);
+    let projected_methods = retained_methods.clone();
 
-    let mut owned_generics = bounded.clone();
-    let backing_position = owned_generics
+    let schema_arguments = bounded
         .params
         .iter()
-        .take_while(|parameter| matches!(parameter, GenericParam::Lifetime(_)))
-        .count();
-    owned_generics.params.insert(
-        backing_position,
-        GenericParam::Type(TypeParam::from(backing.clone())),
-    );
-    owned_generics
+        .map(|parameter| match parameter {
+            GenericParam::Lifetime(parameter) => {
+                let lifetime = &parameter.lifetime;
+                quote!(#lifetime)
+            }
+            GenericParam::Type(parameter) => {
+                let ident = &parameter.ident;
+                quote!(#ident)
+            }
+            GenericParam::Const(parameter) => {
+                let ident = &parameter.ident;
+                quote!(#ident)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut retained_generics = bounded.clone();
+    retained_generics
+        .params
+        .push(GenericParam::Type(TypeParam::from(backing.clone())));
+    retained_generics
         .make_where_clause()
         .predicates
         .push(parse_quote!(#backing: AsRef<[u8]>));
-    let (owned_impl, owned_types, owned_where) = owned_generics.split_for_impl();
+    let (retained_impl, _, retained_where) = retained_generics.split_for_impl();
+    let retained_type = quote!(
+        #view_impl<#(#schema_arguments,)* #backing, #descriptor_type>
+    );
 
-    let mut borrowed_generics = bounded.clone();
-    borrowed_generics.params.insert(
+    let mut projected_generics = bounded.clone();
+    projected_generics.params.insert(
         0,
         GenericParam::Lifetime(LifetimeParam::new(view_lifetime.clone())),
     );
-    let (borrowed_impl, borrowed_types, borrowed_where) = borrowed_generics.split_for_impl();
+    let (projected_impl, _, projected_where) = projected_generics.split_for_impl();
+    let projected_type = quote!(
+        #view_impl<
+            #(#schema_arguments,)*
+            &#view_lifetime [u8],
+            &#view_lifetime #descriptor_type
+        >
+    );
+
+    let mut common_generics = retained_generics.clone();
+    common_generics
+        .params
+        .push(GenericParam::Type(TypeParam::from(state_holder.clone())));
+    let (common_impl, common_types, common_where) = common_generics.split_for_impl();
     let trait_path = quote!(#view_trait #type_generics);
 
     Ok(quote! {
@@ -343,24 +323,13 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         #descriptor_declaration
 
         #[doc(hidden)]
-        #vis struct #owned_view #owned_impl #owned_where {
+        #vis struct #view_impl #common_impl #common_where {
             #input_field: #backing,
             #represented_length_field: usize,
-            descriptor: #descriptor_type,
+            descriptor: #state_holder,
             #view_marker: ::core::marker::PhantomData<fn() -> #self_type>,
         }
 
-        #[doc(hidden)]
-        #vis struct #borrowed_view #borrowed_impl #borrowed_where {
-            #input_field: &#view_lifetime [u8],
-            #(#borrowed_char_fields)*
-            #(#borrowed_flag_fields)*
-            #(#borrowed_nested_fields)*
-            #(#borrowed_geometry_fields)*
-            #(#borrowed_array_base_field)*
-            #(#borrowed_array_count_fields)*
-            #view_marker: ::core::marker::PhantomData<fn() -> #self_type>,
-        }
         #[doc = "Exact-source view API generated for this schema."]
         #vis trait #view_trait #impl_generics #where_clause {
             /// Returns the exact represented bytes.
@@ -369,49 +338,33 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #(#trait_methods)*
         }
 
-        impl #owned_impl AsRef<[u8]> for #owned_view #owned_types #owned_where {
+        impl #common_impl AsRef<[u8]> for #view_impl #common_types #common_where {
             #[inline(always)]
             fn as_ref(&self) -> &[u8] {
                 &self.#input_field.as_ref()[..self.#represented_length_field]
             }
         }
 
-        impl #borrowed_impl AsRef<[u8]> for #borrowed_view #borrowed_types #borrowed_where {
-            #[inline(always)]
-            fn as_ref(&self) -> &[u8] {
-                self.#input_field
-            }
-        }
-
-        impl #owned_impl #trait_path for #owned_view #owned_types #owned_where {
+        impl #retained_impl #trait_path for #retained_type #retained_where {
             #[inline(always)]
             fn as_bytes(&self) -> &[u8] {
                 <Self as AsRef<[u8]>>::as_ref(self)
             }
 
-            #(#owned_methods)*
+            #(#retained_methods)*
         }
 
-        impl #borrowed_impl #trait_path for #borrowed_view #borrowed_types #borrowed_where {
+        impl #projected_impl #trait_path for #projected_type #projected_where {
             #[inline(always)]
             fn as_bytes(&self) -> &[u8] {
-                self.#input_field
-            }
-
-            #(#borrowed_methods)*
-        }
-
-        impl #owned_impl #runtime::ExactWire<#self_type>
-            for #owned_view #owned_types #owned_where
-        {
-            #[inline(always)]
-            fn as_wire_bytes(&self) -> &[u8] {
                 <Self as AsRef<[u8]>>::as_ref(self)
             }
+
+            #(#projected_methods)*
         }
 
-        impl #borrowed_impl #runtime::ExactWire<#self_type>
-            for #borrowed_view #borrowed_types #borrowed_where
+        impl #common_impl #runtime::ExactWire<#self_type>
+            for #view_impl #common_types #common_where
         {
             #[inline(always)]
             fn as_wire_bytes(&self) -> &[u8] {
@@ -425,7 +378,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         unsafe impl #impl_generics #runtime::WireView for #self_type #where_clause {
             type Error = #error_type;
             type State = #descriptor_type;
-            type View<#view_lifetime> = #borrowed_view #borrowed_types;
+            type View<#view_lifetime> = #projected_type;
 
             const FIXED_SIZE: Option<usize> = #fixed_size;
 
@@ -446,14 +399,10 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 // SAFETY: the WireView caller guarantees `input` has the exact framed length and
                 // `state` came from that frame; every retained child state is paired with its
                 // checked generated range below.
-                #borrowed_view {
+                #view_impl {
                     #input_field: input,
-                    #(#borrowed_char_values)*
-                    #(#borrowed_flag_values)*
-                    #(#borrowed_nested_values)*
-                    #(#borrowed_geometry_values)*
-                    #(#borrowed_array_base_value)*
-                    #(#borrowed_array_count_values)*
+                    #represented_length_field: input.len(),
+                    descriptor: state,
                     #view_marker: ::core::marker::PhantomData,
                 }
             }
@@ -476,7 +425,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                         available: #input_length,
                     }));
                 }
-                let #owned_value = #owned_view {
+                let #retained_value = #view_impl {
                     #input_field: #view_input,
                     #represented_length_field: #framed_consumed,
                     descriptor: #framed_descriptor,
@@ -489,7 +438,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                         trailing: #input_length - #framed_consumed,
                     }));
                 }
-                Ok(#owned_value)
+                Ok(#retained_value)
             }
 
             /// Validates exact structural framing while skipping schema validators.
@@ -514,7 +463,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                         trailing: #input_length - #framed_consumed,
                     }));
                 }
-                Ok(#owned_view {
+                Ok(#view_impl {
                     #input_field: #view_input,
                     #represented_length_field: #framed_consumed,
                     descriptor: #framed_descriptor,
@@ -1400,31 +1349,17 @@ fn retains_geometry_end(schema: &Schema, index: usize) -> bool {
         || field.layout.position.is_some()
 }
 
-fn geometry_state_value(
-    schema: &Schema,
-    index: usize,
-    suffix: &str,
-    borrowed: bool,
-) -> TokenStream {
+fn geometry_state_value(schema: &Schema, index: usize, suffix: &str) -> TokenStream {
     let field = private_ident(schema, &format!("field_{index}_{suffix}"));
-    if borrowed {
-        quote!(self.#field)
-    } else {
-        quote!(self.descriptor.#field)
-    }
+    quote!(self.descriptor.#field)
 }
 
-fn geometry_start(
-    schema: &Schema,
-    index: usize,
-    borrowed: bool,
-    runtime: &TokenStream,
-) -> TokenStream {
+fn geometry_start(schema: &Schema, index: usize, runtime: &TokenStream) -> TokenStream {
     if retains_geometry_start(schema, index) {
-        return geometry_state_value(schema, index, "start", borrowed);
+        return geometry_state_value(schema, index, "start");
     }
     if index > 0 && retains_geometry_end(schema, index - 1) {
-        return geometry_end(schema, index - 1, borrowed, runtime);
+        return geometry_end(schema, index - 1, runtime);
     }
     let field = &schema.fields[index];
     if !field
@@ -1436,19 +1371,14 @@ fn geometry_start(
         let offset = view_offset(&field.offset, runtime);
         return quote!(#offset.expect("validated static field offset"));
     }
-    geometry_end(schema, index - 1, borrowed, runtime)
+    geometry_end(schema, index - 1, runtime)
 }
 
-fn geometry_end(
-    schema: &Schema,
-    index: usize,
-    borrowed: bool,
-    runtime: &TokenStream,
-) -> TokenStream {
+fn geometry_end(schema: &Schema, index: usize, runtime: &TokenStream) -> TokenStream {
     if retains_geometry_end(schema, index) {
-        return geometry_state_value(schema, index, "end", borrowed);
+        return geometry_state_value(schema, index, "end");
     }
-    let start = geometry_start(schema, index, borrowed, runtime);
+    let start = geometry_start(schema, index, runtime);
     match &schema.fields[index].kind {
         FieldKind::Scalar(scalar) => {
             let width = scalar.width();
@@ -1477,7 +1407,7 @@ fn geometry_end(
     }
 }
 
-fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -> Vec<TokenStream> {
+fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStream> {
     schema
         .fields
         .iter()
@@ -1485,15 +1415,13 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
         .map(|(index, field)| {
             let name = &field.name;
             let offset_value = view_offset(&field.offset, runtime);
-            let dynamic_start = geometry_start(schema, index, borrowed, runtime);
-            let dynamic_end = geometry_end(schema, index, borrowed, runtime);
-            let condition = field.layout.condition.as_ref().map(|condition| {
-                if borrowed {
-                    quote!(self.#condition)
-                } else {
-                    quote!(self.descriptor.#condition)
-                }
-            });
+            let dynamic_start = geometry_start(schema, index, runtime);
+            let dynamic_end = geometry_end(schema, index, runtime);
+            let condition = field
+                .layout
+                .condition
+                .as_ref()
+                .map(|condition| quote!(self.descriptor.#condition));
             match &field.kind {
                 FieldKind::Scalar(scalar) => {
                     let width = scalar.width();
@@ -1501,11 +1429,7 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                     let body = if matches!(scalar.value_type, ValueType::Char)
                         && scalar.constant.is_none()
                     {
-                        if borrowed {
-                            quote!(self.#name)
-                        } else {
-                            quote!(self.descriptor.#name)
-                        }
+                        quote!(self.descriptor.#name)
                     } else if let Some(constant) = &scalar.constant {
                         quote! {
                             let value: #value_ty = #constant;
@@ -1596,16 +1520,8 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                     let item = &array.item;
                     let count_field = private_ident(schema, &format!("array_{index}_count"));
                     let base_field = private_ident(schema, "array_base_offset");
-                    let base = if borrowed {
-                        quote!(self.#base_field)
-                    } else {
-                        quote!(self.descriptor.#base_field)
-                    };
-                    let count = if borrowed {
-                        quote!(self.#count_field)
-                    } else {
-                        quote!(self.descriptor.#count_field)
-                    };
+                    let base = quote!(self.descriptor.#base_field);
+                    let count = quote!(self.descriptor.#count_field);
                     quote! {
                         #[inline(always)]
                         fn #name(&self) -> #runtime::ArrayView<'_, #item> {
@@ -1619,11 +1535,7 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                     }
                 }
                 FieldKind::Flag(_) => {
-                    let value = if borrowed {
-                        quote!(self.#name)
-                    } else {
-                        quote!(self.descriptor.#name)
-                    };
+                    let value = quote!(self.descriptor.#name);
                     quote! {
                         #[inline(always)]
                         fn #name(&self) -> bool {
@@ -1642,11 +1554,7 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                 FieldKind::Nested(nested) => {
                     let ty = &nested.ty;
                     let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
-                    let state = if borrowed {
-                        quote!(self.#name)
-                    } else {
-                        quote!(&self.descriptor.#name)
-                    };
+                    let state = quote!(&self.descriptor.#name);
                     let offset_setup = if schema.has_explicit_geometry() {
                         quote! {
                             let offset = #dynamic_start;
