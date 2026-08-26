@@ -396,6 +396,28 @@ impl<O: Output> Writer<O> {
         Ok(())
     }
 
+    /// Copies one previously written fixed-width span.
+    #[doc(hidden)]
+    pub fn read_at<const N: usize>(&self, offset: usize) -> Option<[u8; N]> {
+        let end = offset.checked_add(N)?;
+        self.output.bytes().get(offset..end)?.try_into().ok()
+    }
+
+    /// Fills an absolute output span and extends the represented range when needed.
+    #[doc(hidden)]
+    pub fn fill_at(
+        &mut self,
+        offset: usize,
+        len: usize,
+        byte: u8,
+    ) -> Result<(), OutputError<O::GrowError>> {
+        let end = offset.checked_add(len).ok_or(OutputError::LengthOverflow)?;
+        self.ensure(end, end.max(self.cursor))?;
+        self.output.bytes_mut()[offset..end].fill(byte);
+        self.cursor = self.cursor.max(end);
+        Ok(())
+    }
+
     /// Requests a writable span, allowing generated code to provide a larger growth hint.
     pub fn ensure(
         &mut self,
@@ -426,6 +448,7 @@ impl<O: Output> Writer<O> {
         self.cursor = position;
         Ok(ChildWriter {
             writer: self,
+            start: position,
             cursor: position,
             limit: None,
         })
@@ -445,6 +468,7 @@ impl<O: Output> Writer<O> {
         Ok(ChildWriter {
             writer: self,
             cursor: position,
+            start: position,
             limit: Some(end),
         })
     }
@@ -462,6 +486,7 @@ impl<O: Output> Writer<O> {
 /// Restricted sequential cursor supplied to detached manual and derived children.
 pub struct ChildWriter<'writer, O> {
     writer: &'writer mut Writer<O>,
+    start: usize,
     cursor: usize,
     limit: Option<usize>,
 }
@@ -489,6 +514,53 @@ impl<O: Output> ChildWriter<'_, O> {
         Ok(())
     }
 
+    /// Zero-fills forward geometry up to an absolute position.
+    #[doc(hidden)]
+    pub fn fill_to(&mut self, position: usize) -> Result<(), OutputError<O::GrowError>> {
+        if position < self.cursor {
+            return Err(OutputError::Backwards {
+                position,
+                written: self.cursor,
+            });
+        }
+        if let Some(limit) = self.limit
+            && position > limit
+        {
+            return Err(OutputError::ChildOverflow {
+                end: position,
+                limit,
+            });
+        }
+        self.writer
+            .fill_at(self.cursor, position - self.cursor, 0)?;
+        self.cursor = position;
+        Ok(())
+    }
+
+    /// Patches bytes within the portion already emitted by this child.
+    #[doc(hidden)]
+    pub fn patch_at(
+        &mut self,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), OutputError<O::GrowError>> {
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(OutputError::LengthOverflow)?;
+        if offset < self.start {
+            return Err(OutputError::Backwards {
+                position: offset,
+                written: self.start,
+            });
+        }
+        if end > self.cursor {
+            return Err(OutputError::Backwards {
+                position: end,
+                written: self.cursor,
+            });
+        }
+        self.writer.write_at(offset, bytes)
+    }
     /// Verifies that a fixed-width child filled its complete assigned region.
     #[doc(hidden)]
     pub fn finish(self) -> Result<(), OutputError<O::GrowError>> {

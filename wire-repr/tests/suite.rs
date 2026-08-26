@@ -2,6 +2,8 @@
 
 #[path = "behavior/builder.rs"]
 mod builder;
+#[path = "behavior/geometry.rs"]
+mod geometry;
 #[path = "behavior/hygiene.rs"]
 mod hygiene;
 #[path = "behavior/layout.rs"]

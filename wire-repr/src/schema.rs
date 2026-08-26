@@ -103,6 +103,19 @@ pub const fn checked_optional_sum<const N: usize>(parts: [Option<usize>; N]) -> 
     Some(total)
 }
 
+#[doc(hidden)]
+pub const fn checked_align(position: usize, alignment: usize) -> Option<usize> {
+    if alignment == 0 {
+        return None;
+    }
+    let remainder = position % alignment;
+    if remainder == 0 {
+        Some(position)
+    } else {
+        position.checked_add(alignment - remainder)
+    }
+}
+
 /// Input ended before the parser could establish one representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("need at least {additional_at_least} more bytes at absolute offset {offset}")]
@@ -197,3 +210,7 @@ pub struct Unset;
 /// Initialized typestate slot used by generated builders.
 #[doc(hidden)]
 pub struct Set<T>(pub T);
+#[doc(hidden)]
+pub trait IsSet {}
+
+impl<T> IsSet for Set<T> {}

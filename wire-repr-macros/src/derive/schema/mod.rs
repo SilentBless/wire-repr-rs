@@ -169,6 +169,7 @@ fn view_offset(offset: &model::LayoutOffset, runtime: &TokenStream) -> TokenStre
         model::SizeTerm::Fixed(width) => quote!(Some(#width)),
         model::SizeTerm::Expr(width) => quote!(Some(#width)),
         model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireView>::FIXED_SIZE),
+        model::SizeTerm::Dynamic => quote!(None),
     });
     quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
 }
@@ -177,6 +178,7 @@ fn builder_offset(offset: &model::LayoutOffset, runtime: &TokenStream) -> TokenS
         model::SizeTerm::Fixed(width) => quote!(Some(#width)),
         model::SizeTerm::Expr(width) => quote!(Some(#width)),
         model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE),
+        model::SizeTerm::Dynamic => quote!(None),
     });
     quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
 }
@@ -186,6 +188,7 @@ fn view_optional_size(schema: &model::Schema, runtime: &TokenStream) -> TokenStr
         model::SizeTerm::Fixed(width) => quote!(Some(#width)),
         model::SizeTerm::Expr(width) => quote!(Some(#width)),
         model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireView>::FIXED_SIZE),
+        model::SizeTerm::Dynamic => quote!(None),
     });
     quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
 }
@@ -195,6 +198,7 @@ fn builder_optional_size(schema: &model::Schema, runtime: &TokenStream) -> Token
         model::SizeTerm::Fixed(width) => quote!(Some(#width)),
         model::SizeTerm::Expr(width) => quote!(Some(#width)),
         model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE),
+        model::SizeTerm::Dynamic => quote!(None),
     });
     quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
 }

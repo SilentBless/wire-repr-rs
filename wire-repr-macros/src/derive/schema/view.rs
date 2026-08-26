@@ -5,7 +5,7 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, Generics, LifetimeParam, TypeParam, parse_quote};
 
-use super::model::{FieldKind, Scalar, ScalarType, Schema, ValueType};
+use super::model::{DynamicExtent, FieldKind, Position, Scalar, ScalarType, Schema, ValueType};
 use super::{
     fresh_field_ident, fresh_schema_lifetime, from_bytes_method, pascal, private_ident,
     scalar_type_tokens, value_type_tokens, view_offset, view_optional_size,
@@ -80,6 +80,19 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             })
         })
         .collect::<Vec<_>>();
+    let retained_ranges = if schema.has_explicit_geometry() {
+        schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, _)| private_ident(schema, &format!("field_{index}_range")))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let descriptor_range_fields = retained_ranges
+        .iter()
+        .map(|field| quote!(#field: ::core::ops::Range<usize>,));
     let descriptor_char_fields = retained_char_fields
         .iter()
         .map(|(field, _)| quote!(#field: char,));
@@ -96,6 +109,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #[doc(hidden)]
             #vis struct #descriptor {
                 #(#descriptor_char_fields)*
+                #(#descriptor_range_fields)*
             }
         }
     } else {
@@ -104,6 +118,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #vis struct #descriptor<#(#descriptor_parameters),*> {
                 #(#descriptor_char_fields)*
                 #(#descriptor_nested_fields)*
+                #(#descriptor_range_fields)*
             }
         }
     };
@@ -131,6 +146,9 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         let ty = &nested.ty;
         quote!(#name: &#view_lifetime <#ty as #runtime::WireView>::State,)
     });
+    let borrowed_range_fields = retained_ranges
+        .iter()
+        .map(|field| quote!(#field: &#view_lifetime ::core::ops::Range<usize>,));
     let borrowed_char_values = retained_char_fields
         .iter()
         .map(|(field, _)| quote!(#field: state.#field,));
@@ -138,6 +156,9 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         let name = &field.name;
         quote!(#name: &state.#name,)
     });
+    let borrowed_range_values = retained_ranges
+        .iter()
+        .map(|field| quote!(#field: &state.#field,));
     let descriptor_char_values = retained_char_fields
         .iter()
         .map(|(field, value)| quote!(#field: #value,));
@@ -146,14 +167,20 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         let state = private_ident(schema, &format!("{}_state", name.unraw()));
         quote!(#name: #state,)
     });
+    let descriptor_range_values = retained_ranges.iter().map(|field| quote!(#field: #field,));
     let descriptor_value = quote! {
         #descriptor {
             #(#descriptor_char_values)*
             #(#descriptor_nested_values)*
+            #(#descriptor_range_values)*
         }
     };
 
-    let fixed_size = view_optional_size(schema, runtime);
+    let fixed_size = if schema.has_explicit_geometry() {
+        quote!(None)
+    } else {
+        view_optional_size(schema, runtime)
+    };
     let frame_steps = render_frame_steps(
         schema,
         &error,
@@ -162,7 +189,10 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         &frame_offset,
         runtime,
     );
-    let consumed = if let Some(last) = schema.fields.last() {
+    let consumed = if schema.has_explicit_geometry() {
+        let cursor = private_ident(schema, "geometry_cursor");
+        quote!(#cursor)
+    } else if let Some(last) = schema.fields.last() {
         match &last.kind {
             FieldKind::Nested(_) => {
                 let total = private_ident(schema, &format!("{}_total", last.name.unraw()));
@@ -172,6 +202,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 let total = view_offset_for_end(schema, last, runtime);
                 quote!(#total.expect("framed fixed schema width"))
             }
+            FieldKind::RawBytes(_) => unreachable!("raw bytes use explicit geometry"),
         }
     } else {
         quote!(0usize)
@@ -221,6 +252,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #input_field: &#view_lifetime [u8],
             #(#borrowed_char_fields)*
             #(#borrowed_nested_fields)*
+            #(#borrowed_range_fields)*
         }
 
         #[doc = "Exact-source view API generated for this schema."]
@@ -294,6 +326,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     #input_field: input,
                     #(#borrowed_char_values)*
                     #(#borrowed_nested_values)*
+                    #(#borrowed_range_values)*
                 }
             }
         }
@@ -394,6 +427,7 @@ fn error_names(schema: &Schema) -> ErrorNames {
     let mut used = BTreeSet::from([
         "InvalidFrame".to_owned(),
         "LayoutUnavailable".to_owned(),
+        "PositionBeforeCursor".to_owned(),
         "Trailing".to_owned(),
     ]);
     let fields = schema
@@ -409,7 +443,10 @@ fn error_names(schema: &Schema) -> ErrorNames {
                 FieldKind::Scalar(scalar) if scalar.value_type.is_converted() => {
                     Some(unique_variant(&mut used, &format!("{base}Value")))
                 }
-                FieldKind::Scalar(_) | FieldKind::Bytes(_) | FieldKind::Nested(_) => None,
+                FieldKind::Scalar(_)
+                | FieldKind::Bytes(_)
+                | FieldKind::RawBytes(_)
+                | FieldKind::Nested(_) => None,
             };
             let nested = matches!(field.kind, FieldKind::Nested(_))
                 .then(|| unique_variant(&mut used, &base));
@@ -492,7 +529,7 @@ fn render_error(
                         #mismatch(#[source] #runtime::ConstantMismatch<#ty>),
                     });
                 }
-                FieldKind::Nested(_) => unreachable!(),
+                FieldKind::RawBytes(_) | FieldKind::Nested(_) => unreachable!(),
             }
         }
         if let Some(conversion) = &names.conversion {
@@ -533,6 +570,15 @@ fn render_error(
             #variant(#[source] #validator_error),
         });
     }
+    variants.push(quote! {
+        #[doc = "A requested field position precedes the current physical cursor."]
+        #[error("field `{field}` requests position {position}, before cursor {cursor}")]
+        PositionBeforeCursor {
+            field: &'static str,
+            position: usize,
+            cursor: usize,
+        },
+    });
     variants.push(quote! {
         #[doc = "A field offset or fixed width could not be established."]
         #[error("fixed layout is unavailable or overflows before field `{field}`")]
@@ -577,6 +623,16 @@ fn render_frame_steps(
     frame_offset: &syn::Ident,
     runtime: &TokenStream,
 ) -> Vec<TokenStream> {
+    if schema.has_explicit_geometry() {
+        return render_explicit_frame_steps(
+            schema,
+            error,
+            names,
+            frame_input,
+            frame_offset,
+            runtime,
+        );
+    }
     let mut steps = Vec::new();
     for (index, (field, names)) in schema.fields.iter().zip(&names.fields).enumerate() {
         let field_name = field.name.unraw().to_string();
@@ -742,7 +798,295 @@ fn render_frame_steps(
                         .ok_or(#error::LayoutUnavailable { field: #field_name })?;
                 });
             }
+            FieldKind::RawBytes(_) => unreachable!("explicit geometry uses its own frame renderer"),
         }
+    }
+    steps
+}
+fn render_explicit_frame_steps(
+    schema: &Schema,
+    error: &syn::Ident,
+    names: &ErrorNames,
+    frame_input: &syn::Ident,
+    frame_offset: &syn::Ident,
+    runtime: &TokenStream,
+) -> Vec<TokenStream> {
+    let cursor = private_ident(schema, "geometry_cursor");
+    let input_end = private_ident(schema, "geometry_input_end");
+    let mut steps = vec![quote! {
+        let mut #cursor = 0usize;
+        let #input_end = #frame_offset
+            .checked_add(#frame_input.len())
+            .ok_or(#error::LayoutUnavailable { field: "<input>" })?;
+    }];
+
+    for (index, (field, names)) in schema.fields.iter().zip(&names.fields).enumerate() {
+        let field_name = field.name.unraw().to_string();
+        let start = private_ident(schema, &format!("field_{index}_start"));
+        let end = private_ident(schema, &format!("field_{index}_end"));
+        let absolute = private_ident(schema, &format!("field_{index}_absolute"));
+        let range = private_ident(schema, &format!("field_{index}_range"));
+        let position = match &field.layout.position {
+            Some(Position::Static(position)) => quote!(#position),
+            Some(Position::Field(controller)) => {
+                let value = private_ident(schema, &format!("controller_{}", controller.unraw()));
+                quote!(#value)
+            }
+            None => {
+                let pad = field
+                    .layout
+                    .pad_before
+                    .as_ref()
+                    .map(|pad| {
+                        quote! {
+                            start = start.checked_add(#pad)
+                                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                        }
+                    })
+                    .unwrap_or_default();
+                let align = field
+                    .layout
+                    .align_before
+                    .as_ref()
+                    .map(|align| {
+                        quote! {
+                            start = #runtime::__private::checked_align(start, #align)
+                                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                        }
+                    })
+                    .unwrap_or_default();
+                quote! {{
+                    let mut start = #cursor;
+                    #pad
+                    #align
+                    start
+                }}
+            }
+        };
+        steps.push(quote! {
+            let #start: usize = #position;
+            if #start < #cursor {
+                return Err(#error::PositionBeforeCursor {
+                    field: #field_name,
+                    position: #start,
+                    cursor: #cursor,
+                });
+            }
+            let #absolute = #frame_offset
+                .checked_add(#start)
+                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+        });
+
+        match &field.kind {
+            FieldKind::Scalar(scalar) => {
+                let width = scalar.width();
+                let shortage = &names.shortage;
+                let bytes = private_ident(schema, &format!("scalar_{index}_bytes"));
+                let raw = private_ident(schema, &format!("scalar_{index}_raw"));
+                let value = private_ident(schema, &format!("scalar_{index}_value"));
+                let wire_ty = scalar_type_tokens(scalar.wire_type);
+                let value_ty = value_type_tokens(scalar.value_type);
+                let decode = from_bytes_method(scalar.endian);
+                let conversion = convert_from_wire(scalar, &raw);
+                let converted = if let Some(variant) = &names.conversion {
+                    quote! {
+                        let #value: #value_ty = #conversion.ok_or_else(|| {
+                            #error::#variant(#runtime::ScalarConversionError {
+                                offset: #absolute,
+                                from: stringify!(#wire_ty),
+                                to: stringify!(#value_ty),
+                            })
+                        })?;
+                    }
+                } else {
+                    quote!(let #value: #value_ty = #raw;)
+                };
+                let constant_check = scalar.constant.as_ref().map(|expected| {
+                    let mismatch = names.mismatch.as_ref().expect("constant mismatch variant");
+                    let expected_value = private_ident(schema, &format!("scalar_{index}_expected"));
+                    let differs = constants_differ(scalar, &value, &expected_value);
+                    quote! {
+                        let #expected_value: #value_ty = #expected;
+                        if #differs {
+                            return Err(#error::#mismatch(#runtime::ConstantMismatch {
+                                offset: #absolute,
+                                expected: #expected_value,
+                                actual: #value,
+                            }));
+                        }
+                    }
+                });
+                let is_controller = schema.is_length_controller(&field.name)
+                    || schema.fields.iter().any(|candidate| {
+                        matches!(
+                            &candidate.layout.position,
+                            Some(Position::Field(controller)) if controller == &field.name
+                        )
+                    });
+                let controller_value = is_controller.then(|| {
+                    let controller =
+                        private_ident(schema, &format!("controller_{}", field.name.unraw()));
+                    quote! {
+                        let #controller = usize::try_from(#raw)
+                            .map_err(|_| #error::LayoutUnavailable { field: #field_name })?;
+                    }
+                });
+                steps.push(quote! {
+                    let #end = #start.checked_add(#width)
+                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                    let #bytes: [u8; #width] = #frame_input
+                        .get(#start..#end)
+                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
+                            offset: #input_end,
+                            additional_at_least: #end.saturating_sub(#frame_input.len()),
+                        }))?
+                        .try_into()
+                        .expect("scalar range has its declared fixed width");
+                    let #raw = #wire_ty::#decode(#bytes);
+                    #converted
+                    #constant_check
+                    #controller_value
+                });
+            }
+            FieldKind::Bytes(bytes_field) => {
+                let shortage = &names.shortage;
+                let len = &bytes_field.len;
+                let bytes = private_ident(schema, &format!("bytes_{index}_value"));
+                let ty = &field.ty;
+                let constant_check = bytes_field.constant.as_ref().map(|constant| {
+                    let expected = private_ident(schema, &format!("bytes_{index}_expected"));
+                    let actual = private_ident(schema, &format!("bytes_{index}_actual"));
+                    let mismatch = names.mismatch.as_ref().expect("constant mismatch variant");
+                    quote! {
+                        let #expected: #ty = #constant;
+                        if #bytes != #expected.as_slice() {
+                            let #actual: #ty = #bytes.try_into()
+                                .expect("byte-array span has its declared width");
+                            return Err(#error::#mismatch(#runtime::ConstantMismatch {
+                                offset: #absolute,
+                                expected: #expected,
+                                actual: #actual,
+                            }));
+                        }
+                    }
+                });
+                steps.push(quote! {
+                    let #end = #start.checked_add(#len)
+                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                    let #bytes = #frame_input
+                        .get(#start..#end)
+                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
+                            offset: #input_end,
+                            additional_at_least: #end.saturating_sub(#frame_input.len()),
+                        }))?;
+                    #constant_check
+                });
+            }
+            FieldKind::RawBytes(raw) => {
+                let shortage = &names.shortage;
+                let extent = match &raw.extent {
+                    DynamicExtent::Bounded(controller) => {
+                        let value =
+                            private_ident(schema, &format!("controller_{}", controller.unraw()));
+                        quote!(#start.checked_add(#value)
+                            .ok_or(#error::LayoutUnavailable { field: #field_name })?)
+                    }
+                    DynamicExtent::Rest => {
+                        quote!(::core::cmp::max(#start, #frame_input.len()))
+                    }
+                };
+                steps.push(quote! {
+                    let #end = #extent;
+                    #frame_input.get(#start..#end).ok_or_else(|| {
+                        #error::#shortage(#runtime::NeedMore {
+                            offset: #input_end,
+                            additional_at_least: #end.saturating_sub(#frame_input.len()),
+                        })
+                    })?;
+                });
+            }
+            FieldKind::Nested(nested) => {
+                let ty = &nested.ty;
+                let shortage = &names.shortage;
+                let variant = names.nested.as_ref().expect("nested error variant");
+                let extent_variant = names.extent.as_ref().expect("nested extent variant");
+                let available = private_ident(schema, &format!("{}_input", field.name.unraw()));
+                let child_frame = private_ident(schema, &format!("{}_frame", field.name.unraw()));
+                let child_state = private_ident(schema, &format!("{}_state", field.name.unraw()));
+                let child_consumed =
+                    private_ident(schema, &format!("{}_consumed", field.name.unraw()));
+                let declared = nested.extent.as_ref().map(|controller| {
+                    private_ident(schema, &format!("controller_{}", controller.unraw()))
+                });
+                let prepare_end = if let Some(declared) = &declared {
+                    quote! {
+                        let #end = #start.checked_add(#declared)
+                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                        let #available = #frame_input.get(#start..#end).ok_or_else(|| {
+                            #error::#shortage(#runtime::NeedMore {
+                                offset: #input_end,
+                                additional_at_least: #end.saturating_sub(#frame_input.len()),
+                            })
+                        })?;
+                    }
+                } else {
+                    quote! {
+                        let #available = #frame_input.get(#start..).ok_or_else(|| {
+                            #error::#shortage(#runtime::NeedMore {
+                                offset: #input_end,
+                                additional_at_least: #start.saturating_sub(#frame_input.len()),
+                            })
+                        })?;
+                    }
+                };
+                let finish_end = if let Some(declared) = &declared {
+                    quote! {
+                        if #child_consumed != #declared {
+                            return Err(#error::#extent_variant(#runtime::InvalidFrameExtent {
+                                offset: #absolute,
+                                consumed: #child_consumed,
+                                available: #declared,
+                            }));
+                        }
+                    }
+                } else if nested.terminal {
+                    quote!(let #end = #start.checked_add(#child_consumed)
+                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;)
+                } else {
+                    quote! {
+                        let expected = <#ty as #runtime::WireView>::FIXED_SIZE
+                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                        if #child_consumed != expected {
+                            return Err(#error::#extent_variant(#runtime::InvalidFrameExtent {
+                                offset: #absolute,
+                                consumed: #child_consumed,
+                                available: expected,
+                            }));
+                        }
+                        let #end = #start.checked_add(expected)
+                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                    }
+                };
+                steps.push(quote! {
+                    #prepare_end
+                    let #child_frame = <#ty as #runtime::WireView>::frame(#available, #absolute)
+                        .map_err(#error::#variant)?;
+                    let (#child_state, #child_consumed) = #child_frame.into_parts();
+                    if #child_consumed > #available.len() {
+                        return Err(#error::#extent_variant(#runtime::InvalidFrameExtent {
+                            offset: #absolute,
+                            consumed: #child_consumed,
+                            available: #available.len(),
+                        }));
+                    }
+                    #finish_end
+                });
+            }
+        }
+        steps.push(quote! {
+            let #range = #start..#end;
+            #cursor = #end;
+        });
     }
     steps
 }
@@ -768,6 +1112,12 @@ fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStre
                         fn #name(&self) -> #ty;
                     }
                 }
+                FieldKind::RawBytes(_) => {
+                    quote! {
+                        #[doc = concat!("Returns raw byte field `", stringify!(#name), "`.")]
+                        fn #name(&self) -> &[u8];
+                    }
+                }
                 FieldKind::Nested(nested) => {
                     let ty = &nested.ty;
                     let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
@@ -786,9 +1136,21 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
     schema
         .fields
         .iter()
-        .map(|field| {
+        .enumerate()
+        .map(|(index, field)| {
             let name = &field.name;
             let offset_value = view_offset(&field.offset, runtime);
+            let retained_range = private_ident(schema, &format!("field_{index}_range"));
+            let dynamic_start = if borrowed {
+                quote!(self.#retained_range.start)
+            } else {
+                quote!(self.descriptor.#retained_range.start)
+            };
+            let dynamic_end = if borrowed {
+                quote!(self.#retained_range.end)
+            } else {
+                quote!(self.descriptor.#retained_range.end)
+            };
             match &field.kind {
                 FieldKind::Scalar(scalar) => {
                     let width = scalar.width();
@@ -816,14 +1178,25 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                         } else {
                             quote!(#raw)
                         };
-                        quote! {
-                            let offset = #offset_value.expect("validated scalar offset");
-                            let #raw = #wire_ty::#decode(
-                                self.as_bytes()[offset..offset + #width]
-                                    .try_into()
-                                    .expect("validated scalar field span"),
-                            );
-                            #decoded
+                        if schema.has_explicit_geometry() {
+                            quote! {
+                                let #raw = #wire_ty::#decode(
+                                    self.as_bytes()[#dynamic_start..#dynamic_end]
+                                        .try_into()
+                                        .expect("validated scalar field span"),
+                                );
+                                #decoded
+                            }
+                        } else {
+                            quote! {
+                                let offset = #offset_value.expect("validated scalar offset");
+                                let #raw = #wire_ty::#decode(
+                                    self.as_bytes()[offset..offset + #width]
+                                        .try_into()
+                                        .expect("validated scalar field span"),
+                                );
+                                #decoded
+                            }
                         }
                     };
                     quote! {
@@ -841,6 +1214,12 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                             let value: #ty = #constant;
                             value
                         }
+                    } else if schema.has_explicit_geometry() {
+                        quote! {
+                            self.as_bytes()[#dynamic_start..#dynamic_end]
+                                .try_into()
+                                .expect("validated byte-array field span")
+                        }
                     } else {
                         quote! {
                             let offset = #offset_value.expect("validated byte-array offset");
@@ -856,6 +1235,14 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                         }
                     }
                 }
+                FieldKind::RawBytes(_) => {
+                    quote! {
+                        #[inline(always)]
+                        fn #name(&self) -> &[u8] {
+                            &self.as_bytes()[#dynamic_start..#dynamic_end]
+                        }
+                    }
+                }
                 FieldKind::Nested(nested) => {
                     let ty = &nested.ty;
                     let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
@@ -864,14 +1251,25 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                     } else {
                         quote!(&self.descriptor.#name)
                     };
-                    let end = if nested.terminal {
-                        quote!(self.as_bytes().len())
+                    let offset_setup = if schema.has_explicit_geometry() {
+                        quote! {
+                            let offset = #dynamic_start;
+                            let end = #dynamic_end;
+                        }
                     } else {
-                        quote!(
-                            offset
-                                + <#ty as #runtime::WireView>::FIXED_SIZE
-                                    .expect("framed nonterminal child has fixed width")
-                        )
+                        let end = if nested.terminal {
+                            quote!(self.as_bytes().len())
+                        } else {
+                            quote!(
+                                offset
+                                    + <#ty as #runtime::WireView>::FIXED_SIZE
+                                        .expect("framed nonterminal child has fixed width")
+                            )
+                        };
+                        quote! {
+                            let offset = #offset_value.expect("validated nested offset");
+                            let end = #end;
+                        }
                     };
                     quote! {
                         #[allow(unsafe_code)]
@@ -879,8 +1277,7 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                         fn #name<#field_lifetime>(&#field_lifetime self)
                             -> <#ty as #runtime::WireView>::View<#field_lifetime>
                         {
-                            let offset = #offset_value.expect("validated nested offset");
-                            let end = #end;
+                            #offset_setup
                             // SAFETY: framing produced this state for a child span of this exact length.
                             unsafe {
                                 <#ty as #runtime::WireView>::from_validated_parts(
@@ -911,7 +1308,7 @@ fn view_offset_for_end(
             let len = &bytes.len;
             quote!(#len)
         }
-        FieldKind::Nested(_) => unreachable!(),
+        FieldKind::RawBytes(_) | FieldKind::Nested(_) => unreachable!(),
     };
     quote!(#offset.and_then(|offset| offset.checked_add(#width)))
 }

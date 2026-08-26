@@ -5,7 +5,7 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, Generics, TypeParam, parse_quote};
 
-use super::model::{FieldKind, Scalar, Schema, ValueType};
+use super::model::{FieldKind, Position, Scalar, Schema, ValueType};
 use super::{
     builder_optional_size, fresh_field_ident, fresh_type_ident, pascal, private_ident,
     scalar_type_tokens, to_bytes_method, value_type_tokens,
@@ -79,7 +79,11 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         runtime,
     );
 
-    let fixed_size = builder_optional_size(schema, runtime);
+    let fixed_size = if schema.has_explicit_geometry() {
+        quote!(None)
+    } else {
+        builder_optional_size(schema, runtime)
+    };
     Ok(quote! {
         const _: () = {
             #(#validator_references)*
@@ -118,6 +122,7 @@ pub(super) struct Slot {
 
 pub(super) enum SlotKind {
     Value(TokenStream),
+    RawBytes,
     Nested(Box<syn::Type>),
 }
 
@@ -125,7 +130,7 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
     let mut used = schema.generics.clone();
     let mut slots = Vec::new();
     for field in &schema.fields {
-        if field.kind.constant().is_some() {
+        if field.kind.constant().is_some() || schema.is_length_controller(&field.name) {
             continue;
         }
         let state = fresh_type_ident(&used, &format!("{}State", pascal(&field.name)));
@@ -137,6 +142,7 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
                 let ty = &field.ty;
                 SlotKind::Value(quote!(#ty))
             }
+            FieldKind::RawBytes(_) => SlotKind::RawBytes,
             FieldKind::Nested(nested) => SlotKind::Nested(Box::new(nested.ty.clone())),
         };
         slots.push(Slot {
@@ -162,6 +168,7 @@ fn render_setters(
         let mut impl_generics = schema.generics.clone();
         let build_fn = fresh_type_ident(&impl_generics, "BuildFn");
         let child_builder = fresh_type_ident(&impl_generics, "ChildBuilder");
+        let raw_bytes = fresh_type_ident(&impl_generics, "RawBytes");
         let mut current_states = Vec::with_capacity(slots.len());
         let mut returned_states = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
@@ -169,6 +176,7 @@ fn render_setters(
                 current_states.push(quote!(#runtime::__private::Unset));
                 returned_states.push(match &target.kind {
                     SlotKind::Value(ty) => quote!(#runtime::__private::Set<#ty>),
+                    SlotKind::RawBytes => quote!(#runtime::__private::Set<#raw_bytes>),
                     SlotKind::Nested(_) => quote!(#runtime::__private::Set<#child_builder>),
                 });
             } else {
@@ -200,6 +208,23 @@ fn render_setters(
                         #[doc = concat!("Sets field `", stringify!(#field), "`.")]
                         #[inline(always)]
                         #vis fn #field(self, value: #ty) -> #returned_builder {
+                            #builder {
+                                #(#assignments)*
+                                #marker: ::core::marker::PhantomData,
+                            }
+                        }
+                    }
+                });
+            }
+            SlotKind::RawBytes => {
+                rendered.push(quote! {
+                    impl #impl_params #current_builder #impl_where {
+                        #[doc = concat!("Sets raw byte field `", stringify!(#field), "`.")]
+                        #[inline(always)]
+                        #vis fn #field<#raw_bytes>(self, value: #raw_bytes) -> #returned_builder
+                        where
+                            #raw_bytes: AsRef<[u8]>,
+                        {
                             #builder {
                                 #(#assignments)*
                                 #marker: ::core::marker::PhantomData,
@@ -255,6 +280,18 @@ fn render_complete(
             SlotKind::Value(ty) => {
                 complete_states.push(quote!(#runtime::__private::Set<#ty>));
             }
+            SlotKind::RawBytes => {
+                let parameter =
+                    fresh_type_ident(&impl_generics, &format!("{}Bytes", pascal(&slot.field)));
+                impl_generics
+                    .params
+                    .push(GenericParam::Type(TypeParam::from(parameter.clone())));
+                impl_generics
+                    .make_where_clause()
+                    .predicates
+                    .push(parse_quote!(#parameter: AsRef<[u8]>));
+                complete_states.push(quote!(#runtime::__private::Set<#parameter>));
+            }
             SlotKind::Nested(ty) => {
                 let parameter =
                     fresh_type_ident(&impl_generics, &format!("{}Builder", pascal(&slot.field)));
@@ -290,7 +327,10 @@ fn render_complete(
                     &format!("{}Value", pascal(&field.name)),
                 ))
             }
-            FieldKind::Scalar(_) | FieldKind::Bytes(_) | FieldKind::Nested(_) => None,
+            FieldKind::Scalar(_)
+            | FieldKind::Bytes(_)
+            | FieldKind::RawBytes(_)
+            | FieldKind::Nested(_) => None,
         })
         .collect::<Vec<_>>();
     let nested_names = schema
@@ -303,20 +343,52 @@ fn render_complete(
         })
         .collect::<Vec<_>>();
 
+    let schema_start = private_ident(schema, "schema_start");
     let writes = schema
         .fields
         .iter()
         .zip(&conversion_names)
         .zip(&nested_names)
         .enumerate()
-        .map(
-            |(index, ((field, conversion_variant), nested_variant))| match &field.kind {
+        .map(|(index, ((field, conversion_variant), nested_variant))| {
+            let geometry = if schema.has_explicit_geometry() {
+                render_detached_geometry(
+                    schema,
+                    field,
+                    &build_value,
+                    &schema_start,
+                    error,
+                    runtime,
+                )
+            } else {
+                TokenStream::new()
+            };
+            match &field.kind {
                 FieldKind::Scalar(scalar) => {
                     let value_ty = value_type_tokens(scalar.value_type);
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
                     let encode = to_bytes_method(scalar.endian);
                     let source = if let Some(constant) = &scalar.constant {
                         quote!(#constant)
+                    } else if let Some(dependent) = schema.length_dependent(&field.name) {
+                        match &dependent.kind {
+                            FieldKind::RawBytes(_) => {
+                                let dependent_name = &dependent.name;
+                                let controller_name = field.name.unraw().to_string();
+                                quote! {
+                                    #value_ty::try_from(
+                                        #build_value.#dependent_name.0.as_ref().len()
+                                    )
+                                    .map_err(|_| #runtime::WriteError::Schema(
+                                        #error::Layout(#runtime::LayoutError {
+                                            field: #controller_name,
+                                        }),
+                                    ))?
+                                }
+                            }
+                            FieldKind::Nested(_) => quote!(0 as #value_ty),
+                            FieldKind::Scalar(_) | FieldKind::Bytes(_) => unreachable!(),
+                        }
                     } else {
                         let field = &field.name;
                         quote!(#build_value.#field.0)
@@ -326,6 +398,7 @@ fn render_complete(
                         let encoded = private_ident(schema, &format!("scalar_{index}_encoded"));
                         let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
                         quote! {
+                            #geometry
                             let #semantic: #value_ty = #source;
                             let #encoded: #wire_ty = #conversion.ok_or_else(|| {
                                 #runtime::WriteError::Schema(#error::#variant(
@@ -341,6 +414,7 @@ fn render_complete(
                         let encoded = private_ident(schema, &format!("scalar_{index}_encoded"));
                         quote! {
                             let #encoded: #wire_ty = #source;
+                            #geometry
                             writer.write(&#encoded.#encode())?;
                         }
                     }
@@ -356,7 +430,15 @@ fn render_complete(
                     let ty = &field.ty;
                     quote! {
                         let #value: #ty = #source;
+                        #geometry
                         writer.write(&#value)?;
+                    }
+                }
+                FieldKind::RawBytes(_) => {
+                    let field_name = &field.name;
+                    quote! {
+                        #geometry
+                        writer.write(#build_value.#field_name.0.as_ref())?;
                     }
                 }
                 FieldKind::Nested(nested) => {
@@ -373,7 +455,9 @@ fn render_complete(
                     let actual_end = private_ident(schema, &format!("nested_{index}_actual_end"));
                     let expected_end =
                         private_ident(schema, &format!("nested_{index}_expected_end"));
-                    let size_value = if nested.terminal {
+                    let size_value = if nested.extent.is_some() {
+                        quote!(None)
+                    } else if nested.terminal {
                         quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE)
                     } else {
                         quote!(Some(
@@ -384,8 +468,49 @@ fn render_complete(
                             })?
                         ))
                     };
+                    let patch = nested
+                        .extent
+                        .as_ref()
+                        .map(|controller| {
+                            let controller_field = schema
+                                .fields
+                                .iter()
+                                .find(|candidate| candidate.name == *controller)
+                                .expect("validated length controller");
+                            let FieldKind::Scalar(controller_scalar) = &controller_field.kind else {
+                                unreachable!("validated controller is scalar")
+                            };
+                            let relative = super::builder_offset(&controller_field.offset, runtime);
+                            let controller_name = controller.unraw().to_string();
+                            let wire_ty = scalar_type_tokens(controller_scalar.wire_type);
+                            let encode = to_bytes_method(controller_scalar.endian);
+                            quote! {
+                                let child_length = #actual_end.checked_sub(#start).ok_or_else(|| {
+                                    #runtime::WriteError::Schema(
+                                        #error::Layout(#runtime::LayoutError { field: #field_label }),
+                                    )
+                                })?;
+                                let controller_value = #wire_ty::try_from(child_length).map_err(|_| {
+                                    #runtime::WriteError::Schema(
+                                        #error::Layout(#runtime::LayoutError {
+                                            field: #controller_name,
+                                        }),
+                                    )
+                                })?;
+                                let controller_offset = #relative
+                                    .and_then(|offset| #schema_start.checked_add(offset))
+                                    .ok_or_else(|| #runtime::WriteError::Schema(
+                                        #error::Layout(#runtime::LayoutError {
+                                            field: #controller_name,
+                                        }),
+                                    ))?;
+                                writer.patch_at(controller_offset, &controller_value.#encode())?;
+                            }
+                        })
+                        .unwrap_or_default();
                     quote! {
                         let #fixed_size = #size_value;
+                        #geometry
                         let #start = writer.position();
                         <#ty as #runtime::WireWrite<#parameter>>::write(
                             #build_value.#field_name.0,
@@ -399,8 +524,8 @@ fn render_complete(
                                 #runtime::WriteError::Output(error)
                             }
                         })?;
+                        let #actual_end = writer.position();
                         if let Some(size) = #fixed_size {
-                            let #actual_end = writer.position();
                             let #expected_end = #start.checked_add(size).ok_or_else(|| {
                                 #runtime::WriteError::Schema(
                                     #error::Layout(#runtime::LayoutError { field: #field_label }),
@@ -423,10 +548,11 @@ fn render_complete(
                                 ));
                             }
                         }
+                        #patch
                     }
                 }
-            },
-        );
+            }
+        });
 
     let conversion_error_variants = schema
         .fields
@@ -525,10 +651,95 @@ fn render_complete(
                 (),
                 #runtime::WriteError<Self::Error, #write_output::GrowError>,
             > {
+                let #schema_start = writer.position();
                 #(#writes)*
                 Ok(())
             }
         }
+    }
+}
+fn render_detached_geometry(
+    _schema: &Schema,
+    field: &super::model::Field,
+    build_value: &syn::Ident,
+    schema_start: &syn::Ident,
+    error: &syn::Ident,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let field_name = field.name.unraw().to_string();
+    let position = match &field.layout.position {
+        Some(Position::Static(position)) => quote! {
+            let relative_position: usize = #position;
+            let field_position = #schema_start.checked_add(relative_position).ok_or_else(|| {
+                #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #field_name }),
+                )
+            })?;
+        },
+        Some(Position::Field(controller)) => quote! {
+            let relative_position = usize::try_from(#build_value.#controller.0).map_err(|_| {
+                #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #field_name }),
+                )
+            })?;
+            let field_position = #schema_start.checked_add(relative_position).ok_or_else(|| {
+                #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #field_name }),
+                )
+            })?;
+        },
+        None => {
+            let pad = field
+                .layout
+                .pad_before
+                .as_ref()
+                .map(|pad| {
+                    quote! {
+                        relative_position =
+                            relative_position.checked_add(#pad).ok_or_else(|| {
+                                #runtime::WriteError::Schema(
+                                    #error::Layout(#runtime::LayoutError { field: #field_name }),
+                                )
+                            })?;
+                    }
+                })
+                .unwrap_or_default();
+            let align = field
+                .layout
+                .align_before
+                .as_ref()
+                .map(|align| {
+                    quote! {
+                        relative_position = #runtime::__private::checked_align(
+                            relative_position,
+                            #align,
+                        )
+                        .ok_or_else(|| #runtime::WriteError::Schema(
+                            #error::Layout(#runtime::LayoutError { field: #field_name }),
+                        ))?;
+                    }
+                })
+                .unwrap_or_default();
+            quote! {
+                let mut relative_position =
+                    writer.position().checked_sub(#schema_start).ok_or_else(|| {
+                        #runtime::WriteError::Schema(
+                            #error::Layout(#runtime::LayoutError { field: #field_name }),
+                        )
+                    })?;
+                #pad
+                #align
+                let field_position = #schema_start.checked_add(relative_position).ok_or_else(|| {
+                    #runtime::WriteError::Schema(
+                        #error::Layout(#runtime::LayoutError { field: #field_name }),
+                    )
+                })?;
+            }
+        }
+    };
+    quote! {
+        #position
+        writer.fill_to(field_position)?;
     }
 }
 

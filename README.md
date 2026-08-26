@@ -107,10 +107,10 @@ impl WireWrite<u32> for LittleEndianWord {
 ```
 
 Manual writers receive the same progressive cursor as generated children. `FIXED_SIZE` enables a
-manual child before later physical fields; omitting it keeps the manual representation
-variable-width and terminal-only until dynamic geometry is available. Manual writers may return
-semantic errors after partially modifying unpublished output; wire-repr never allocates, rolls
-back, or clears bytes.
+manual child before later physical fields. A variable-width manual child is terminal unless the
+parent bounds it with `#[wire(bytes = earlier_length)]`. Manual writers may return semantic errors
+after partially modifying unpublished output; wire-repr never allocates, rolls back, or clears
+bytes.
 
 Manual `WireView` implementations are an explicit unsafe boundary: retained state must remain
 memory-safe for any immutable span of the framed length. Generated APIs remain safe, retain
@@ -179,15 +179,14 @@ deviation instead of treating LLVM instruction counts as performance truth.
 
 ## Design direction
 
-The implemented surface currently covers fixed scalar and byte-array structs, constants, explicit
-logical conversions, schema validators, multiple fixed generic or manual children, one optional
-terminal variable child, and progressive typestate writers.
+The implemented surface currently covers fixed scalars and byte arrays, constants, explicit
+logical conversions, validators, multiple generic or manual children, bounded and terminal raw
+bytes, bounded children, padding, alignment, forward placement, and progressive typestate writers.
 
-The remaining production classes are variable nested fields, raw bytes and rest spans,
-padding/alignment/placement, controllers and conditional groups, runtime collections, static
-selectors with exact unknown forwarding, nominal and inline bitfields, physical selections,
-computed fields, homogeneous `views`, and heterogeneous cursors. Collections retain only range and
-count; untouched nested values are not eagerly framed or indexed.
+The remaining production classes are general controller dependencies, conditional groups, runtime
+collections, static selectors with exact unknown forwarding, nominal and inline bitfields,
+physical selections, computed fields, homogeneous `views`, and heterogeneous cursors. Collections
+retain only range and count; untouched nested values are not eagerly framed or indexed.
 
 General recursive schemas and a public traversal capability are deferred until this roadmap is
 complete. Negotiated selector maps, hidden indexes, eager full-collection validation, and a general
