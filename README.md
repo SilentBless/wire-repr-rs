@@ -128,7 +128,28 @@ Nominal bitfields declare `#[wire(as = u32, le)]` on the type and `bit`/`bits` o
 For local projections, `#[wire(bits_of = raw, ...)]` derives zero-width getters and builder setters
 from an earlier unsigned scalar. Fresh builders zero undeclared bits; exact views preserve them.
 
+## Physical selections and computed fields
+
+Use the collision-free `select(&view)` entry point; it reserves no generated schema method name:
+
+```rust
+use wire_repr::select;
+
+let selected = select(&view).exclude(|fields| fields.checksum);
+```
+
+Selections retain no flattened buffer. `chunks()` merges adjacent or overlapping spans in physical
+order, while `bytes()` iterates the same fragmented representation. Stored scalar destinations use
+`computed = callback(...)`; fallible callbacks use `try_computed` plus `#[computed]` error metadata.
+Callbacks may mix logical getters with `include(...)` and `exclude(...)`. The generated dependency
+DAG orders computed patches independently of declaration order. Destinations must precede
+demand-derived offsets, while their selections may consume demand-framed fields.
+
+Schemas that write computed fields derive both `WireView` and `WireBuilder`; the generated read
+capability supplies the exact structural ranges used during the final patch pass.
+
 ## Manual wire types
+
 
 Manual representations implement the same independent read and write capabilities as derived
 schemas.
@@ -235,10 +256,11 @@ deviation instead of treating LLVM instruction counts as performance truth.
 The implemented surface currently covers fixed scalars and byte arrays, constants, explicit
 logical conversions, validators, nested children, demand geometry, controller dependencies,
 conditional groups, runtime arrays, static enums with exact unknown forwarding, nominal and inline
-bitfields, exact View forwarding, and progressive typestate writers.
+bitfields, root-relative physical selections, computed fields, exact View forwarding, and
+progressive typestate writers.
 
-The remaining production classes are physical selections, computed fields, homogeneous `views`,
-and heterogeneous cursors.
+The remaining production classes are nested physical selection paths, homogeneous `views`, and
+heterogeneous cursors.
 
 General recursive schemas and a public traversal capability are deferred until this roadmap is
 complete. Negotiated selector maps, hidden indexes, eager full-collection validation, and a general

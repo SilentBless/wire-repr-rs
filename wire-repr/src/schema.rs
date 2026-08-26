@@ -491,3 +491,285 @@ pub struct Set<T>(pub T);
 pub trait IsSet {}
 
 impl<T> IsSet for Set<T> {}
+
+#[doc(hidden)]
+pub trait WireSelect: WireView {
+    type Root<B>: WireFields
+    where
+        B: AsRef<[u8]>;
+
+    fn select_view<B: AsRef<[u8]>>(input: B) -> Result<Self::Root<B>, Self::Error>;
+}
+
+/// One generated physical field in a typed selection expression.
+#[derive(Clone, Copy)]
+pub struct FieldPath {
+    index: usize,
+}
+
+impl FieldPath {
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(index: usize) -> Self {
+        Self { index }
+    }
+}
+
+/// Type-level union of two physical selection expressions.
+pub struct FieldUnion<L, R> {
+    left: L,
+    right: R,
+}
+
+#[doc(hidden)]
+pub trait FieldExpr {
+    fn contains(&self, index: usize) -> bool;
+}
+
+impl FieldExpr for FieldPath {
+    #[inline(always)]
+    fn contains(&self, index: usize) -> bool {
+        self.index == index
+    }
+}
+
+impl<L: FieldExpr, R: FieldExpr> FieldExpr for FieldUnion<L, R> {
+    #[inline(always)]
+    fn contains(&self, index: usize) -> bool {
+        self.left.contains(index) || self.right.contains(index)
+    }
+}
+
+impl<R: FieldExpr> core::ops::BitOr<R> for FieldPath {
+    type Output = FieldUnion<Self, R>;
+
+    fn bitor(self, right: R) -> Self::Output {
+        FieldUnion { left: self, right }
+    }
+}
+
+impl<L: FieldExpr, R: FieldExpr, Next: FieldExpr> core::ops::BitOr<Next> for FieldUnion<L, R> {
+    type Output = FieldUnion<Self, Next>;
+
+    fn bitor(self, right: Next) -> Self::Output {
+        FieldUnion { left: self, right }
+    }
+}
+
+#[doc(hidden)]
+pub trait WireFields: AsRef<[u8]> {
+    type Fields;
+
+    const FIELD_COUNT: usize;
+
+    fn fields(&self, base: usize) -> Self::Fields;
+    fn field_range(&self, index: usize) -> Option<core::ops::Range<usize>>;
+}
+
+/// Entry point for root-relative physical byte selections.
+pub struct WireBytes<'view, V> {
+    view: &'view V,
+}
+
+impl<'view, V> WireBytes<'view, V> {
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(view: &'view V) -> Self {
+        Self { view }
+    }
+}
+
+/// Starts a root-relative physical byte selection without reserving a schema method name.
+#[must_use]
+pub fn select<V: WireFields>(view: &V) -> WireBytes<'_, V> {
+    WireBytes::new(view)
+}
+
+impl<'view, V: WireFields> WireBytes<'view, V> {
+    /// Includes only fields selected by `select`.
+    pub fn include<Select, Expr>(self, select: Select) -> Selection<'view, V, Expr, true>
+    where
+        Select: FnOnce(V::Fields) -> Expr,
+        Expr: FieldExpr,
+    {
+        Selection {
+            view: self.view,
+            expression: select(self.view.fields(0)),
+        }
+    }
+
+    /// Excludes fields selected by `select`.
+    pub fn exclude<Select, Expr>(self, select: Select) -> Selection<'view, V, Expr, false>
+    where
+        Select: FnOnce(V::Fields) -> Expr,
+        Expr: FieldExpr,
+    {
+        Selection {
+            view: self.view,
+            expression: select(self.view.fields(0)),
+        }
+    }
+}
+/// Common operation surface accepted by physical-selection callbacks.
+pub trait ByteSelection {
+    /// Byte iterator borrowed from this selection.
+    type Bytes<'selection>: Iterator<Item = u8>
+    where
+        Self: 'selection;
+    /// Chunk iterator borrowed from this selection.
+    type Chunks<'selection>: Iterator<Item = &'selection [u8]>
+    where
+        Self: 'selection;
+
+    /// Iterates selected bytes in physical order.
+    fn bytes(&self) -> Self::Bytes<'_>;
+    /// Iterates merged selected chunks in physical order.
+    fn chunks(&self) -> Self::Chunks<'_>;
+    /// Returns the selected byte length.
+    fn len(&self) -> usize;
+
+    /// Whether the selection contains no bytes.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Fragmented physical bytes retained without materialization.
+pub struct Selection<'view, V, Expr, const INCLUDE: bool> {
+    view: &'view V,
+    expression: Expr,
+}
+
+impl<'view, V, Expr, const INCLUDE: bool> Selection<'view, V, Expr, INCLUDE>
+where
+    V: WireFields,
+    Expr: FieldExpr,
+{
+    /// Returns selected chunks in physical order with adjacent and overlapping spans merged.
+    pub fn chunks(&self) -> SelectionChunks<'_, 'view, V, Expr, INCLUDE> {
+        SelectionChunks {
+            selection: self,
+            index: 0,
+            pending: None,
+        }
+    }
+
+    /// Returns selected bytes in physical order.
+    pub fn bytes(&self) -> SelectionBytes<'_, 'view, V, Expr, INCLUDE> {
+        SelectionBytes {
+            chunks: self.chunks(),
+            current: &[],
+            offset: 0,
+        }
+    }
+
+    /// Total selected byte length.
+    pub fn len(&self) -> usize {
+        self.chunks().map(<[u8]>::len).sum()
+    }
+
+    /// Whether no bytes are selected.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<'view, V, Expr, const INCLUDE: bool> ByteSelection for Selection<'view, V, Expr, INCLUDE>
+where
+    V: WireFields,
+    Expr: FieldExpr,
+{
+    type Bytes<'selection>
+        = SelectionBytes<'selection, 'view, V, Expr, INCLUDE>
+    where
+        Self: 'selection;
+    type Chunks<'selection>
+        = SelectionChunks<'selection, 'view, V, Expr, INCLUDE>
+    where
+        Self: 'selection;
+
+    fn bytes(&self) -> Self::Bytes<'_> {
+        Selection::bytes(self)
+    }
+
+    fn chunks(&self) -> Self::Chunks<'_> {
+        Selection::chunks(self)
+    }
+
+    fn len(&self) -> usize {
+        Selection::len(self)
+    }
+}
+
+/// Iterator over merged selected chunks.
+pub struct SelectionChunks<'selection, 'view, V, Expr, const INCLUDE: bool> {
+    selection: &'selection Selection<'view, V, Expr, INCLUDE>,
+    index: usize,
+    pending: Option<core::ops::Range<usize>>,
+}
+
+impl<'selection, 'view, V, Expr, const INCLUDE: bool> Iterator
+    for SelectionChunks<'selection, 'view, V, Expr, INCLUDE>
+where
+    V: WireFields,
+    Expr: FieldExpr,
+{
+    type Item = &'selection [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < V::FIELD_COUNT {
+            let index = self.index;
+            self.index += 1;
+            let selected = self.selection.expression.contains(index) == INCLUDE;
+            if !selected {
+                continue;
+            }
+            let Some(range) = self.selection.view.field_range(index) else {
+                continue;
+            };
+            if range.is_empty() {
+                continue;
+            }
+            match &mut self.pending {
+                Some(pending) if range.start <= pending.end => {
+                    pending.end = pending.end.max(range.end);
+                }
+                Some(_) => {
+                    let ready = self.pending.replace(range).expect("pending range");
+                    return self.selection.view.as_ref().get(ready);
+                }
+                None => self.pending = Some(range),
+            }
+        }
+        self.pending
+            .take()
+            .and_then(|range| self.selection.view.as_ref().get(range))
+    }
+}
+
+/// Iterator over bytes from a fragmented selection.
+pub struct SelectionBytes<'selection, 'view, V, Expr, const INCLUDE: bool> {
+    chunks: SelectionChunks<'selection, 'view, V, Expr, INCLUDE>,
+    current: &'selection [u8],
+    offset: usize,
+}
+
+impl<'selection, 'view, V, Expr, const INCLUDE: bool> Iterator
+    for SelectionBytes<'selection, 'view, V, Expr, INCLUDE>
+where
+    V: WireFields,
+    Expr: FieldExpr,
+{
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(value) = self.current.get(self.offset) {
+                self.offset += 1;
+                return Some(*value);
+            }
+            self.current = self.chunks.next()?;
+            self.offset = 0;
+        }
+    }
+}

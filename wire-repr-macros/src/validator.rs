@@ -25,6 +25,55 @@ pub(crate) fn error_type(callback: &syn::Path) -> syn::Result<syn::Path> {
     Ok(marker)
 }
 
+pub(crate) fn computed_error_type(callback: &syn::Path) -> syn::Result<syn::Path> {
+    let mut marker: syn::Path = syn::parse2(quote!(#callback))?;
+    let function = marker.segments.pop().ok_or_else(|| {
+        syn::Error::new_spanned(callback, "computed callback path cannot be empty")
+    })?;
+    if !matches!(function.value().arguments, PathArguments::None) {
+        return Err(syn::Error::new_spanned(
+            function.value(),
+            "computed callback paths cannot have generic arguments",
+        ));
+    }
+    let metadata = format_ident!("__wire_repr_computed_{}", function.value().ident.unraw());
+    marker.segments.push(syn::PathSegment::from(metadata));
+    marker
+        .segments
+        .push(syn::PathSegment::from(format_ident!("Error")));
+    Ok(marker)
+}
+
+pub(super) fn expand_computed(function: ItemFn) -> syn::Result<TokenStream> {
+    if !function.sig.generics.params.is_empty() || function.sig.generics.where_clause.is_some() {
+        return Err(syn::Error::new_spanned(
+            &function.sig.generics,
+            "wire computed callbacks cannot declare explicit generics",
+        ));
+    }
+    let error = result_error_type(
+        &function.sig.output,
+        "wire computed callbacks must return `Result<Value, Error>`",
+    )?;
+    let visibility = &function.vis;
+    let marker = format_ident!("__wire_repr_computed_{}", function.sig.ident.unraw());
+    let marker_configuration = function.attrs.iter().filter(|attribute| {
+        attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
+    });
+    Ok(quote! {
+        #function
+
+        #(#marker_configuration)*
+        #[doc(hidden)]
+        #[allow(missing_docs)]
+        #visibility mod #marker {
+            use super::*;
+
+            pub type Error = #error;
+        }
+    })
+}
+
 pub(super) fn expand(function: ItemFn) -> syn::Result<TokenStream> {
     if !function.sig.generics.params.is_empty() || function.sig.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(
@@ -109,6 +158,41 @@ fn validator_error_type(output: &ReturnType) -> syn::Result<&Type> {
             arguments,
             "wire validators must return `Result<(), Error>`",
         ));
+    }
+    Ok(error)
+}
+
+fn result_error_type<'output>(
+    output: &'output ReturnType,
+    message: &str,
+) -> syn::Result<&'output Type> {
+    let ReturnType::Type(_, ty) = output else {
+        return Err(syn::Error::new_spanned(output, message));
+    };
+    let Type::Path(result) = ty.as_ref() else {
+        return Err(syn::Error::new_spanned(ty, message));
+    };
+    let Some(segment) = result.path.segments.last() else {
+        return Err(syn::Error::new_spanned(result, message));
+    };
+    if segment.ident != "Result" {
+        return Err(syn::Error::new_spanned(segment, message));
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return Err(syn::Error::new_spanned(segment, message));
+    };
+    let mut types = arguments.args.iter().filter_map(|argument| match argument {
+        GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    });
+    let Some(_) = types.next() else {
+        return Err(syn::Error::new_spanned(arguments, message));
+    };
+    let Some(error) = types.next() else {
+        return Err(syn::Error::new_spanned(arguments, message));
+    };
+    if types.next().is_some() || arguments.args.len() != 2 {
+        return Err(syn::Error::new_spanned(arguments, message));
     }
     Ok(error)
 }

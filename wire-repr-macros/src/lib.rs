@@ -16,6 +16,15 @@ pub fn validator(_attribute: TokenStream, input: TokenStream) -> TokenStream {
     }
 }
 
+/// Marks a fallible computed callback so derives can retain its concrete error type.
+#[proc_macro_attribute]
+pub fn computed(_attribute: TokenStream, input: TokenStream) -> TokenStream {
+    match syn::parse(input).and_then(validator::expand_computed) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
 /// Derives the schema-only exact-source read surface.
 #[proc_macro_derive(WireView, attributes(wire))]
 pub fn derive_wire_view(input: TokenStream) -> TokenStream {

@@ -8,6 +8,7 @@ pub(super) struct Schema {
     pub(super) generics: Generics,
     pub(super) fields: Vec<Field>,
     pub(super) validators: Vec<Path>,
+    pub(super) computed_order: Vec<usize>,
 }
 
 pub(super) struct Field {
@@ -93,6 +94,12 @@ pub(super) struct Scalar {
     pub(super) wire_type: ScalarType,
     pub(super) endian: Endian,
     pub(super) constant: Option<Expr>,
+    pub(super) computed: Option<Computed>,
+}
+
+pub(super) struct Computed {
+    pub(super) expression: Expr,
+    pub(super) error: Option<Path>,
 }
 
 #[derive(Clone, Copy)]
@@ -215,6 +222,18 @@ impl FieldKind {
             Self::Nested(nested) => SizeTerm::Nested(nested.ty.clone()),
         }
     }
+
+    pub(super) fn computed(&self) -> Option<&Computed> {
+        match self {
+            Self::Scalar(scalar) => scalar.computed.as_ref(),
+            Self::Bytes(_)
+            | Self::RawBytes(_)
+            | Self::Array(_)
+            | Self::Flag(_)
+            | Self::Nested(_)
+            | Self::BitProjection(_) => None,
+        }
+    }
 }
 
 impl Schema {
@@ -256,6 +275,8 @@ impl Schema {
                 condition,
                 bits_of,
                 bit,
+                computed,
+                try_computed,
                 bits,
                 counted_by,
             } = FieldAttributes::parse(&field.attrs)?;
@@ -288,6 +309,30 @@ impl Schema {
                 (None, None) => None,
                 (Some(_), Some(_)) => unreachable!("parser rejects conflicting bit ranges"),
             };
+            let computed = match (computed, try_computed) {
+                (Some(expression), None) => Some(Computed {
+                    expression,
+                    error: None,
+                }),
+                (None, Some((expression, error))) => Some(Computed {
+                    expression,
+                    error: Some(error),
+                }),
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!("parser rejects conflicting callbacks"),
+            };
+            if computed.is_some() && value_type.is_none() {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "computed destinations must be scalar fields",
+                ));
+            }
+            if computed.is_some() && bits_of.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "computed fields cannot be logical bit projections",
+                ));
+            }
             let kind = if let Some(controller) = bits_of {
                 let (start, end) = bit_range.ok_or_else(|| {
                     syn::Error::new_spanned(&name, "`bits_of` requires `bit = N` or `bits = A..=B`")
@@ -386,17 +431,30 @@ impl Schema {
                     }
                 };
                 let endian = scalar_endian(wire_type, endian, &ty)?;
+                if constant.is_some() && computed.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &name,
+                        "computed fields cannot also be constants",
+                    ));
+                }
                 FieldKind::Scalar(Scalar {
                     value_type,
                     wire_type,
                     endian,
                     constant,
+                    computed,
                 })
             } else if let Some(len) = byte_array_len(&ty)? {
                 if endian.is_some() || representation.is_some() {
                     return Err(syn::Error::new_spanned(
                         &ty,
                         "fixed byte arrays do not accept endian or `as` attributes",
+                    ));
+                }
+                if computed.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &name,
+                        "computed destinations must be scalar fields",
                     ));
                 }
                 if bytes.is_some() || rest || counted_by.is_some() {
@@ -499,18 +557,52 @@ impl Schema {
                 offset,
             });
         }
+        for field in &parsed {
+            if field.kind.computed().is_none() {
+                continue;
+            }
+            if field.layout.condition.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &field.name,
+                    "computed destinations cannot be conditional",
+                ));
+            }
+            if field.layout.pad_before.is_some()
+                || field.layout.align_before.is_some()
+                || field.layout.position.is_some()
+            {
+                return Err(syn::Error::new_spanned(
+                    &field.name,
+                    "computed destinations cannot declare placement geometry",
+                ));
+            }
+            if field
+                .offset
+                .terms
+                .iter()
+                .any(|term| matches!(term, SizeTerm::Dynamic))
+            {
+                return Err(syn::Error::new_spanned(
+                    &field.name,
+                    "computed destinations must have a fixed offset before demand geometry",
+                ));
+            }
+        }
         validate_conditions(&parsed)?;
 
         validate_geometry_controllers(&parsed)?;
         validate_arrays(&parsed)?;
         validate_bit_controller_roles(&parsed)?;
 
+        validate_computed_controller_roles(&parsed)?;
+        let computed_order = validate_computed_dependencies(&parsed)?;
         Ok(Self {
             vis: input.vis,
             name: input.ident,
             generics: input.generics,
             fields: parsed,
             validators,
+            computed_order,
         })
     }
 
@@ -527,6 +619,9 @@ impl Schema {
             .collect()
     }
 
+    pub(super) fn computed_fields(&self) -> impl Iterator<Item = &Field> {
+        self.computed_order.iter().map(|index| &self.fields[*index])
+    }
     pub(super) fn is_presence_controller(&self, name: &Ident) -> bool {
         self.fields.iter().any(|field| {
             matches!(
@@ -583,6 +678,10 @@ impl Schema {
     pub(super) fn layout_can_fail(&self) -> bool {
         self.has_explicit_geometry()
             || self.bit_projection_fields().next().is_some()
+            || self
+                .fields
+                .iter()
+                .any(|field| field.kind.computed().is_some())
             || self
                 .size_terms()
                 .iter()
@@ -815,6 +914,176 @@ fn validate_bit_projection(
         ));
     }
     Ok(())
+}
+fn validate_computed_controller_roles(fields: &[Field]) -> syn::Result<()> {
+    for computed in fields
+        .iter()
+        .filter(|field| field.kind.computed().is_some())
+    {
+        let name = &computed.name;
+        let controls_geometry = fields.iter().any(|field| match &field.kind {
+            FieldKind::RawBytes(RawBytes {
+                extent: DynamicExtent::Bounded(controller),
+            })
+            | FieldKind::Nested(NestedField {
+                extent: Some(controller),
+                ..
+            }) => controller == name,
+            FieldKind::Array(array) => &array.controller == name,
+            FieldKind::Flag(flag) => &flag.controller == name,
+            FieldKind::BitProjection(projection) => &projection.controller == name,
+            FieldKind::Scalar(_)
+            | FieldKind::Bytes(_)
+            | FieldKind::RawBytes(_)
+            | FieldKind::Nested(_) => false,
+        }) || fields.iter().any(|field| {
+            matches!(
+                &field.layout.position,
+                Some(Position::Field(controller)) if controller == name
+            )
+        });
+        if controls_geometry {
+            return Err(syn::Error::new_spanned(
+                name,
+                "computed fields cannot control representation geometry",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_computed_dependencies(fields: &[Field]) -> syn::Result<Vec<usize>> {
+    let computed = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| field.kind.computed().map(|_| index))
+        .collect::<Vec<_>>();
+    let computed_set = computed.iter().copied().collect::<BTreeSet<_>>();
+    let mut dependencies = Vec::with_capacity(computed.len());
+    for index in &computed {
+        let field = &fields[*index];
+        let expression = &field.kind.computed().expect("computed field").expression;
+        let names = computed_dependency_names(expression, &field.name, fields)?;
+        let deps = names
+            .into_iter()
+            .filter_map(|name| fields.iter().position(|candidate| candidate.name == name))
+            .filter(|dependency| computed_set.contains(dependency))
+            .collect::<BTreeSet<_>>();
+        dependencies.push((*index, deps));
+    }
+    let mut remaining = computed_set;
+    let mut ordered = Vec::with_capacity(computed.len());
+    while !remaining.is_empty() {
+        let Some(next) = computed.iter().copied().find(|candidate| {
+            remaining.contains(candidate)
+                && dependencies
+                    .iter()
+                    .find(|(index, _)| index == candidate)
+                    .is_some_and(|(_, deps)| deps.is_disjoint(&remaining))
+        }) else {
+            let field = &fields[*remaining.iter().next().expect("nonempty cycle")];
+            return Err(syn::Error::new_spanned(
+                &field.name,
+                "computed field dependency cycle",
+            ));
+        };
+        remaining.remove(&next);
+        ordered.push(next);
+    }
+    Ok(ordered)
+}
+
+fn computed_dependency_names(
+    expression: &Expr,
+    destination: &Ident,
+    fields: &[Field],
+) -> syn::Result<Vec<Ident>> {
+    let Expr::Call(callback) = expression else {
+        return Err(syn::Error::new_spanned(
+            expression,
+            "computed callback must be a call",
+        ));
+    };
+    let mut names = Vec::new();
+    for argument in &callback.args {
+        match argument {
+            Expr::Path(path) => {
+                let name = simple_computed_name(path)?;
+                names.push(if name == "self" {
+                    destination.clone()
+                } else {
+                    name.clone()
+                });
+            }
+            Expr::Call(selection) => {
+                let Expr::Path(operation) = selection.func.as_ref() else {
+                    return Err(syn::Error::new_spanned(
+                        &selection.func,
+                        "selection operation must be include or exclude",
+                    ));
+                };
+                let operation = simple_computed_name(operation)?;
+                let selected = selection
+                    .args
+                    .iter()
+                    .map(|argument| {
+                        let Expr::Path(path) = argument else {
+                            return Err(syn::Error::new_spanned(
+                                argument,
+                                "selection fields must be simple names",
+                            ));
+                        };
+                        let name = simple_computed_name(path)?;
+                        Ok(if name == "self" {
+                            destination.clone()
+                        } else {
+                            name.clone()
+                        })
+                    })
+                    .collect::<syn::Result<BTreeSet<_>>>()?;
+                if operation == "include" {
+                    names.extend(selected);
+                } else if operation == "exclude" {
+                    names.extend(
+                        fields
+                            .iter()
+                            .filter(|field| !selected.contains(&field.name))
+                            .map(|field| field.name.clone()),
+                    );
+                } else {
+                    return Err(syn::Error::new_spanned(
+                        operation,
+                        "selection operation must be include or exclude",
+                    ));
+                }
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    argument,
+                    "computed arguments must be logical fields or selections",
+                ));
+            }
+        }
+    }
+    for name in &names {
+        if !fields.iter().any(|field| field.name == *name) {
+            return Err(syn::Error::new_spanned(
+                name,
+                "computed callback references an unknown field",
+            ));
+        }
+    }
+    Ok(names)
+}
+
+fn simple_computed_name(path: &syn::ExprPath) -> syn::Result<&Ident> {
+    if path.qself.is_some() || path.path.segments.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            path,
+            "expected a simple field name",
+        ));
+    }
+    Ok(&path.path.segments[0].ident)
 }
 
 fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
@@ -1223,6 +1492,8 @@ struct FieldAttributes {
     bits_of: Option<Ident>,
     bit: Option<u32>,
     bits: Option<(u32, u32)>,
+    computed: Option<Expr>,
+    try_computed: Option<(Expr, Path)>,
 }
 
 impl FieldAttributes {
@@ -1350,6 +1621,23 @@ impl FieldAttributes {
                     result.bits = Some(parse_bit_range(expression)?);
                     return Ok(());
                 }
+                if meta.path.is_ident("computed") {
+                    if result.computed.is_some() || result.try_computed.is_some() {
+                        return Err(meta.error("duplicate or conflicting computed callback"));
+                    }
+                    result.computed = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
+                if meta.path.is_ident("try_computed") {
+                    if result.computed.is_some() || result.try_computed.is_some() {
+                        return Err(meta.error("duplicate or conflicting computed callback"));
+                    }
+                    let expression: Expr = meta.value()?.parse()?;
+                    let path = computed_callback_path(&expression)?;
+                    let error = crate::validator::computed_error_type(path)?;
+                    result.try_computed = Some((expression, error));
+                    return Ok(());
+                }
                 Err(meta.error("unsupported schema field attribute"))
             })?;
         }
@@ -1357,6 +1645,21 @@ impl FieldAttributes {
     }
 }
 
+fn computed_callback_path(expression: &Expr) -> syn::Result<&Path> {
+    let Expr::Call(call) = expression else {
+        return Err(syn::Error::new_spanned(
+            expression,
+            "computed callback must be a function call",
+        ));
+    };
+    let Expr::Path(path) = call.func.as_ref() else {
+        return Err(syn::Error::new_spanned(
+            &call.func,
+            "computed callback must name a function",
+        ));
+    };
+    Ok(&path.path)
+}
 fn primitive_name(ty: &Type) -> Option<String> {
     let Type::Path(path) = ty else {
         return None;

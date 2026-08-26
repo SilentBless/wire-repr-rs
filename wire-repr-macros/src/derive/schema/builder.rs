@@ -135,6 +135,7 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
     let mut slots = Vec::new();
     for field in &schema.fields {
         if field.kind.constant().is_some()
+            || field.kind.computed().is_some()
             || schema.is_length_controller(&field.name)
             || schema.is_count_controller(&field.name)
             || schema.is_presence_controller(&field.name)
@@ -594,9 +595,19 @@ fn render_complete(
     }
     let complete_builder = builder_type(builder, original_arguments, &complete_states);
     let write_output = fresh_type_ident(&impl_generics, "Output");
-    let (impl_params, _, impl_where) = impl_generics.split_for_impl();
     let (_, schema_types, _) = schema.generics.split_for_impl();
     let self_type = quote!(#name #schema_types);
+    if schema
+        .fields
+        .iter()
+        .any(|field| field.kind.computed().is_some())
+    {
+        impl_generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#self_type: #runtime::__private::WireSelect));
+    }
+    let (impl_params, _, impl_where) = impl_generics.split_for_impl();
     let build_value = private_ident(schema, "write_value");
 
     let mut used_error_names = BTreeSet::from(["Layout".to_owned(), "LengthConflict".to_owned()]);
@@ -675,7 +686,9 @@ fn render_complete(
                     let encode = to_bytes_method(scalar.endian);
                     let source = if let Some(constant) = &scalar.constant {
                         quote!(#constant)
-                    } else if schema.is_count_controller(&field.name) {
+                    } else if scalar.computed.is_some()
+                        || schema.is_count_controller(&field.name)
+                    {
                         quote!(0 as #value_ty)
                     } else if schema.is_presence_controller(&field.name) {
                         let flag = schema
@@ -1056,6 +1069,22 @@ fn render_complete(
             })
         })
         .collect::<Vec<_>>();
+    let computed_error_variants = schema
+        .fields
+        .iter()
+        .filter_map(|field| {
+            let computed = field.kind.computed()?;
+            let source = computed.error.as_ref()?;
+            let variant = computed_error_ident(&field.name);
+            let field_name = field.name.to_string();
+            let message = format!("computed field `{field_name}` failed: {{0}}");
+            Some(quote! {
+                #[doc = "A fallible computed callback rejected the representation."]
+                #[error(#message)]
+                #variant(#[source] #source),
+            })
+        })
+        .collect::<Vec<_>>();
     let layout_error_variant = schema.layout_can_fail().then(|| {
         quote! {
             #[doc = "A static field offset or fixed width could not be established."]
@@ -1083,6 +1112,7 @@ fn render_complete(
     let has_errors = schema.layout_can_fail()
         || has_shared_length
         || !conversion_error_variants.is_empty()
+        || !computed_error_variants.is_empty()
         || !error_fields.is_empty();
     let error_declaration = if !has_errors {
         TokenStream::new()
@@ -1092,6 +1122,7 @@ fn render_complete(
             #[derive(Debug, #runtime::__private::ThisError)]
             #vis enum #error {
                 #(#conversion_error_variants)*
+                #(#computed_error_variants)*
                 #layout_error_variant
                 #length_conflict_variant
             }
@@ -1102,6 +1133,7 @@ fn render_complete(
             #[derive(Debug, #runtime::__private::ThisError)]
             #vis enum #error<#(#nested_error_parameters: ::core::error::Error + 'static),*> {
                 #(#conversion_error_variants)*
+                #(#computed_error_variants)*
                 #layout_error_variant
                 #length_conflict_variant
                 #(#nested_error_variants)*
@@ -1129,6 +1161,62 @@ fn render_complete(
         quote!(#error<#(#nested_error_types),*>)
     };
 
+    let computed_patches = schema
+        .computed_fields()
+        .filter_map(|field| {
+            let computed = field.kind.computed()?;
+            let FieldKind::Scalar(scalar) = &field.kind else {
+                unreachable!("computed destination is scalar")
+            };
+            let name = &field.name;
+            let field_name = name.unraw().to_string();
+            let relative = super::builder_offset(&field.offset, runtime);
+            let view = private_ident(schema, &format!("{}_computed_view", name.unraw()));
+            let semantic = private_ident(schema, &format!("{}_computed_value", name.unraw()));
+            let value_ty = value_type_tokens(scalar.value_type);
+            let wire_ty = scalar_type_tokens(scalar.wire_type);
+            let encode = to_bytes_method(scalar.endian);
+            let call = super::computed::render_call(computed, &view, name, runtime)
+                .expect("validated computed callback expression");
+            let calculate = if computed.error.is_some() {
+                let variant = computed_error_ident(name);
+                quote!(#call.map_err(|error| #runtime::WriteError::Schema(
+                #error::#variant(error)
+            ))?)
+            } else {
+                call
+            };
+            let encoded = if scalar.value_type.is_converted() {
+                let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
+                quote!(#conversion.ok_or_else(|| #runtime::WriteError::Schema(
+                #error::Layout(#runtime::LayoutError { field: #field_name }),
+            ))?)
+            } else {
+                quote!(#semantic)
+            };
+            Some(quote! {
+                let #semantic: #value_ty = {
+                    let #view = <#self_type as #runtime::__private::WireSelect>::select_view(
+                        writer.as_bytes(),
+                    )
+                    .map_err(|_| #runtime::WriteError::Schema(
+                        #error::Layout(#runtime::LayoutError { field: #field_name }),
+                    ))?;
+                    #calculate
+                };
+                let encoded: #wire_ty = #encoded;
+                let relative = #relative.ok_or_else(|| #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #field_name }),
+                ))?;
+                let offset = #schema_start.checked_add(relative).ok_or_else(|| {
+                    #runtime::WriteError::Schema(
+                        #error::Layout(#runtime::LayoutError { field: #field_name }),
+                    )
+                })?;
+                writer.patch_at(offset, &encoded.#encode())?;
+            })
+        })
+        .collect::<Vec<_>>();
     quote! {
         #error_declaration
 
@@ -1145,6 +1233,7 @@ fn render_complete(
             > {
                 let #schema_start = writer.position();
                 #(#writes)*
+                #(#computed_patches)*
                 Ok(())
             }
         }
@@ -1356,4 +1445,8 @@ fn render_bit_controller_source(
         #(#parts)*
         raw
     }}
+}
+
+pub(super) fn computed_error_ident(field: &syn::Ident) -> syn::Ident {
+    format_ident!("{}Computed", pascal(field))
 }

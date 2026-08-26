@@ -4,10 +4,10 @@ This document defines the target production architecture and clean-cutover contr
 `wire-repr`. The current implementation covers named structs, fixed scalars and byte arrays,
 constants, explicit logical conversions, validators, nested children, demand geometry, controller
 dependencies, conditional choice groups, counted runtime arrays, static enums, nominal and inline
-bitfields, and exact View forwarding. Later sections describing computed fields, selections, and
-cursors are an implementation plan, not claims about the shipped surface. New layout classes
-extend this one model rather than restoring the removed legacy renderer or introducing parallel
-modes.
+bitfields, root-relative physical selections, computed fields, and exact View forwarding. Later
+sections describing nested selection paths and cursors are an implementation plan, not claims about
+the shipped surface. New layout classes extend this one model rather than restoring the removed
+legacy renderer or introducing parallel modes.
 
 ## 1. Product boundary
 
@@ -307,11 +307,12 @@ or buffer-pool ownership outside wire-repr.
 
 ## 9. Physical byte selections and computed fields
 
-Views and writers expose root-relative typed physical selections:
+Generated struct views expose root-relative typed physical selections through the collision-free
+`select(&view)` function:
 
 ```rust
-view.bytes().include(|fields| fields.header | fields.body.payload)
-view.bytes().exclude(|fields| fields.checksum)
+select(&view).include(|fields| fields.header | fields.payload)
+select(&view).exclude(|fields| fields.checksum)
 ```
 
 Selections preserve physical order, merge overlap, and remain fragmented without materialization.
@@ -328,7 +329,7 @@ checksum: u32,
 
 #[wire(computed = ordered_count(
     kind,
-    include(first, tail.payload),
+    include(first, tail),
     exclude(self, second),
 ))]
 ordered: u32,
@@ -336,9 +337,13 @@ ordered: u32,
 
 `self` names the computed destination independently of its Rust field name. Including `self` is a
 cycle; excluding it is the ordinary checksum form. `try_computed` uses the same arguments but
-expects a fallible callback. The generated dependency DAG runs each callback as soon as all logical
-values and physical ranges it consumes are ready. Reading returns the stored value and never
-recomputes it. A fallible callback may leave partial unpublished output.
+expects a fallible callback marked with `#[computed]`. At `finish`, the generated dependency DAG
+patches callbacks in topological order after payload controllers are authoritative. Computed
+destinations cannot themselves control geometry, be conditional, declare placement, or follow a
+demand-derived offset. Writing computed fields requires the schema's generated `WireView`
+capability so the final patch pass can frame exact physical ranges without retaining per-field
+plans. Reading returns the stored value and never recomputes it. A fallible callback may leave
+partial unpublished output.
 
 ## 10. Errors and incomplete input
 
@@ -366,13 +371,12 @@ runtime budget.
 
 ## 11. Implementation order
 
-The fixed, demand-geometry, dependency, collection, enum, and bitfield foundations are complete.
-The remaining target is delivered as dependency-ordered verticals:
+The fixed, demand-geometry, dependency, collection, enum, bitfield, selection, and computed
+foundations are complete. The remaining target is delivered as dependency-ordered verticals:
 
-1. add typed `include`/`exclude` selections, chunk and byte iteration, `computed`, and
-   `try_computed`;
-2. add capability-gated homogeneous `views` and heterogeneous cursors;
-3. finish fuzzing, protocol fixtures, public examples, and release verification.
+1. add nested physical selection paths plus capability-gated homogeneous `views` and heterogeneous
+   cursors;
+2. finish fuzzing, protocol fixtures, public examples, and release verification.
 
 Each vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads, behavioral
 tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not land as a
@@ -384,20 +388,18 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-
-The current mandatory corpus has eleven discovered zones and twenty-seven cases: fixed scalars and
+The current mandatory corpus has thirteen discovered zones and thirty-one cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, controller and
 conditional dependencies, runtime collection decode/build/copy, static enum decode/build/copy,
-nominal and inline bitfields, and fixed, automatic, and callback-driven output growth. Each covers
-read and write paths where applicable. The measurement tool inspects final linked consumer symbols
-for code shape, call topology, stack, allocation, and dispatch evidence. Runtime performance uses
-calibrated interleaved samples and reports distribution statistics. LLVM IR may explain an
-optimization result but is not treated as a latency oracle. State and artifact-size probes remain
-isolated from measured hot-path implementations.
-
-Selections and computed fields become mandatory corpus zones when those layout classes ship; they
-are not claimed as current measurement coverage.
+nominal and inline bitfields, fragmented physical selections, fixed and dynamic computed fields,
+and fixed, automatic, and callback-driven output growth. Each covers read and write paths where
+applicable. The measurement tool inspects final linked consumer symbols for code shape, call
+topology, stack, allocation, and dispatch evidence. Runtime performance uses calibrated interleaved
+samples and reports distribution statistics. LLVM IR may explain an optimization result but is not
+treated as a latency oracle. State and artifact-size probes remain isolated from measured hot-path
+implementations.
+Nested selections become mandatory corpus coverage when that composition class ships.
 
 Behavioral tests cover success, truncation at every accessed field boundary, constant mismatch,
 declared outer-extent mismatch, nested error propagation, absolute offsets, retained backing

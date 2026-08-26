@@ -377,6 +377,13 @@ impl<O: Output> Writer<O> {
         self.cursor
     }
 
+    /// Current represented bytes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.output.bytes()[self.start..self.cursor]
+    }
+
     /// Writes bytes at the current cursor and advances it.
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), OutputError<O::GrowError>> {
         let end = self
@@ -611,6 +618,12 @@ impl<O: Output> ChildWriter<'_, O> {
         self.cursor
     }
 
+    /// Bytes emitted within this child representation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.writer.output.bytes()[self.start..self.cursor]
+    }
     /// Writes bytes sequentially and advances this child cursor.
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), OutputError<O::GrowError>> {
         let end = self

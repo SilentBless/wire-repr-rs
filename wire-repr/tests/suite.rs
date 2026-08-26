@@ -6,6 +6,8 @@ mod bitfield;
 mod builder;
 #[path = "behavior/collection.rs"]
 mod collection;
+#[path = "behavior/computed.rs"]
+mod computed;
 #[path = "behavior/dependency.rs"]
 mod dependency;
 #[path = "behavior/dependency_hygiene.rs"]
@@ -22,5 +24,7 @@ mod layout;
 mod ownership;
 #[path = "behavior/scalar.rs"]
 mod scalar;
+#[path = "behavior/selection.rs"]
+mod selection;
 #[path = "behavior/view.rs"]
 mod view;

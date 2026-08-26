@@ -19,6 +19,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let view_impl = format_ident!("__WireRepr{}ViewImpl", name.unraw());
     let state_holder = super::fresh_type_ident(&schema.generics, "StateHolder");
     let error = format_ident!("{}ViewError", name.unraw());
+    let fields_type = format_ident!("{}Fields", name.unraw());
 
     let bounded = bounded_generics(schema, runtime);
     let (impl_generics, type_generics, where_clause) = bounded.split_for_impl();
@@ -318,10 +319,44 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let (common_impl, common_types, common_where) = common_generics.split_for_impl();
     let trait_path = quote!(#view_trait #type_generics);
 
+    let field_count = schema.fields.len();
+    let field_members = schema
+        .fields
+        .iter()
+        .map(|field| {
+            let name = &field.name;
+            quote!(pub #name: #runtime::FieldPath,)
+        })
+        .collect::<Vec<_>>();
+    let field_values = schema
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let name = &field.name;
+            quote!(#name: #runtime::FieldPath::new(base + #index),)
+        })
+        .collect::<Vec<_>>();
+    let range_arms = schema
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let start = geometry_start(schema, index, runtime);
+            let end = geometry_end(schema, index, runtime);
+            quote!(#index => Some(#start..#end),)
+        })
+        .collect::<Vec<_>>();
+
     Ok(quote! {
         #error_declaration
         #descriptor_declaration
 
+
+        #[doc = "Typed physical field paths generated for this schema."]
+        #vis struct #fields_type {
+            #(#field_members)*
+        }
         #[doc(hidden)]
         #vis struct #view_impl #common_impl #common_where {
             #input_field: #backing,
@@ -331,7 +366,10 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         }
 
         #[doc = "Exact-source view API generated for this schema."]
-        #vis trait #view_trait #impl_generics #where_clause {
+        #vis trait #view_trait #impl_generics:
+            #runtime::__private::WireFields<Fields = #fields_type>
+            #where_clause
+        {
             /// Returns the exact represented bytes.
             fn as_bytes(&self) -> &[u8];
 
@@ -354,6 +392,26 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #(#retained_methods)*
         }
 
+        impl #retained_impl #runtime::__private::WireFields
+            for #retained_type #retained_where
+        {
+            type Fields = #fields_type;
+            const FIELD_COUNT: usize = #field_count;
+
+            #[inline(always)]
+            fn fields(&self, base: usize) -> Self::Fields {
+                #fields_type { #(#field_values)* }
+            }
+
+            #[inline(always)]
+            fn field_range(&self, index: usize) -> Option<::core::ops::Range<usize>> {
+                match index {
+                    #(#range_arms)*
+                    _ => None,
+                }
+            }
+        }
+
         impl #projected_impl #trait_path for #projected_type #projected_where {
             #[inline(always)]
             fn as_bytes(&self) -> &[u8] {
@@ -361,6 +419,26 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             }
 
             #(#projected_methods)*
+        }
+
+        impl #projected_impl #runtime::__private::WireFields
+            for #projected_type #projected_where
+        {
+            type Fields = #fields_type;
+            const FIELD_COUNT: usize = #field_count;
+
+            #[inline(always)]
+            fn fields(&self, base: usize) -> Self::Fields {
+                #fields_type { #(#field_values)* }
+            }
+
+            #[inline(always)]
+            fn field_range(&self, index: usize) -> Option<::core::ops::Range<usize>> {
+                match index {
+                    #(#range_arms)*
+                    _ => None,
+                }
+            }
         }
 
         impl #common_impl #runtime::ExactWire<#self_type>
@@ -405,6 +483,41 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     descriptor: state,
                     #view_marker: ::core::marker::PhantomData,
                 }
+            }
+        }
+
+        impl #impl_generics #runtime::__private::WireSelect for #self_type #where_clause {
+            type Root<#backing> = #retained_type
+            where
+                #backing: AsRef<[u8]>;
+
+            #[inline]
+            fn select_view<#backing: AsRef<[u8]>>(
+                #view_input: #backing,
+            ) -> Result<Self::Root<#backing>, Self::Error> {
+                let #current_input = #view_input.as_ref();
+                let #input_length = #current_input.len();
+                let #frame_result = <Self as #runtime::WireView>::frame(#current_input, 0)?;
+                let (#framed_descriptor, #framed_consumed) = #frame_result.into_parts();
+                if #framed_consumed > #input_length {
+                    return Err(#error::InvalidFrame(#runtime::InvalidFrameExtent {
+                        offset: 0,
+                        consumed: #framed_consumed,
+                        available: #input_length,
+                    }));
+                }
+                if #framed_consumed < #input_length {
+                    return Err(#error::Trailing(#runtime::TrailingBytes {
+                        offset: #framed_consumed,
+                        trailing: #input_length - #framed_consumed,
+                    }));
+                }
+                Ok(#view_impl {
+                    #input_field: #view_input,
+                    #represented_length_field: #framed_consumed,
+                    descriptor: #framed_descriptor,
+                    #view_marker: ::core::marker::PhantomData,
+                })
             }
         }
 

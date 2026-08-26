@@ -1,0 +1,50 @@
+name = "selection/fragmented/compound"
+
+[roles]
+generated = "generated.rs"
+idiomatic = "idiomatic.rs"
+best_latency = "best/latency.rs"
+
+[[cases]]
+name = "bytes"
+entry = "bytes"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "direct dispatch"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0"
+[[cases.rules]]
+name = "latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.50"
+message = "selection byte iteration has safe optimization headroom"
+
+[[cases]]
+name = "chunks"
+entry = "chunks"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "direct dispatch"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0"
+[[cases.rules]]
+name = "latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.50"
+message = "selection chunk iteration has safe optimization headroom"

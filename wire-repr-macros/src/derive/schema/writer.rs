@@ -664,12 +664,25 @@ fn render_finish(
     let error_name = format_ident!("{}WriteError", schema.name.unraw());
     let (conversion_names, _) = writer_error_names(schema);
     let has_conversions = conversion_names.iter().any(Option::is_some);
+    let (_, schema_types, _) = schema.generics.split_for_impl();
+    let schema_name = &schema.name;
+    let self_type = quote!(#schema_name #schema_types);
+    let has_computed = schema
+        .fields
+        .iter()
+        .any(|field| field.kind.computed().is_some());
     let mut impl_generics = schema.generics.clone();
     let mut output_parameter = TypeParam::from(output.clone());
     output_parameter.bounds.push(parse_quote!(#runtime::Output));
     impl_generics
         .params
         .push(GenericParam::Type(output_parameter));
+    if has_computed {
+        impl_generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#self_type: #runtime::__private::WireSelect));
+    }
 
     let mut complete_states = Vec::with_capacity(slots.len());
     let mut child_errors = Vec::new();
@@ -805,6 +818,80 @@ fn render_finish(
                 | FieldKind::Nested(_) => unreachable!(),
             })
         });
+    let computed_placeholders = schema
+        .fields
+        .iter()
+        .filter_map(|field| {
+            let computed = field.kind.computed()?;
+            let _ = computed;
+            let FieldKind::Scalar(scalar) = &field.kind else {
+                unreachable!("computed destination is scalar")
+            };
+            let name = &field.name;
+            let field_name = name.unraw().to_string();
+            let offset = builder_offset(&field.offset, runtime);
+            let wire_ty = scalar_type_tokens(scalar.wire_type);
+            let encode = to_bytes_method(scalar.endian);
+            Some(quote! {
+                let offset = #offset.ok_or_else(|| #runtime::WriteError::Schema(
+                    #error_name::Layout(#runtime::LayoutError { field: #field_name }),
+                ))?;
+                let placeholder: #wire_ty = 0 as #wire_ty;
+                self.writer.write_at(offset, &placeholder.#encode())?;
+            })
+        })
+        .collect::<Vec<_>>();
+    let computed_patches = schema
+        .computed_fields()
+        .filter_map(|field| {
+            let computed = field.kind.computed()?;
+            let FieldKind::Scalar(scalar) = &field.kind else {
+                unreachable!("computed destination is scalar")
+            };
+            let name = &field.name;
+            let field_name = name.unraw().to_string();
+            let offset = builder_offset(&field.offset, runtime);
+            let view = private_ident(schema, &format!("{}_computed_view", name.unraw()));
+            let semantic = private_ident(schema, &format!("{}_computed_value", name.unraw()));
+            let value_ty = value_type_tokens(scalar.value_type);
+            let wire_ty = scalar_type_tokens(scalar.wire_type);
+            let encode = to_bytes_method(scalar.endian);
+            let call = super::computed::render_call(computed, &view, name, runtime)
+                .expect("validated computed callback expression");
+            let calculate = if computed.error.is_some() {
+                let variant = super::builder::computed_error_ident(name);
+                quote!(#call.map_err(|error| #runtime::WriteError::Schema(
+                #error_name::#variant(error)
+            ))?)
+            } else {
+                call
+            };
+            let encoded = if scalar.value_type.is_converted() {
+                let conversion = super::builder::convert_to_wire(scalar, &semantic, &wire_ty);
+                quote!(#conversion.ok_or_else(|| #runtime::WriteError::Schema(
+                #error_name::Layout(#runtime::LayoutError { field: #field_name }),
+            ))?)
+            } else {
+                quote!(#semantic)
+            };
+            Some(quote! {
+                let #semantic: #value_ty = {
+                    let #view = <#self_type as #runtime::__private::WireSelect>::select_view(
+                        self.writer.as_bytes(),
+                    )
+                    .map_err(|_| #runtime::WriteError::Schema(
+                        #error_name::Layout(#runtime::LayoutError { field: #field_name }),
+                    ))?;
+                    #calculate
+                };
+                let encoded: #wire_ty = #encoded;
+                let offset = #offset.ok_or_else(|| #runtime::WriteError::Schema(
+                    #error_name::Layout(#runtime::LayoutError { field: #field_name }),
+                ))?;
+                self.writer.write_at(offset, &encoded.#encode())?;
+            })
+        })
+        .collect::<Vec<_>>();
     let ensure_total = if schema.has_explicit_geometry() {
         TokenStream::new()
     } else if schema
@@ -848,6 +935,8 @@ fn render_finish(
             > {
                 #ensure_total
                 #(#constant_writes)*
+                #(#computed_placeholders)*
+                #(#computed_patches)*
                 Ok(self.writer.finish())
             }
         }

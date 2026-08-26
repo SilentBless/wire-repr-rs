@@ -1,5 +1,6 @@
 mod bitfield;
 mod builder;
+mod computed;
 mod enumeration;
 mod model;
 mod view;
