@@ -221,14 +221,18 @@ The product concepts are distinct:
 - `cursor` retains a position so different schemas can consume consecutive representations.
 
 A traversal is the default answer to recursive or sequential geometry that does not need a retained
-index. Generated consuming stages force each nested value to finish before the parent resumes:
+index. The ordinary API groups one physical recursive step into a single generated operation:
 
 ```rust
-let pair = node.pair()?;
-let pair = pair.left(|left| visit(left))?;
-let (opcode, pair) = pair.opcode()?;
-pair.right(|right| visit(right))?;
+let (left, opcode, right) = node.pair()?.fields(
+    |left| visit(left),
+    |right| visit(right),
+)?;
 ```
+
+`fields` invokes the left callback first. Only after that child returns its internal completion
+token does it decode `opcode` and invoke the right callback. The completion token and cursor stages
+are generated machinery, not values the ordinary caller has to name or rebind.
 
 For `Pair { left: Node, opcode, right: Node }`, the left stage starts immediately after the selector;
 the shared cursor reaches `opcode` when the left callback returns its completion token. No parent
