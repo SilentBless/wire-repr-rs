@@ -3,9 +3,10 @@
 `wire-repr` compiles Rust schema declarations into a safe public, `no_std`, allocation-free read
 and write API. A schema struct describes physical bytes; it is not the decoded semantic value.
 
-The repository is cutting over to the production `WireView`/`WireBuilder` design. The generic
-fixed path below is implemented. [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/main/ARCHITECTURE.md)
-defines the complete production contract.
+The production `WireView`/`WireBuilder` contract is implemented across fixed and dynamic layouts,
+dependencies, collections, enums, bitfields, selections, computed fields, sequences, and cursors.
+[`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/main/ARCHITECTURE.md) defines
+the shipped boundaries and deferred composition work.
 
 ## Generic schema
 
@@ -131,6 +132,6 @@ write conversions are checked.
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-The production design extends the same model to nested selection paths. It does not add negotiated
-selector maps, hidden indexes, general resource-limit machinery, runtime schemas, semantic object
-materialization, async I/O, or feature-selected renderers.
+Nested selection paths, traversal, and recursive schemas remain future composition work. The core
+does not add negotiated selector maps, hidden indexes, general resource-limit machinery, runtime
+schemas, semantic object materialization, async I/O, or feature-selected renderers.

@@ -5,9 +5,9 @@ This document defines the target production architecture and clean-cutover contr
 constants, explicit logical conversions, validators, nested children, demand geometry, controller
 dependencies, conditional choice groups, counted runtime arrays, static enums, nominal and inline
 bitfields, root-relative physical selections, computed fields, homogeneous views, heterogeneous
-cursors, and exact View forwarding. Nested selection paths remain planned composition work. New
-layout classes extend this one model rather than restoring the removed legacy renderer or
-introducing parallel modes.
+cursors, and exact View forwarding. Nested selection paths remain future composition work alongside
+the separately deferred traversal and recursive-layout design. New layout classes extend this one
+model rather than restoring the removed legacy renderer or introducing parallel modes.
 
 ## 1. Product boundary
 
@@ -373,16 +373,13 @@ runtime budget.
 
 ## 11. Implementation order
 
-The fixed, demand-geometry, dependency, collection, enum, bitfield, selection, computed, sequence,
-and cursor foundations are complete. The remaining target is delivered as dependency-ordered
-verticals:
+The fixed, demand-geometry, dependency, collection, enum, bitfield, root-selection, computed,
+sequence, cursor, fuzz, protocol-fixture, example, and release-verification verticals are complete.
+Nested selection paths, traversal, and recursive schemas are separate future composition work.
 
-1. add nested physical selection paths;
-2. finish fuzzing, protocol fixtures, public examples, and release verification.
-
-Each vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads, behavioral
-tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not land as a
-compiling scaffold or with a second temporary renderer.
+Each shipped vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads,
+behavioral tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not
+land as a compiling scaffold or with a second temporary renderer.
 
 ## 12. Performance and verification
 
@@ -410,6 +407,10 @@ identity, typestate failures, manual capability composition, partial-output fail
 growth adapters, and generated/handwritten equivalence. Fuzzing extends the same invariants to
 controller overflow, count bombs, non-progress items, dependency cycles, malformed deferred
 ranges, and iteration termination.
+
+The release fixtures exercise generic MTProto TL composition and an IPv4 header with nominal
+bitfields plus a computed Internet checksum. Deterministic structural fuzz cases cover controller
+bombs, malformed dynamic ranges, collection termination, and failure-atomic sequence movement.
 
 ## 13. Explicit non-goals
 

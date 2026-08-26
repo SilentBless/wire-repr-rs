@@ -12,6 +12,7 @@ readme = "../README.md"
 autotests = false
 autoexamples = false
 keywords = ["binary", "zero-copy", "no-std", "no-alloc", "codegen"]
+exclude = ["measure/**"]
 categories = ["encoding", "no-std", "no-std::no-alloc"]
 
 [dependencies]
@@ -24,6 +25,18 @@ bytes.workspace = true
 [[test]]
 name = "suite"
 path = "tests/suite.rs"
+
+[[test]]
+name = "protocol"
+path = "tests/protocol.rs"
+
+[[example]]
+name = "mtproto"
+path = "examples/mtproto.rs"
+
+[[example]]
+name = "ipv4"
+path = "examples/ipv4.rs"
 
 [lints]
 workspace = true

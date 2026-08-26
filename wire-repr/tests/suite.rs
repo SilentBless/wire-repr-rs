@@ -28,5 +28,7 @@ mod scalar;
 mod selection;
 #[path = "behavior/sequence.rs"]
 mod sequence;
+#[path = "behavior/structural_fuzz.rs"]
+mod structural_fuzz;
 #[path = "behavior/view.rs"]
 mod view;

@@ -256,6 +256,12 @@ declared wire width produce nominal field-site errors rather than truncating.
 - Writers and views do not allocate or dispatch dynamically inside wire-repr.
 - The public read API is identical for borrowed and retained-owned backing.
 
+## Examples
+
+- `cargo run -p wire-repr --example mtproto` demonstrates generic nested TL constructors.
+- `cargo run -p wire-repr --example ipv4` demonstrates nominal bitfields and a computed Internet
+  checksum over physical selections.
+
 ## Verification
 
 The repository checks behavior, final linked artifacts, and runtime performance independently:
@@ -274,6 +280,9 @@ Human-readable output is the default; CI uses `run --json`. Artifact analysis re
 symbols, while interleaved calibrated samples report median, p95, range, and median absolute
 deviation instead of treating LLVM instruction counts as performance truth.
 
+Release verification also runs deterministic structural fuzz regressions, MTProto and IPv4
+fixtures, both public examples, cross-target checks, rustdoc, and package-content validation.
+
 ## Design direction
 
 The implemented surface currently covers fixed scalars and byte arrays, constants, explicit
@@ -282,9 +291,7 @@ conditional groups, runtime arrays, static enums with exact unknown forwarding, 
 bitfields, root-relative physical selections, computed fields, homogeneous `views`, heterogeneous
 cursors, exact View forwarding, and progressive typestate writers.
 
-Nested physical selection paths remain planned composition work.
-
-General recursive schemas and a public traversal capability are deferred until this roadmap is
-complete. Negotiated selector maps, hidden indexes, eager full-collection validation, and a general
-limits framework are not part of the target core. Every shipped class extends the progressive
-writer model and adds behavioral plus generated/idiomatic/best-safe workload evidence.
+General recursive schemas, traversal, and nested physical selection paths remain separate future
+composition work. Negotiated selector maps, hidden indexes, eager full-collection validation, and
+a general limits framework are not part of the target core. Every shipped class extends the
+progressive writer model and adds behavioral plus generated/idiomatic/best-safe workload evidence.
