@@ -22,6 +22,7 @@ pub(super) enum FieldKind {
     Scalar(Scalar),
     Bytes(FixedBytes),
     RawBytes(RawBytes),
+    Array(ArrayField),
     Flag(FlagField),
     Nested(NestedField),
 }
@@ -38,6 +39,11 @@ pub(super) struct RawBytes {
 pub(super) enum DynamicExtent {
     Bounded(Ident),
     Rest,
+}
+
+pub(super) struct ArrayField {
+    pub(super) item: Type,
+    pub(super) controller: Ident,
 }
 
 pub(super) struct FieldLayout {
@@ -185,7 +191,7 @@ impl FieldKind {
         match self {
             Self::Scalar(scalar) => scalar.constant.as_ref(),
             Self::Bytes(bytes) => bytes.constant.as_ref(),
-            Self::RawBytes(_) | Self::Flag(_) | Self::Nested(_) => None,
+            Self::RawBytes(_) | Self::Array(_) | Self::Flag(_) | Self::Nested(_) => None,
         }
     }
 
@@ -193,7 +199,7 @@ impl FieldKind {
         match self {
             Self::Scalar(scalar) => SizeTerm::Fixed(scalar.width()),
             Self::Bytes(bytes) => SizeTerm::Expr(bytes.len.clone()),
-            Self::RawBytes(_) => SizeTerm::Dynamic,
+            Self::RawBytes(_) | Self::Array(_) => SizeTerm::Dynamic,
             Self::Flag(_) => SizeTerm::Fixed(0),
             Self::Nested(nested) => SizeTerm::Nested(nested.ty.clone()),
         }
@@ -237,6 +243,7 @@ impl Schema {
                 position,
                 flag,
                 condition,
+                counted_by,
             } = FieldAttributes::parse(&field.attrs)?;
             if bytes.is_some() && rest {
                 return Err(syn::Error::new_spanned(
@@ -272,6 +279,7 @@ impl Schema {
                     || layout.align_before.is_some()
                     || layout.position.is_some()
                     || layout.condition.is_some()
+                    || counted_by.is_some()
                 {
                     return Err(syn::Error::new_spanned(
                         &ty,
@@ -280,10 +288,10 @@ impl Schema {
                 }
                 FieldKind::Flag(FlagField { controller })
             } else if let Some(value_type) = value_type {
-                if bytes.is_some() || rest {
+                if bytes.is_some() || rest || counted_by.is_some() {
                     return Err(syn::Error::new_spanned(
                         &ty,
-                        "scalar fields do not accept `bytes` or `rest`",
+                        "scalar fields do not accept dynamic extent or count attributes",
                     ));
                 }
                 let wire_type = match value_type {
@@ -341,15 +349,38 @@ impl Schema {
                         "fixed byte arrays do not accept endian or `as` attributes",
                     ));
                 }
-                if bytes.is_some() || rest {
+                if bytes.is_some() || rest || counted_by.is_some() {
                     return Err(syn::Error::new_spanned(
                         &ty,
-                        "fixed byte arrays do not accept `bytes` or `rest`",
+                        "fixed byte arrays do not accept dynamic extent or count attributes",
                     ));
                 }
                 FieldKind::Bytes(FixedBytes { len, constant })
+            } else if let Some(item) = array_item_type(&ty) {
+                if endian.is_some()
+                    || representation.is_some()
+                    || constant.is_some()
+                    || bytes.is_some()
+                    || rest
+                {
+                    return Err(syn::Error::new_spanned(
+                        &ty,
+                        "runtime arrays do not accept scalar or byte-extent attributes",
+                    ));
+                }
+                let controller = counted_by.ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        &ty,
+                        "`wire::Array<T>` requires `counted_by = earlier_field`",
+                    )
+                })?;
+                FieldKind::Array(ArrayField { item, controller })
             } else if is_raw_bytes(&ty) {
-                if endian.is_some() || representation.is_some() || constant.is_some() {
+                if endian.is_some()
+                    || representation.is_some()
+                    || constant.is_some()
+                    || counted_by.is_some()
+                {
                     return Err(syn::Error::new_spanned(
                         &ty,
                         "raw byte fields do not accept scalar wire attributes",
@@ -368,7 +399,12 @@ impl Schema {
                 };
                 FieldKind::RawBytes(RawBytes { extent })
             } else {
-                if endian.is_some() || constant.is_some() || representation.is_some() || rest {
+                if endian.is_some()
+                    || constant.is_some()
+                    || representation.is_some()
+                    || rest
+                    || counted_by.is_some()
+                {
                     return Err(syn::Error::new_spanned(
                         &ty,
                         "nested schema fields do not accept scalar wire attributes or `rest`",
@@ -404,6 +440,7 @@ impl Schema {
             } else {
                 preceding.push(size);
             }
+
             parsed.push(Field {
                 name,
                 ty,
@@ -415,6 +452,7 @@ impl Schema {
         validate_conditions(&parsed)?;
 
         validate_geometry_controllers(&parsed)?;
+        validate_arrays(&parsed)?;
 
         Ok(Self {
             vis: input.vis,
@@ -462,6 +500,20 @@ impl Schema {
             .iter()
             .filter(move |field| field.layout.condition.as_ref() == Some(&name))
     }
+    pub(super) fn is_count_controller(&self, name: &Ident) -> bool {
+        self.fields.iter().any(|field| {
+            matches!(
+                &field.kind,
+                FieldKind::Array(array) if array.controller == *name
+            )
+        })
+    }
+
+    pub(super) fn array_fields(&self) -> impl Iterator<Item = &Field> {
+        self.fields
+            .iter()
+            .filter(|field| matches!(field.kind, FieldKind::Array(_)))
+    }
 
     pub(super) fn layout_can_fail(&self) -> bool {
         self.has_explicit_geometry()
@@ -483,6 +535,7 @@ impl Schema {
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
+            | FieldKind::Array(_)
             | FieldKind::Flag(_)
             | FieldKind::Nested(_) => false,
         })
@@ -504,6 +557,7 @@ impl Schema {
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
+            | FieldKind::Array(_)
             | FieldKind::Flag(_)
             | FieldKind::Nested(_) => false,
         })
@@ -511,15 +565,16 @@ impl Schema {
 
     pub(super) fn has_explicit_geometry(&self) -> bool {
         self.fields.iter().any(|field| {
-            matches!(field.kind, FieldKind::RawBytes(_) | FieldKind::Flag(_))
-                || matches!(
-                    field.kind,
-                    FieldKind::Nested(NestedField {
-                        extent: Some(_),
-                        ..
-                    })
-                )
-                || field.layout.pad_before.is_some()
+            matches!(
+                field.kind,
+                FieldKind::RawBytes(_) | FieldKind::Array(_) | FieldKind::Flag(_)
+            ) || matches!(
+                field.kind,
+                FieldKind::Nested(NestedField {
+                    extent: Some(_),
+                    ..
+                })
+            ) || field.layout.pad_before.is_some()
                 || field.layout.align_before.is_some()
                 || field.layout.position.is_some()
                 || field.layout.condition.is_some()
@@ -610,6 +665,7 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
+            | FieldKind::Array(_)
             | FieldKind::Flag(_)
             | FieldKind::Nested(_) => None,
         })
@@ -631,6 +687,59 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
             }
             validate_unsigned_controller(fields, index, controller, "field position")?;
         }
+    }
+    Ok(())
+}
+
+fn validate_arrays(fields: &[Field]) -> syn::Result<()> {
+    let mut controllers = BTreeSet::new();
+    for (index, field) in fields.iter().enumerate() {
+        let FieldKind::Array(array) = &field.kind else {
+            continue;
+        };
+        if !controllers.insert(array.controller.to_string()) {
+            return Err(syn::Error::new_spanned(
+                &array.controller,
+                format!(
+                    "item count controller `{}` cannot control multiple arrays",
+                    array.controller
+                ),
+            ));
+        }
+        if field.layout.condition.is_some() {
+            return Err(syn::Error::new_spanned(
+                &field.name,
+                "runtime arrays cannot be conditional in this vertical",
+            ));
+        }
+        let shared_role = fields.iter().any(|candidate| match &candidate.kind {
+            FieldKind::RawBytes(RawBytes {
+                extent: DynamicExtent::Bounded(controller),
+            })
+            | FieldKind::Nested(NestedField {
+                extent: Some(controller),
+                ..
+            }) => controller == &array.controller,
+            FieldKind::Flag(flag) => flag.controller == array.controller,
+            FieldKind::Scalar(_)
+            | FieldKind::Bytes(_)
+            | FieldKind::RawBytes(_)
+            | FieldKind::Array(_)
+            | FieldKind::Nested(_) => false,
+        });
+        let placement_role = fields.iter().any(|candidate| {
+            matches!(
+                &candidate.layout.position,
+                Some(Position::Field(controller)) if controller == &array.controller
+            )
+        });
+        if shared_role || placement_role {
+            return Err(syn::Error::new_spanned(
+                &array.controller,
+                "item count controller cannot control another dependency role",
+            ));
+        }
+        validate_unsigned_controller(fields, index, &array.controller, "item count")?;
     }
     Ok(())
 }
@@ -895,6 +1004,7 @@ struct FieldAttributes {
     position: Option<Expr>,
     flag: Option<Ident>,
     condition: Option<Ident>,
+    counted_by: Option<Ident>,
 }
 
 impl FieldAttributes {
@@ -971,6 +1081,13 @@ impl FieldAttributes {
                     result.align_before = Some(meta.value()?.parse()?);
                     return Ok(());
                 }
+                if meta.path.is_ident("counted_by") {
+                    if result.counted_by.is_some() {
+                        return Err(meta.error("duplicate `counted_by` controller"));
+                    }
+                    result.counted_by = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
                 if meta.path.is_ident("at") {
                     if result.position.is_some() {
                         return Err(meta.error("duplicate `at` attribute"));
@@ -1030,4 +1147,25 @@ fn is_raw_bytes(ty: &Type) -> bool {
         (segments.next(), segments.next()),
         (Some(bytes), Some(wire)) if bytes.ident == "Bytes" && wire.ident == "wire"
     )
+}
+fn array_item_type(ty: &Type) -> Option<Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let mut segments = path.path.segments.iter().rev();
+    let array = segments.next()?;
+    let wire = segments.next()?;
+    if array.ident != "Array" || wire.ident != "wire" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &array.arguments else {
+        return None;
+    };
+    if arguments.args.len() != 1 {
+        return None;
+    }
+    match arguments.args.first()? {
+        syn::GenericArgument::Type(item) => Some(item.clone()),
+        _ => None,
+    }
 }

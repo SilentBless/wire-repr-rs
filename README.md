@@ -103,6 +103,21 @@ Foo::builder(output)
 The physical controller has no setter. The choice closure returns one unified type for both
 branches, while the present branch uses typestate to require every dependent field.
 
+## Runtime collections
+
+Controllers remain physical fields while `wire::Array<T>` marks the repeated representation:
+
+```rust
+count: u16,
+#[wire(counted_by = count)]
+items: wire::Array<T>,
+```
+
+The getter retains only the array range and authoritative count. Each `iter()` call replays item
+geometry without allocating an index. Writers stream items through one closure and patch count
+afterward; `item_view` and `item_result` copy exact generated or traversed views without rebuilding
+semantic values.
+
 ## Manual wire types
 
 Manual representations implement the same independent read and write capabilities as derived
@@ -208,13 +223,12 @@ deviation instead of treating LLVM instruction counts as performance truth.
 ## Design direction
 
 The implemented surface currently covers fixed scalars and byte arrays, constants, explicit
-logical conversions, validators, multiple generic or manual children, demand geometry, shared
-byte-length controllers, conditional choice groups, and progressive typestate writers.
+logical conversions, validators, nested children, demand geometry, controller dependencies,
+conditional groups, runtime arrays, exact View forwarding, and progressive typestate writers.
 
-The remaining production classes are runtime collections, static selectors with exact unknown
-forwarding, nominal and inline bitfields, physical selections, computed fields, homogeneous
-`views`, and heterogeneous cursors. Collections retain only range and count; untouched nested
-values are not eagerly framed or indexed.
+The remaining production classes are static selectors with exact unknown forwarding, nominal and
+inline bitfields, physical selections, computed fields, homogeneous `views`, and heterogeneous
+cursors.
 
 General recursive schemas and a public traversal capability are deferred until this roadmap is
 complete. Negotiated selector maps, hidden indexes, eager full-collection validation, and a general

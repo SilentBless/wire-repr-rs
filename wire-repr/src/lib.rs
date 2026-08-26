@@ -12,22 +12,28 @@ pub mod wire {
     /// A variable-length raw byte field controlled by `bytes = path` or terminal `rest`.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct Bytes;
+
+    /// A zero-sized runtime array marker controlled by `counted_by = path`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct Array<T>(core::marker::PhantomData<fn() -> T>);
 }
 #[doc(hidden)]
 pub mod __private {
     pub use crate::schema::{
-        ConstantMismatch, Frame, InvalidFrameExtent, IsSet, LayoutError, NeedMore,
-        ScalarBuildConversionError, ScalarConversionError, Set, TrailingBytes, Unset,
-        checked_align, checked_optional_sum,
+        ArrayError, ArrayItem, ArrayView, ConstantMismatch, Frame, InvalidFrameExtent, IsSet,
+        LayoutError, NeedMore, ScalarBuildConversionError, ScalarConversionError, Set,
+        TrailingBytes, Unset, checked_align, checked_optional_sum, frame_array_extent,
     };
     pub use thiserror::Error as ThisError;
 }
 
-pub use output::{ChildWriter, GrowthRequest, Output, OutputError, WriteError, Writer, Written};
+pub use output::{
+    ArrayWriter, ChildWriter, GrowthRequest, Output, OutputError, WriteError, Writer, Written,
+};
+pub use schema::{
+    ArrayError, ArrayItem, ArrayIter, ArrayView, ConstantMismatch, ExactWire, Frame,
+    InvalidFrameExtent, LayoutError, NeedMore, ScalarBuildConversionError, ScalarConversionError,
+    TrailingBytes, WireBuilder, WireView, WireWrite,
+};
 #[doc(inline)]
 pub use wire_repr_macros::{WireBuilder, WireView, validator};
-
-pub use schema::{
-    ConstantMismatch, Frame, InvalidFrameExtent, LayoutError, NeedMore, ScalarBuildConversionError,
-    ScalarConversionError, TrailingBytes, WireBuilder, WireView, WireWrite,
-};

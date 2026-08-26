@@ -63,6 +63,11 @@ pub enum OutputError<E> {
         /// Required exclusive end of the assigned child region.
         limit: usize,
     },
+    /// A streamed array item emitted no bytes and could not advance.
+    NonProgressItem {
+        /// Zero-based item index.
+        index: usize,
+    },
     /// Output length arithmetic overflowed `usize`.
     LengthOverflow,
 }
@@ -101,6 +106,9 @@ impl<E: fmt::Display> fmt::Display for OutputError<E> {
             }
             Self::ChildIncomplete { end, limit } => {
                 write!(formatter, "nested output ended at {end}, expected {limit}")
+            }
+            Self::NonProgressItem { index } => {
+                write!(formatter, "array item {index} emitted zero bytes")
             }
             Self::LengthOverflow => formatter.write_str("output length overflow"),
         }
@@ -480,6 +488,111 @@ impl<O: Output> Writer<O> {
             output: self.output,
             range: self.start..self.cursor,
         }
+    }
+}
+
+/// Progressive writer facade for one counted runtime array.
+pub struct ArrayWriter<'writer, O, T> {
+    writer: &'writer mut Writer<O>,
+    count: usize,
+    marker: core::marker::PhantomData<fn() -> T>,
+}
+
+impl<'writer, O, T> ArrayWriter<'writer, O, T>
+where
+    O: Output,
+{
+    /// Creates an empty array writer at the parent's current cursor.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn new(writer: &'writer mut Writer<O>) -> Self {
+        Self {
+            writer,
+            count: 0,
+            marker: core::marker::PhantomData,
+        }
+    }
+
+    /// Builds and emits one item.
+    pub fn item<Build, Value>(
+        mut self,
+        build: Build,
+    ) -> Result<Self, WriteError<<T as crate::schema::WireWrite<Value>>::Error, O::GrowError>>
+    where
+        T: crate::schema::WireBuilder + crate::schema::WireWrite<Value>,
+        Build: FnOnce(<T as crate::schema::WireBuilder>::Builder) -> Value,
+    {
+        let start = self.writer.position();
+        let mut child = self.writer.child_at(start)?;
+        <T as crate::schema::WireWrite<Value>>::write(
+            build(<T as crate::schema::WireBuilder>::builder()),
+            &mut child,
+        )?;
+        child.finish()?;
+        if self.writer.position() == start {
+            return Err(OutputError::NonProgressItem { index: self.count }.into());
+        }
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or(OutputError::LengthOverflow)?;
+        Ok(self)
+    }
+
+    /// Copies one exact item view without semantic reconstruction.
+    pub fn item_view<Value>(
+        mut self,
+        item: Value,
+    ) -> Result<Self, WriteError<core::convert::Infallible, O::GrowError>>
+    where
+        Value: crate::schema::ExactWire<T>,
+    {
+        let position = self.writer.position();
+        let bytes = item.as_wire_bytes();
+        if bytes.is_empty() {
+            return Err(OutputError::NonProgressItem { index: self.count }.into());
+        }
+        self.writer.write_at(position, bytes)?;
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or(OutputError::LengthOverflow)?;
+        Ok(self)
+    }
+
+    /// Forwards one lazily traversed item and preserves its framing error.
+    pub fn item_result(
+        self,
+        item: Result<
+            crate::schema::ArrayItem<'_, T>,
+            crate::schema::ArrayError<<T as crate::schema::WireView>::Error>,
+        >,
+    ) -> Result<
+        Self,
+        WriteError<crate::schema::ArrayError<<T as crate::schema::WireView>::Error>, O::GrowError>,
+    >
+    where
+        T: crate::schema::WireView,
+    {
+        let item = item.map_err(WriteError::Schema)?;
+        if item.as_bytes().is_empty() {
+            return Err(OutputError::NonProgressItem { index: self.count }.into());
+        }
+        let position = self.writer.position();
+        self.writer.write_at(position, item.as_bytes())?;
+        let mut this = self;
+        this.count = this
+            .count
+            .checked_add(1)
+            .ok_or(OutputError::LengthOverflow)?;
+        Ok(this)
+    }
+
+    /// Returns the emitted item count after the caller closure completes.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        self.count
     }
 }
 

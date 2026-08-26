@@ -2,6 +2,8 @@
 
 #[path = "behavior/builder.rs"]
 mod builder;
+#[path = "behavior/collection.rs"]
+mod collection;
 #[path = "behavior/dependency.rs"]
 mod dependency;
 #[path = "behavior/dependency_hygiene.rs"]

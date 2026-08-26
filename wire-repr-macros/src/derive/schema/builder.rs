@@ -125,6 +125,7 @@ pub(super) struct Slot {
 pub(super) enum SlotKind {
     Value(TokenStream),
     RawBytes,
+    Array(Box<syn::Type>),
     Choice(syn::Ident),
     Nested(Box<syn::Type>),
 }
@@ -135,6 +136,7 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
     for field in &schema.fields {
         if field.kind.constant().is_some()
             || schema.is_length_controller(&field.name)
+            || schema.is_count_controller(&field.name)
             || schema.is_presence_controller(&field.name)
             || field.layout.condition.is_some()
         {
@@ -150,6 +152,7 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
                 SlotKind::Value(quote!(#ty))
             }
             FieldKind::RawBytes(_) => SlotKind::RawBytes,
+            FieldKind::Array(array) => SlotKind::Array(Box::new(array.item.clone())),
             FieldKind::Flag(_) => SlotKind::Choice(field.name.clone()),
             FieldKind::Nested(nested) => SlotKind::Nested(Box::new(nested.ty.clone())),
         };
@@ -413,6 +416,7 @@ fn render_setters(
                 returned_states.push(match &target.kind {
                     SlotKind::Value(ty) => quote!(#runtime::__private::Set<#ty>),
                     SlotKind::RawBytes => quote!(#runtime::__private::Set<#raw_bytes>),
+                    SlotKind::Array(_) => quote!(#runtime::__private::Set<()>),
                     SlotKind::Choice(flag) => {
                         let final_value = choice_final_ident(schema, flag);
                         quote!(#runtime::__private::Set<#final_value>)
@@ -473,6 +477,7 @@ fn render_setters(
                     }
                 });
             }
+            SlotKind::Array(_) => {}
             SlotKind::Choice(flag) => {
                 let start = choice_start_ident(schema, flag);
                 let final_value = choice_final_ident(schema, flag);
@@ -556,6 +561,9 @@ fn render_complete(
                     .push(parse_quote!(#parameter: AsRef<[u8]>));
                 complete_states.push(quote!(#runtime::__private::Set<#parameter>));
             }
+            SlotKind::Array(_) => {
+                complete_states.push(quote!(#runtime::__private::Set<()>));
+            }
             SlotKind::Choice(flag) => {
                 let final_value = choice_final_ident(schema, flag);
                 let choice_trait = choice_trait_ident(schema, flag);
@@ -600,6 +608,7 @@ fn render_complete(
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
+            | FieldKind::Array(_)
             | FieldKind::Flag(_)
             | FieldKind::Nested(_) => None,
         })
@@ -608,7 +617,7 @@ fn render_complete(
         .fields
         .iter()
         .map(|field| {
-            matches!(field.kind, FieldKind::Nested(_)).then(|| {
+            matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_)).then(|| {
                 unique_build_variant(&mut used_error_names, &pascal(&field.name).to_string())
             })
         })
@@ -660,6 +669,8 @@ fn render_complete(
                     let encode = to_bytes_method(scalar.endian);
                     let source = if let Some(constant) = &scalar.constant {
                         quote!(#constant)
+                    } else if schema.is_count_controller(&field.name) {
+                        quote!(0 as #value_ty)
                     } else if schema.is_presence_controller(&field.name) {
                         let flag = schema
                             .flag_fields()
@@ -829,6 +840,7 @@ fn render_complete(
                         writer.write(#build_value.#field_name.0.as_ref())?;
                     }
                 }
+                FieldKind::Array(_) => TokenStream::new(),
                 FieldKind::Flag(_) => TokenStream::new(),
                 FieldKind::Nested(nested) => {
                     let field_name = &field.name;
@@ -1000,7 +1012,12 @@ fn render_complete(
             })
         })
         .collect::<Vec<_>>();
-    let nested_error_parameters = nested_builders
+    let error_fields = schema
+        .fields
+        .iter()
+        .filter(|field| matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_)))
+        .collect::<Vec<_>>();
+    let nested_error_parameters = error_fields
         .iter()
         .enumerate()
         .map(|(index, _)| format_ident!("__WireReprError{index}"))
@@ -1017,7 +1034,7 @@ fn render_complete(
             let field_name = field.name.to_string();
             let message = format!("failed to write nested field `{field_name}`: {{0}}");
             Some(quote! {
-                #[doc = "The nested schema failed writing."]
+                #[doc = "The nested schema or counted array failed writing."]
                 #[error(#message)]
                 #variant(#[source] #parameter),
             })
@@ -1050,10 +1067,10 @@ fn render_complete(
     let has_errors = schema.layout_can_fail()
         || has_shared_length
         || !conversion_error_variants.is_empty()
-        || !nested_builders.is_empty();
+        || !error_fields.is_empty();
     let error_declaration = if !has_errors {
         TokenStream::new()
-    } else if nested_builders.is_empty() {
+    } else if error_fields.is_empty() {
         quote! {
             #[doc = "Typed write failure generated for this schema."]
             #[derive(Debug, #runtime::__private::ThisError)]
@@ -1075,10 +1092,18 @@ fn render_complete(
             }
         }
     };
-    let nested_error_types = nested_builders
-        .iter()
-        .map(|(_, ty, parameter)| quote!(<#ty as #runtime::WireWrite<#parameter>>::Error));
-    let error_type = if nested_builders.is_empty() {
+    let nested_error_types = error_fields.iter().map(|field| match &field.kind {
+        FieldKind::Nested(_) => {
+            let (_, ty, parameter) = nested_builders
+                .iter()
+                .find(|(name, _, _)| *name == field.name)
+                .expect("nested field has one complete builder");
+            quote!(<#ty as #runtime::WireWrite<#parameter>>::Error)
+        }
+        FieldKind::Array(_) => quote!(::core::convert::Infallible),
+        _ => unreachable!("error fields are nested schemas or arrays"),
+    });
+    let error_type = if error_fields.is_empty() {
         if has_errors {
             quote!(#error)
         } else {

@@ -1,0 +1,97 @@
+name = "collection/runtime/compound"
+
+[roles]
+generated = "generated.rs"
+idiomatic = "idiomatic.rs"
+best_latency = "best/latency.rs"
+
+[[cases]]
+name = "decode"
+entry = "decode"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0"
+[[cases.rules]]
+name = "idiomatic latency"
+level = "error"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.35"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.05"
+message = "generated collection decode has safe optimization headroom"
+
+[[cases]]
+name = "build"
+entry = "build"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_allocation_symbols == 0 && generated_artifact_transitive_vtable_references == 0"
+[[cases.rules]]
+name = "idiomatic latency"
+level = "error"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.35"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.05"
+message = "generated collection build has safe optimization headroom"
+
+[[cases]]
+name = "copy"
+entry = "copy"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.35"
+message = "exact collection forwarding has measurable replay overhead"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.05"
+message = "generated exact collection forwarding has safe optimization headroom"

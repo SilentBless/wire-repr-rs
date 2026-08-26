@@ -128,6 +128,8 @@ fn render_setters(
         let build_fn = fresh_type_ident(&impl_generics, "BuildFn");
         let child_builder = fresh_type_ident(&impl_generics, "ChildBuilder");
         let raw_bytes = fresh_type_ident(&impl_generics, "RawBytes");
+        let item_error = fresh_type_ident(&impl_generics, "ItemError");
+        let array_lifetime = super::fresh_lifetime(&impl_generics, "array");
         let mut current_states = Vec::with_capacity(slots.len());
         let mut returned_states = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
@@ -136,6 +138,7 @@ fn render_setters(
                 returned_states.push(match &target.kind {
                     SlotKind::Value(ty) => quote!(#runtime::__private::Set<#ty>),
                     SlotKind::RawBytes => quote!(#runtime::__private::Set<#raw_bytes>),
+                    SlotKind::Array(_) => quote!(#runtime::__private::Set<()>),
                     SlotKind::Choice(flag) => {
                         let final_value = super::builder::choice_final_ident(schema, flag);
                         quote!(#runtime::__private::Set<#final_value>)
@@ -315,6 +318,86 @@ fn render_setters(
                             let bytes = #value.as_ref();
                             #patch
                             self.writer.write_at(#offset_local, bytes)?;
+                            Ok(#assignments)
+                        }
+                    }
+                });
+            }
+            (SlotKind::Array(item), FieldKind::Array(array)) => {
+                let item_error_type = quote!(#item_error);
+                let schema_error = writer_error_type(
+                    schema,
+                    &error_name,
+                    has_conversions,
+                    Some((field, item_error_type)),
+                    runtime,
+                );
+                let variant = nested_names[physical_index]
+                    .as_ref()
+                    .expect("array field has one error variant");
+                let patch = render_count_patch(
+                    schema,
+                    &array.controller,
+                    quote!(count),
+                    &error_name,
+                    runtime,
+                );
+                let array_writer =
+                    private_ident(schema, &format!("{}_array_writer", field.unraw()));
+                let (impl_params, _, impl_where) = impl_generics.split_for_impl();
+                rendered.push(quote! {
+                    impl #impl_params #current_writer #impl_where {
+                        #[doc = concat!("Streams counted array field `", stringify!(#field), "`.")]
+                        #[inline]
+                        #vis fn #field<#build_fn, #item_error>(
+                            mut self,
+                            build: #build_fn,
+                        ) -> Result<
+                            #returned_writer,
+                            #runtime::WriteError<
+                                #schema_error,
+                                <#output as #runtime::Output>::GrowError,
+                            >,
+                        >
+                        where
+                            #item_error: ::core::error::Error + 'static,
+                            #build_fn: for<#array_lifetime> FnOnce(
+                                #runtime::ArrayWriter<#array_lifetime, #output, #item>,
+                            ) -> Result<
+                                #runtime::ArrayWriter<
+                                    #array_lifetime,
+                                    #output,
+                                    #item,
+                                >,
+                                #runtime::WriteError<
+                                    #item_error,
+                                    <#output as #runtime::Output>::GrowError,
+                                >,
+                            >,
+                        {
+                            #pending_constants
+                            #offset_binding
+                            let count = {
+                                let #array_writer =
+                                    #runtime::ArrayWriter::<#output, #item>::new(
+                                        &mut self.writer,
+                                    );
+                                let #array_writer = build(#array_writer).map_err(|error| {
+                                    match error {
+                                        #runtime::WriteError::Schema(error) => {
+                                            #runtime::WriteError::Schema(
+                                                #error_name::#variant(error),
+                                            )
+                                        }
+                                        #runtime::WriteError::Output(error) => {
+                                            #runtime::WriteError::Output(error)
+                                        }
+                                    }
+                                })?;
+                                #array_writer.count()
+                            };
+                            #patch
+                            let value = ();
                             Ok(#assignments)
                         }
                     }
@@ -506,6 +589,9 @@ fn render_finish(
                     .push(parse_quote!(#bytes: AsRef<[u8]>));
                 complete_states.push(quote!(#runtime::__private::Set<#bytes>));
             }
+            SlotKind::Array(_) => {
+                complete_states.push(quote!(#runtime::__private::Set<()>));
+            }
             SlotKind::Choice(flag) => {
                 let final_value = super::builder::choice_final_ident(schema, flag);
                 complete_states.push(quote!(#runtime::__private::Set<#final_value>));
@@ -611,9 +697,10 @@ fn render_finish(
                         self.writer.write_at(#offset_local, &#value)?;
                     }
                 }
-                FieldKind::RawBytes(_) | FieldKind::Flag(_) | FieldKind::Nested(_) => {
-                    unreachable!()
-                }
+                FieldKind::RawBytes(_)
+                | FieldKind::Array(_)
+                | FieldKind::Flag(_)
+                | FieldKind::Nested(_) => unreachable!(),
             })
         });
     let ensure_total = if schema.has_explicit_geometry() {
@@ -677,6 +764,7 @@ fn writer_error_names(schema: &Schema) -> (Vec<Option<syn::Ident>>, Vec<Option<s
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
+            | FieldKind::Array(_)
             | FieldKind::Flag(_)
             | FieldKind::Nested(_) => None,
         })
@@ -685,7 +773,7 @@ fn writer_error_names(schema: &Schema) -> (Vec<Option<syn::Ident>>, Vec<Option<s
         .fields
         .iter()
         .map(|field| {
-            matches!(field.kind, FieldKind::Nested(_))
+            matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_))
                 .then(|| unique_build_variant(&mut used, &pascal(&field.name).to_string()))
         })
         .collect();
@@ -700,7 +788,9 @@ fn writer_error_type(
     _runtime: &TokenStream,
 ) -> TokenStream {
     let child_errors = schema
-        .nested_fields()
+        .fields
+        .iter()
+        .filter(|field| matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_)))
         .map(|field| {
             if target
                 .as_ref()
@@ -731,14 +821,15 @@ fn writer_error_type_from_all(
     _runtime: &TokenStream,
 ) -> TokenStream {
     let errors = schema
-        .nested_fields()
+        .fields
+        .iter()
+        .filter(|field| matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_)))
         .map(|field| {
             child_errors
                 .iter()
                 .find(|(name, _)| *name == field.name)
-                .expect("complete writer has every nested error")
-                .1
-                .clone()
+                .map(|(_, error)| error.clone())
+                .unwrap_or_else(|| quote!(::core::convert::Infallible))
         })
         .collect::<Vec<_>>();
     if errors.is_empty() {
@@ -823,9 +914,10 @@ fn render_pending_constants(
                         self.writer.write_at(#offset, &value)?;
                     }
                 }
-                FieldKind::RawBytes(_) | FieldKind::Flag(_) | FieldKind::Nested(_) => {
-                    unreachable!()
-                }
+                FieldKind::RawBytes(_)
+                | FieldKind::Array(_)
+                | FieldKind::Flag(_)
+                | FieldKind::Nested(_) => unreachable!(),
             })
         });
     quote!(#(#writes)*)
@@ -1009,6 +1101,41 @@ fn render_length_patch(
         }
     }
 }
+fn render_count_patch(
+    schema: &Schema,
+    controller: &syn::Ident,
+    count: TokenStream,
+    error: &syn::Ident,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let controller_field = schema
+        .fields
+        .iter()
+        .find(|field| field.name == *controller)
+        .expect("validated item count controller");
+    let FieldKind::Scalar(scalar) = &controller_field.kind else {
+        unreachable!("validated item count controller is scalar")
+    };
+    let controller_name = controller.unraw().to_string();
+    let controller_offset = builder_offset(&controller_field.offset, runtime);
+    let wire_ty = scalar_type_tokens(scalar.wire_type);
+    let encode = to_bytes_method(scalar.endian);
+    quote! {
+        let controller_offset = #controller_offset.ok_or_else(|| {
+            #runtime::WriteError::Schema(
+                #error::Layout(#runtime::LayoutError { field: #controller_name }),
+            )
+        })?;
+        let controller_value = #wire_ty::try_from(#count).map_err(|_| {
+            #runtime::WriteError::Schema(
+                #error::Layout(#runtime::LayoutError { field: #controller_name }),
+            )
+        })?;
+        self.writer
+            .write_at(controller_offset, &controller_value.#encode())?;
+    }
+}
+
 fn render_presence_patch(
     schema: &Schema,
     flag: &syn::Ident,

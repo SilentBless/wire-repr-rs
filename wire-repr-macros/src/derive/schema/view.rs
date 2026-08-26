@@ -27,6 +27,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let view_lifetime = fresh_schema_lifetime(schema, &bounded, "view");
     let input_field = fresh_field_ident(schema, "input");
     let represented_length_field = private_ident(schema, "represented_length");
+    let view_marker = private_ident(schema, "view_marker");
     let frame_input = private_ident(schema, "frame_input");
     let frame_offset = private_ident(schema, "frame_offset");
     let current_input = private_ident(schema, "current_input");
@@ -38,23 +39,32 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let owned_value = private_ident(schema, "owned_value");
 
     let nested_fields = schema.nested_fields().collect::<Vec<_>>();
+    let error_fields = schema
+        .fields
+        .iter()
+        .filter(|field| matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_)))
+        .collect::<Vec<_>>();
     let descriptor_parameters = (0..nested_fields.len())
         .map(|index| format_ident!("__WireReprState{index}"))
         .collect::<Vec<_>>();
-    let error_parameters = (0..nested_fields.len())
+    let error_parameters = (0..error_fields.len())
         .map(|index| format_ident!("__WireReprError{index}"))
         .collect::<Vec<_>>();
-    let nested_error_types = nested_fields.iter().map(|field| {
-        let FieldKind::Nested(nested) = &field.kind else {
-            unreachable!()
-        };
-        let ty = &nested.ty;
-        quote!(<#ty as #runtime::WireView>::Error)
+    let error_types = error_fields.iter().map(|field| match &field.kind {
+        FieldKind::Nested(nested) => {
+            let ty = &nested.ty;
+            quote!(<#ty as #runtime::WireView>::Error)
+        }
+        FieldKind::Array(array) => {
+            let item = &array.item;
+            quote!(#runtime::ArrayError<<#item as #runtime::WireView>::Error>)
+        }
+        _ => unreachable!("error fields are nested schemas or arrays"),
     });
-    let error_type = if nested_fields.is_empty() {
+    let error_type = if error_fields.is_empty() {
         quote!(#error)
     } else {
-        quote!(#error<#(#nested_error_types),*>)
+        quote!(#error<#(#error_types),*>)
     };
 
     let error_names = error_names(schema);
@@ -103,6 +113,27 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         .filter(|(index, _)| retains_geometry_end(schema, *index))
         .map(|(index, _)| private_ident(schema, &format!("field_{index}_end")))
         .collect::<Vec<_>>();
+    let retained_array_base = schema
+        .array_fields()
+        .next()
+        .map(|_| private_ident(schema, "array_base_offset"));
+    let retained_array_counts = schema
+        .fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let FieldKind::Array(array) = &field.kind else {
+                return None;
+            };
+            Some((
+                private_ident(schema, &format!("array_{index}_count")),
+                private_ident(schema, &format!("controller_{}", array.controller.unraw())),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let descriptor_array_count_fields = retained_array_counts
+        .iter()
+        .map(|(field, _)| quote!(#field: usize,));
     let descriptor_char_fields = retained_char_fields
         .iter()
         .map(|(field, _)| quote!(#field: char,));
@@ -112,6 +143,9 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let descriptor_geometry_fields = retained_starts
         .iter()
         .chain(&retained_ends)
+        .map(|field| quote!(#field: usize,));
+    let descriptor_array_base_field = retained_array_base
+        .iter()
         .map(|field| quote!(#field: usize,));
     let descriptor_nested_fields =
         nested_fields
@@ -132,6 +166,8 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 #(#descriptor_char_fields)*
                 #(#descriptor_flag_fields)*
                 #(#descriptor_geometry_fields)*
+                #(#descriptor_array_base_field)*
+                #(#descriptor_array_count_fields)*
             }
         }
     } else {
@@ -142,6 +178,8 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 #(#descriptor_flag_fields)*
                 #(#descriptor_nested_fields)*
                 #(#descriptor_geometry_fields)*
+                #(#descriptor_array_base_field)*
+                #(#descriptor_array_count_fields)*
             }
         }
     };
@@ -180,6 +218,12 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         .iter()
         .chain(&retained_ends)
         .map(|field| quote!(#field: usize,));
+    let borrowed_array_base_field = retained_array_base
+        .iter()
+        .map(|field| quote!(#field: usize,));
+    let borrowed_array_count_fields = retained_array_counts
+        .iter()
+        .map(|(field, _)| quote!(#field: usize,));
     let borrowed_char_values = retained_char_fields
         .iter()
         .map(|(field, _)| quote!(#field: state.#field,));
@@ -194,6 +238,12 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         .iter()
         .chain(&retained_ends)
         .map(|field| quote!(#field: state.#field,));
+    let borrowed_array_base_value = retained_array_base
+        .iter()
+        .map(|field| quote!(#field: state.#field,));
+    let borrowed_array_count_values = retained_array_counts
+        .iter()
+        .map(|(field, _)| quote!(#field: state.#field,));
     let descriptor_char_values = retained_char_fields
         .iter()
         .map(|(field, value)| quote!(#field: #value,));
@@ -209,12 +259,20 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         .iter()
         .chain(&retained_ends)
         .map(|field| quote!(#field: #field,));
+    let descriptor_array_base_value = retained_array_base
+        .iter()
+        .map(|field| quote!(#field: #frame_offset,));
+    let descriptor_array_count_values = retained_array_counts
+        .iter()
+        .map(|(field, value)| quote!(#field: #value,));
     let descriptor_value = quote! {
         #descriptor {
             #(#descriptor_char_values)*
             #(#descriptor_flag_values)*
             #(#descriptor_nested_values)*
             #(#descriptor_geometry_values)*
+            #(#descriptor_array_base_value)*
+            #(#descriptor_array_count_values)*
         }
     };
 
@@ -244,7 +302,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 let total = view_offset_for_end(schema, last, runtime);
                 quote!(#total.expect("framed fixed schema width"))
             }
-            FieldKind::RawBytes(_) | FieldKind::Flag(_) => {
+            FieldKind::RawBytes(_) | FieldKind::Array(_) | FieldKind::Flag(_) => {
                 unreachable!("dynamic fields use explicit geometry")
             }
         }
@@ -289,6 +347,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #input_field: #backing,
             #represented_length_field: usize,
             descriptor: #descriptor_type,
+            #view_marker: ::core::marker::PhantomData<fn() -> #self_type>,
         }
 
         #[doc(hidden)]
@@ -298,6 +357,9 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #(#borrowed_flag_fields)*
             #(#borrowed_nested_fields)*
             #(#borrowed_geometry_fields)*
+            #(#borrowed_array_base_field)*
+            #(#borrowed_array_count_fields)*
+            #view_marker: ::core::marker::PhantomData<fn() -> #self_type>,
         }
         #[doc = "Exact-source view API generated for this schema."]
         #vis trait #view_trait #impl_generics #where_clause {
@@ -339,6 +401,24 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #(#borrowed_methods)*
         }
 
+        impl #owned_impl #runtime::ExactWire<#self_type>
+            for #owned_view #owned_types #owned_where
+        {
+            #[inline(always)]
+            fn as_wire_bytes(&self) -> &[u8] {
+                <Self as AsRef<[u8]>>::as_ref(self)
+            }
+        }
+
+        impl #borrowed_impl #runtime::ExactWire<#self_type>
+            for #borrowed_view #borrowed_types #borrowed_where
+        {
+            #[inline(always)]
+            fn as_wire_bytes(&self) -> &[u8] {
+                <Self as AsRef<[u8]>>::as_ref(self)
+            }
+        }
+
         // SAFETY: generated framing bounds-checks every retained scalar value and child extent;
         // the descriptor owns no input references and reconstruction slices the same exact span.
         #[allow(unsafe_code)]
@@ -372,6 +452,9 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     #(#borrowed_flag_values)*
                     #(#borrowed_nested_values)*
                     #(#borrowed_geometry_values)*
+                    #(#borrowed_array_base_value)*
+                    #(#borrowed_array_count_values)*
+                    #view_marker: ::core::marker::PhantomData,
                 }
             }
         }
@@ -381,7 +464,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #[inline]
             #vis fn view<#backing: AsRef<[u8]>>(
                 #view_input: #backing,
-            ) -> Result<impl #trait_path, #error_type> {
+            ) -> Result<impl #trait_path + #runtime::ExactWire<Self>, #error_type> {
                 let #current_input = #view_input.as_ref();
                 let #input_length = #current_input.len();
                 let #frame_result = <Self as #runtime::WireView>::frame(#current_input, 0)?;
@@ -397,6 +480,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     #input_field: #view_input,
                     #represented_length_field: #framed_consumed,
                     descriptor: #framed_descriptor,
+                    #view_marker: ::core::marker::PhantomData,
                 };
                 #(#validator_calls)*
                 if #framed_consumed < #input_length {
@@ -412,7 +496,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #[inline]
             #vis fn view_unchecked<#backing: AsRef<[u8]>>(
                 #view_input: #backing,
-            ) -> Result<impl #trait_path, #error_type> {
+            ) -> Result<impl #trait_path + #runtime::ExactWire<Self>, #error_type> {
                 let #current_input = #view_input.as_ref();
                 let #input_length = #current_input.len();
                 let #frame_result = <Self as #runtime::WireView>::frame(#current_input, 0)?;
@@ -434,6 +518,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     #input_field: #view_input,
                     #represented_length_field: #framed_consumed,
                     descriptor: #framed_descriptor,
+                    #view_marker: ::core::marker::PhantomData,
                 })
             }
         }
@@ -451,6 +536,16 @@ fn bounded_generics(schema: &Schema, runtime: &TokenStream) -> Generics {
             .make_where_clause()
             .predicates
             .push(parse_quote!(#ty: #runtime::WireView));
+    }
+    for field in schema.array_fields() {
+        let FieldKind::Array(array) = &field.kind else {
+            unreachable!()
+        };
+        let item = &array.item;
+        generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#item: #runtime::WireView));
     }
     generics
 }
@@ -491,10 +586,11 @@ fn error_names(schema: &Schema) -> ErrorNames {
                 FieldKind::Scalar(_)
                 | FieldKind::Bytes(_)
                 | FieldKind::RawBytes(_)
+                | FieldKind::Array(_)
                 | FieldKind::Flag(_)
                 | FieldKind::Nested(_) => None,
             };
-            let nested = matches!(field.kind, FieldKind::Nested(_))
+            let nested = matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_))
                 .then(|| unique_variant(&mut used, &base));
             let extent = matches!(field.kind, FieldKind::Nested(_))
                 .then(|| unique_variant(&mut used, &format!("{base}Extent")));
@@ -575,9 +671,10 @@ fn render_error(
                         #mismatch(#[source] #runtime::ConstantMismatch<#ty>),
                     });
                 }
-                FieldKind::RawBytes(_) | FieldKind::Flag(_) | FieldKind::Nested(_) => {
-                    unreachable!()
-                }
+                FieldKind::RawBytes(_)
+                | FieldKind::Array(_)
+                | FieldKind::Flag(_)
+                | FieldKind::Nested(_) => unreachable!(),
             }
         }
         if let Some(conversion) = &names.conversion {
@@ -593,7 +690,7 @@ fn render_error(
             nested_index += 1;
             let message = format!("failed to frame nested field `{field_name}`: {{0}}");
             variants.push(quote! {
-                #[doc = "The nested schema failed structural framing."]
+                #[doc = "A nested schema or counted array failed structural framing."]
                 #[error(#message)]
                 #nested(#[source] #parameter),
             });
@@ -846,6 +943,7 @@ fn render_frame_steps(
                         .ok_or(#error::LayoutUnavailable { field: #field_name })?;
                 });
             }
+            FieldKind::Array(_) => unreachable!("explicit geometry uses its own frame renderer"),
             FieldKind::RawBytes(_) => unreachable!("explicit geometry uses its own frame renderer"),
             FieldKind::Flag(_) => unreachable!("explicit geometry uses its own frame renderer"),
         }
@@ -974,6 +1072,7 @@ fn render_explicit_frame_steps(
                     }
                 });
                 let is_controller = schema.is_length_controller(&field.name)
+                    || schema.is_count_controller(&field.name)
                     || schema.fields.iter().any(|candidate| {
                         matches!(
                             &candidate.layout.position,
@@ -1095,6 +1194,37 @@ fn render_explicit_frame_steps(
                     })?;
                 });
             }
+            FieldKind::Array(array) => {
+                let item = &array.item;
+                let controller =
+                    private_ident(schema, &format!("controller_{}", array.controller.unraw()));
+                let variant = names.nested.as_ref().expect("array error variant");
+                if index + 1 == schema.fields.len() {
+                    steps.push(quote! {
+                        let #end = #frame_input.len();
+                    });
+                } else {
+                    steps.push(quote! {
+                        let available = #frame_input.get(#start..).ok_or_else(|| {
+                            #error::#variant(#runtime::ArrayError::NeedMore(
+                                #runtime::NeedMore {
+                                    offset: #input_end,
+                                    additional_at_least: #start
+                                        .saturating_sub(#frame_input.len()),
+                                },
+                            ))
+                        })?;
+                        let consumed = #runtime::__private::frame_array_extent::<#item>(
+                            available,
+                            #controller,
+                            #absolute,
+                        )
+                        .map_err(#error::#variant)?;
+                        let #end = #start.checked_add(consumed)
+                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                    });
+                }
+            }
             FieldKind::Nested(nested) => {
                 let ty = &nested.ty;
                 let shortage = &names.shortage;
@@ -1212,6 +1342,16 @@ fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStre
                         fn #name(&self) -> &[u8];
                     }
                 }
+                FieldKind::Array(array) => {
+                    let item = &array.item;
+                    let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
+                    quote! {
+                        #[doc = concat!("Returns counted array field `", stringify!(#name), "`.")]
+                        fn #name<#field_lifetime>(
+                            &#field_lifetime self,
+                        ) -> #runtime::ArrayView<#field_lifetime, #item>;
+                    }
+                }
                 FieldKind::Flag(_) => {
                     quote! {
                         #[doc = concat!("Returns logical presence flag `", stringify!(#name), "`.")]
@@ -1251,8 +1391,10 @@ fn retains_geometry_end(schema: &Schema, index: usize) -> bool {
     if matches!(field.kind, FieldKind::Flag(_)) {
         return false;
     }
-    matches!(field.kind, FieldKind::RawBytes(_) | FieldKind::Nested(_))
-        || field.layout.condition.is_some()
+    matches!(
+        field.kind,
+        FieldKind::RawBytes(_) | FieldKind::Array(_) | FieldKind::Nested(_)
+    ) || field.layout.condition.is_some()
         || field.layout.pad_before.is_some()
         || field.layout.align_before.is_some()
         || field.layout.position.is_some()
@@ -1329,7 +1471,9 @@ fn geometry_end(
                 )
             }
         }
-        FieldKind::RawBytes(_) => unreachable!("raw byte end is retained"),
+        FieldKind::RawBytes(_) | FieldKind::Array(_) => {
+            unreachable!("dynamic field end is retained")
+        }
     }
 }
 
@@ -1448,6 +1592,32 @@ fn render_view_methods(schema: &Schema, borrowed: bool, runtime: &TokenStream) -
                         }
                     }
                 }
+                FieldKind::Array(array) => {
+                    let item = &array.item;
+                    let count_field = private_ident(schema, &format!("array_{index}_count"));
+                    let base_field = private_ident(schema, "array_base_offset");
+                    let base = if borrowed {
+                        quote!(self.#base_field)
+                    } else {
+                        quote!(self.descriptor.#base_field)
+                    };
+                    let count = if borrowed {
+                        quote!(self.#count_field)
+                    } else {
+                        quote!(self.descriptor.#count_field)
+                    };
+                    quote! {
+                        #[inline(always)]
+                        fn #name(&self) -> #runtime::ArrayView<'_, #item> {
+                            let count = #count;
+                            #runtime::ArrayView::new(
+                                &self.as_bytes()[#dynamic_start..#dynamic_end],
+                                count,
+                                #base + #dynamic_start,
+                            )
+                        }
+                    }
+                }
                 FieldKind::Flag(_) => {
                     let value = if borrowed {
                         quote!(self.#name)
@@ -1534,7 +1704,10 @@ fn view_offset_for_end(
             let len = &bytes.len;
             quote!(#len)
         }
-        FieldKind::RawBytes(_) | FieldKind::Flag(_) | FieldKind::Nested(_) => unreachable!(),
+        FieldKind::RawBytes(_)
+        | FieldKind::Array(_)
+        | FieldKind::Flag(_)
+        | FieldKind::Nested(_) => unreachable!(),
     };
     quote!(#offset.and_then(|offset| offset.checked_add(#width)))
 }

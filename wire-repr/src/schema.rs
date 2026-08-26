@@ -203,6 +203,266 @@ pub struct InvalidFrameExtent {
     pub available: usize,
 }
 
+/// Lazy failure while traversing a counted runtime array.
+#[derive(Debug, thiserror::Error)]
+pub enum ArrayError<E> {
+    /// The available input ended before the array's proven extent.
+    #[error("{0}")]
+    NeedMore(#[source] NeedMore),
+    /// One item failed its own structural framing.
+    #[error("array item {index} failed: {source}")]
+    Item {
+        /// Zero-based item index.
+        index: usize,
+        /// Concrete item framing error.
+        #[source]
+        source: E,
+    },
+    /// An item reported an extent outside its available suffix.
+    #[error("array item {index} consumed {consumed} bytes from {available} available")]
+    InvalidExtent {
+        /// Zero-based item index.
+        index: usize,
+        /// Reported item length.
+        consumed: usize,
+        /// Available suffix length.
+        available: usize,
+    },
+    /// A variable item did not advance the collection cursor.
+    #[error("array item {index} consumed zero bytes at absolute offset {offset}")]
+    NonProgress {
+        /// Zero-based item index.
+        index: usize,
+        /// Absolute item start offset.
+        offset: usize,
+    },
+    /// The authoritative count left bytes inside the declared array range.
+    #[error("{trailing} trailing array bytes at absolute offset {offset}")]
+    Trailing {
+        /// Absolute offset of the first trailing byte.
+        offset: usize,
+        /// Remaining bytes.
+        trailing: usize,
+    },
+}
+/// Exact represented bytes known to belong to schema `T`.
+pub trait ExactWire<T> {
+    /// Returns the complete represented byte span.
+    fn as_wire_bytes(&self) -> &[u8];
+}
+
+/// One exact counted-array item retaining its own framing state.
+pub struct ArrayItem<'input, T: WireView> {
+    input: &'input [u8],
+    state: T::State,
+}
+
+impl<'input, T: WireView> ArrayItem<'input, T> {
+    /// Returns this item's exact represented bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.input
+    }
+
+    /// Reconstructs the item's ordinary borrowed generated view.
+    #[must_use]
+    #[allow(unsafe_code)]
+    pub fn view(&self) -> T::View<'_> {
+        // SAFETY: `state` was produced by framing this exact `input` span below.
+        unsafe { T::from_validated_parts(self.input, &self.state) }
+    }
+}
+
+impl<'input, T: WireView> ExactWire<T> for ArrayItem<'input, T> {
+    fn as_wire_bytes(&self) -> &[u8] {
+        self.input
+    }
+}
+
+/// Replayable facade over one counted array's exact available range.
+pub struct ArrayView<'input, T: WireView> {
+    input: &'input [u8],
+    count: usize,
+    offset: usize,
+    marker: core::marker::PhantomData<fn() -> T>,
+}
+
+impl<'input, T: WireView> ArrayView<'input, T> {
+    /// Creates a facade from geometry already proven by a generated parent.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(input: &'input [u8], count: usize, offset: usize) -> Self {
+        Self {
+            input,
+            count,
+            offset,
+            marker: core::marker::PhantomData,
+        }
+    }
+
+    /// Returns the authoritative stored item count.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Reports whether the authoritative count is zero.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Starts a fresh forward traversal from the first item.
+    #[must_use]
+    pub const fn iter(&self) -> ArrayIter<'input, T> {
+        ArrayIter {
+            input: self.input,
+            count: self.count,
+            offset: self.offset,
+            index: 0,
+            cursor: 0,
+            trailing_reported: false,
+            failed: false,
+            marker: core::marker::PhantomData,
+        }
+    }
+}
+
+/// Forward iterator produced by [`ArrayView::iter`].
+pub struct ArrayIter<'input, T: WireView> {
+    input: &'input [u8],
+    count: usize,
+    offset: usize,
+    index: usize,
+    cursor: usize,
+    trailing_reported: bool,
+    failed: bool,
+    marker: core::marker::PhantomData<fn() -> T>,
+}
+
+impl<'input, T: WireView> Iterator for ArrayIter<'input, T> {
+    type Item = Result<ArrayItem<'input, T>, ArrayError<T::Error>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        if self.index == self.count {
+            if self.cursor != self.input.len() && !self.trailing_reported {
+                self.trailing_reported = true;
+                return Some(Err(ArrayError::Trailing {
+                    offset: self.offset.saturating_add(self.cursor),
+                    trailing: self.input.len() - self.cursor,
+                }));
+            }
+            return None;
+        }
+        let available = &self.input[self.cursor..];
+        let absolute = match self.offset.checked_add(self.cursor) {
+            Some(absolute) => absolute,
+            None => {
+                self.failed = true;
+                return Some(Err(ArrayError::InvalidExtent {
+                    index: self.index,
+                    consumed: usize::MAX,
+                    available: available.len(),
+                }));
+            }
+        };
+        let frame = match T::frame(available, absolute) {
+            Ok(frame) => frame,
+            Err(source) => {
+                let index = self.index;
+                self.failed = true;
+                self.index = self.count;
+                return Some(Err(ArrayError::Item { index, source }));
+            }
+        };
+        let (state, consumed) = frame.into_parts();
+        if consumed == 0 {
+            let index = self.index;
+            self.failed = true;
+            self.index = self.count;
+            return Some(Err(ArrayError::NonProgress {
+                index,
+                offset: absolute,
+            }));
+        }
+        if consumed > available.len() {
+            let index = self.index;
+            self.failed = true;
+            self.index = self.count;
+            return Some(Err(ArrayError::InvalidExtent {
+                index,
+                consumed,
+                available: available.len(),
+            }));
+        }
+        let start = self.cursor;
+        self.cursor += consumed;
+        self.index += 1;
+        Some(Ok(ArrayItem {
+            input: &self.input[start..self.cursor],
+            state,
+        }))
+    }
+}
+
+/// Computes the exact extent needed to reach a field after a counted array.
+#[doc(hidden)]
+pub fn frame_array_extent<T: WireView>(
+    input: &[u8],
+    count: usize,
+    offset: usize,
+) -> Result<usize, ArrayError<T::Error>> {
+    if let Some(width) = T::FIXED_SIZE {
+        if width == 0 && count != 0 {
+            return Err(ArrayError::NonProgress { index: 0, offset });
+        }
+        let consumed = width.checked_mul(count).ok_or(ArrayError::InvalidExtent {
+            index: count,
+            consumed: usize::MAX,
+            available: input.len(),
+        })?;
+        if consumed > input.len() {
+            return Err(ArrayError::NeedMore(NeedMore {
+                offset: offset.saturating_add(input.len()),
+                additional_at_least: consumed - input.len(),
+            }));
+        }
+        return Ok(consumed);
+    }
+    let mut cursor = 0usize;
+    for index in 0..count {
+        let available = &input[cursor..];
+        let absolute = offset
+            .checked_add(cursor)
+            .ok_or(ArrayError::InvalidExtent {
+                index,
+                consumed: usize::MAX,
+                available: available.len(),
+            })?;
+        let frame =
+            T::frame(available, absolute).map_err(|source| ArrayError::Item { index, source })?;
+        let (_, consumed) = frame.into_parts();
+        if consumed == 0 {
+            return Err(ArrayError::NonProgress {
+                index,
+                offset: absolute,
+            });
+        }
+        if consumed > available.len() {
+            return Err(ArrayError::InvalidExtent {
+                index,
+                consumed,
+                available: available.len(),
+            });
+        }
+        cursor += consumed;
+    }
+    Ok(cursor)
+}
+
 /// Empty typestate slot used by generated builders.
 #[doc(hidden)]
 pub struct Unset;
