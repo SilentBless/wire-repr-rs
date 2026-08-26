@@ -115,8 +115,8 @@ items: wire::Array<T>,
 
 The getter retains only the array range and authoritative count. Each `iter()` call replays item
 geometry without allocating an index. Writers stream items through one closure and patch count
-afterward; `item_view` and `item_result` copy exact generated or traversed views without rebuilding
-semantic values.
+afterward. `item_view` and `item_result` copy individual exact views; `copy_from(source.items())`
+forwards one validated array range without semantic reconstruction or per-item writes.
 
 ## Static enums and bitfields
 

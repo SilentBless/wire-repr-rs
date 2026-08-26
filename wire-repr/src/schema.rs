@@ -265,6 +265,7 @@ pub enum ArrayError<E> {
         trailing: usize,
     },
 }
+
 /// Exact represented bytes known to belong to schema `T`.
 pub trait ExactWire<T> {
     /// Returns the complete represented byte span.
@@ -299,23 +300,47 @@ impl<'input, T: WireView> ExactWire<T> for ArrayItem<'input, T> {
     }
 }
 
-/// Replayable facade over one counted array's exact available range.
+/// Replayable facade over one counted array's available range.
 pub struct ArrayView<'input, T: WireView> {
     input: &'input [u8],
     count: usize,
     offset: usize,
+    validated_extent: bool,
     marker: core::marker::PhantomData<fn() -> T>,
 }
 
 impl<'input, T: WireView> ArrayView<'input, T> {
-    /// Creates a facade from geometry already proven by a generated parent.
+    /// Creates a terminal facade whose item geometry remains deferred.
     #[doc(hidden)]
     #[must_use]
-    pub const fn new(input: &'input [u8], count: usize, offset: usize) -> Self {
+    pub const fn terminal(input: &'input [u8], count: usize, offset: usize) -> Self {
         Self {
             input,
             count,
             offset,
+            validated_extent: false,
+            marker: core::marker::PhantomData,
+        }
+    }
+    /// Creates a facade whose complete outer geometry was proven by its generated parent.
+    ///
+    /// # Safety
+    /// For variable-width `T`, every item must have framed successfully and consumed this complete
+    /// span. For fixed-width `T`, `input.len()` must equal `count * T::FIXED_SIZE`; item validation
+    /// may remain deferred.
+    #[doc(hidden)]
+    #[must_use]
+    #[allow(unsafe_code)]
+    pub const unsafe fn from_validated_parts(
+        input: &'input [u8],
+        count: usize,
+        offset: usize,
+    ) -> Self {
+        Self {
+            input,
+            count,
+            offset,
+            validated_extent: true,
             marker: core::marker::PhantomData,
         }
     }
@@ -341,10 +366,30 @@ impl<'input, T: WireView> ArrayView<'input, T> {
             offset: self.offset,
             index: 0,
             cursor: 0,
-            trailing_reported: false,
             failed: false,
             marker: core::marker::PhantomData,
         }
+    }
+    #[inline]
+    pub(crate) fn exact_bytes(&self) -> Result<&'input [u8], ArrayError<T::Error>> {
+        if !self.validated_extent {
+            let consumed = frame_array_extent::<T>(self.input, self.count, self.offset)?;
+            if consumed != self.input.len() {
+                return Err(ArrayError::Trailing {
+                    offset: self.offset.saturating_add(consumed),
+                    trailing: self.input.len() - consumed,
+                });
+            }
+            if T::FIXED_SIZE.is_none() {
+                return Ok(self.input);
+            }
+        } else if T::FIXED_SIZE.is_none() {
+            return Ok(self.input);
+        }
+
+        let consumed = frame_array_items::<T>(self.input, self.count, self.offset)?;
+        debug_assert_eq!(consumed, self.input.len());
+        Ok(self.input)
     }
 }
 
@@ -355,7 +400,6 @@ pub struct ArrayIter<'input, T: WireView> {
     offset: usize,
     index: usize,
     cursor: usize,
-    trailing_reported: bool,
     failed: bool,
     marker: core::marker::PhantomData<fn() -> T>,
 }
@@ -368,8 +412,8 @@ impl<'input, T: WireView> Iterator for ArrayIter<'input, T> {
             return None;
         }
         if self.index == self.count {
-            if self.cursor != self.input.len() && !self.trailing_reported {
-                self.trailing_reported = true;
+            if self.cursor != self.input.len() {
+                self.failed = true;
                 return Some(Err(ArrayError::Trailing {
                     offset: self.offset.saturating_add(self.cursor),
                     trailing: self.input.len() - self.cursor,
@@ -389,12 +433,15 @@ impl<'input, T: WireView> Iterator for ArrayIter<'input, T> {
                 }));
             }
         };
-        let frame = match T::frame(available, absolute) {
+        let frame_input = match T::FIXED_SIZE {
+            Some(width) if width != 0 => available.get(..width).unwrap_or(available),
+            _ => available,
+        };
+        let frame = match T::frame(frame_input, absolute) {
             Ok(frame) => frame,
             Err(source) => {
                 let index = self.index;
                 self.failed = true;
-                self.index = self.count;
                 return Some(Err(ArrayError::Item { index, source }));
             }
         };
@@ -402,16 +449,15 @@ impl<'input, T: WireView> Iterator for ArrayIter<'input, T> {
         if consumed == 0 {
             let index = self.index;
             self.failed = true;
-            self.index = self.count;
             return Some(Err(ArrayError::NonProgress {
                 index,
                 offset: absolute,
             }));
         }
-        if consumed > available.len() {
+        let expected = T::FIXED_SIZE.unwrap_or(consumed);
+        if consumed != expected || consumed > available.len() {
             let index = self.index;
             self.failed = true;
-            self.index = self.count;
             return Some(Err(ArrayError::InvalidExtent {
                 index,
                 consumed,
@@ -452,6 +498,14 @@ pub fn frame_array_extent<T: WireView>(
         }
         return Ok(consumed);
     }
+    frame_array_items::<T>(input, count, offset)
+}
+
+fn frame_array_items<T: WireView>(
+    input: &[u8],
+    count: usize,
+    offset: usize,
+) -> Result<usize, ArrayError<T::Error>> {
     let mut cursor = 0usize;
     for index in 0..count {
         let available = &input[cursor..];

@@ -28,7 +28,7 @@ assert = "generated_artifact_indirect_calls == 0"
 [[cases.rules]]
 name = "idiomatic latency"
 level = "error"
-assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.35"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.10"
 [[cases.rules]]
 name = "best safe attention"
 level = "attention"
@@ -58,7 +58,7 @@ assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifac
 [[cases.rules]]
 name = "idiomatic latency"
 level = "error"
-assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.35"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.10"
 [[cases.rules]]
 name = "best safe attention"
 level = "attention"
@@ -86,12 +86,24 @@ name = "artifact invariants"
 level = "error"
 assert = "generated_artifact_indirect_calls == 0"
 [[cases.rules]]
-name = "idiomatic latency attention"
-level = "attention"
-assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.35"
-message = "exact collection forwarding has measurable replay overhead"
+name = "idiomatic latency"
+level = "error"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.10"
 [[cases.rules]]
 name = "best safe attention"
 level = "attention"
 assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.05"
 message = "generated exact collection forwarding has safe optimization headroom"
+
+[[cases]]
+name = "domain"
+entry = "domain"
+seeds = [0, 1, 2, 3, 4, 5, 6, 7]
+[cases.runtime]
+samples = 3
+target_ms = 1
+warmup = 10
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"

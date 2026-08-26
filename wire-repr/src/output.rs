@@ -397,6 +397,7 @@ impl<O: Output> Writer<O> {
     }
 
     /// Writes bytes at an absolute offset and extends the represented range when needed.
+    #[inline]
     pub fn write_at(
         &mut self,
         offset: usize,
@@ -434,6 +435,7 @@ impl<O: Output> Writer<O> {
     }
 
     /// Requests a writable span, allowing generated code to provide a larger growth hint.
+    #[inline]
     pub fn ensure(
         &mut self,
         minimum_len: usize,
@@ -593,6 +595,32 @@ where
             .checked_add(1)
             .ok_or(OutputError::LengthOverflow)?;
         Ok(this)
+    }
+
+    /// Copies one validated array range and preserves its authoritative item count.
+    #[inline]
+    pub fn copy_from(
+        mut self,
+        source: crate::schema::ArrayView<'_, T>,
+    ) -> Result<
+        Self,
+        WriteError<crate::schema::ArrayError<<T as crate::schema::WireView>::Error>, O::GrowError>,
+    >
+    where
+        T: crate::schema::WireView,
+    {
+        let count = self
+            .count
+            .checked_add(source.len())
+            .ok_or(OutputError::LengthOverflow)?;
+        let bytes = source.exact_bytes().map_err(WriteError::Schema)?;
+        if !source.is_empty() && bytes.is_empty() {
+            return Err(OutputError::NonProgressItem { index: self.count }.into());
+        }
+        let position = self.writer.position();
+        self.writer.write_at(position, bytes)?;
+        self.count = count;
+        Ok(self)
     }
 
     /// Returns the emitted item count after the caller closure completes.

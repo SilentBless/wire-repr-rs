@@ -1432,6 +1432,15 @@ fn render_explicit_frame_steps(
                 let variant = names.nested.as_ref().expect("array error variant");
                 if index + 1 == schema.fields.len() {
                     steps.push(quote! {
+                        #frame_input.get(#start..).ok_or_else(|| {
+                            #error::#variant(#runtime::ArrayError::NeedMore(
+                                #runtime::NeedMore {
+                                    offset: #input_end,
+                                    additional_at_least: #start
+                                        .saturating_sub(#frame_input.len()),
+                                },
+                            ))
+                        })?;
                         let #end = #frame_input.len();
                     });
                 } else {
@@ -1811,15 +1820,30 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                     let base_field = private_ident(schema, "array_base_offset");
                     let base = quote!(self.descriptor.#base_field);
                     let count = quote!(self.descriptor.#count_field);
+                    let constructor = if index + 1 == schema.fields.len() {
+                        quote! {
+                            #runtime::ArrayView::terminal(input, count, #base + #dynamic_start)
+                        }
+                    } else {
+                        quote! {
+                            // SAFETY: parent framing either framed every variable-width item or
+                            // proved the complete fixed-width span from `count * FIXED_SIZE`.
+                            unsafe {
+                                #runtime::ArrayView::from_validated_parts(
+                                    input,
+                                    count,
+                                    #base + #dynamic_start,
+                                )
+                            }
+                        }
+                    };
                     quote! {
                         #[inline(always)]
+                        #[allow(unsafe_code)]
                         fn #name(&self) -> #runtime::ArrayView<'_, #item> {
                             let count = #count;
-                            #runtime::ArrayView::new(
-                                &self.as_bytes()[#dynamic_start..#dynamic_end],
-                                count,
-                                #base + #dynamic_start,
-                            )
+                            let input = &self.as_bytes()[#dynamic_start..#dynamic_end];
+                            #constructor
                         }
                     }
                 }

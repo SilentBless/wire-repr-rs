@@ -298,9 +298,9 @@ packet.items(|mut items| {
 ```
 
 Generated views implement the same item write capability by copying their exact represented bytes.
-A caller may therefore stream an array facade from one view into another writer or retain views in
-caller-owned storage before writing. No semantic reconstruction, per-item plan, or hidden
-allocation is required.
+`items.copy_from(source.items())` forwards a parent-validated array as one range and patches its
+authoritative count; a terminal array validates deferred item geometry once before copying. No
+semantic reconstruction, per-item plan, hidden allocation, or per-item output write is required.
 
 Errors are reported when discovered. Output may contain a partial unpublished representation;
 wire-repr does not clear, restore, or roll back bytes. `finish()` returns `Written<O>` with the
@@ -387,7 +387,7 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fourteen discovered zones and thirty-four cases: fixed scalars and
+The current mandatory corpus has fourteen discovered zones and thirty-five cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, controller and
 conditional dependencies, runtime collection decode/build/copy, static enum decode/build/copy,

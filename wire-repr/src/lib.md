@@ -121,6 +121,7 @@ write conversions are checked.
 - `flag` and `depends_on` generate one present/absent choice closure for coherent groups.
 - `wire::Array<T>` exposes replayable range-and-count facades without retaining item indexes.
 - Streaming array writers patch count and accept exact generated or traversed item views.
+- Exact array forwarding copies one validated collection range and patches its authoritative count.
 - Static enums expose borrowed exhaustive variants and preserve exact unknown bodies.
 - Nominal and inline bitfields use checked logical ranges while fresh writers zero undeclared bits.
 - Root-relative typed selections expose merged chunks and physical-order byte iteration.

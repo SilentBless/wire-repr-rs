@@ -11,6 +11,13 @@ struct Bar {
 }
 
 #[derive(WireView, WireBuilder)]
+struct ConstantBar {
+    #[wire(constant = 1)]
+    tag: u8,
+    value: u8,
+}
+
+#[derive(WireView, WireBuilder)]
 struct Foo<T> {
     count: u8,
     #[wire(counted_by = count)]
@@ -55,6 +62,18 @@ fn streaming_writer_patches_count_and_writes_each_item_progressively() -> TestRe
 }
 
 #[test]
+fn exact_array_forwarding_copies_one_validated_range_and_patches_count() -> TestResult {
+    let source = Foo::<Bar>::view([2, 0x11, 0x22, 0x33, 0x44, 9])?;
+    let mut output = [0u8; 6];
+    Foo::<Bar>::builder(&mut output[..])
+        .items(|items| items.copy_from(source.items()))?
+        .tail(7)?
+        .finish()?;
+    assert_eq!(output, [2, 0x11, 0x22, 0x33, 0x44, 7]);
+    Ok(())
+}
+
+#[test]
 fn unrepresentable_streamed_count_returns_a_typed_controller_error() {
     let mut output = [0u8; 514];
     let writer = Foo::<Bar>::builder(&mut output[..]);
@@ -88,6 +107,13 @@ struct Terminal<T> {
     items: wire_repr::wire::Array<T>,
 }
 
+#[derive(WireView)]
+struct PlacedTerminal<T> {
+    count: u8,
+    #[wire(counted_by = count, at = 10)]
+    items: wire_repr::wire::Array<T>,
+}
+
 #[test]
 fn terminal_array_iterator_is_fused_after_item_failure() -> TestResult {
     let view = Terminal::<Variable>::view([2, 1, 7, 1])?;
@@ -99,6 +125,94 @@ fn terminal_array_iterator_is_fused_after_item_failure() -> TestResult {
     ));
     assert!(iter.next().is_none());
     Ok(())
+}
+
+#[test]
+fn terminal_array_forwarding_validates_deferred_item_geometry_before_copying() -> TestResult {
+    let source = Terminal::<Variable>::view([2, 1, 7, 1])?;
+    let mut output = [0u8; 8];
+    let error = match Foo::<Variable>::builder(&mut output[..])
+        .items(|items| items.copy_from(source.items()))
+    {
+        Ok(_) => panic!("malformed terminal array unexpectedly copied"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(FooWriteError::Items(wire_repr::ArrayError::Item {
+            index: 1,
+            ..
+        }))
+    ));
+    Ok(())
+}
+
+#[test]
+fn valid_terminal_array_forwards_exact_items_count_and_new_tail() -> TestResult {
+    let source = Terminal::<Variable>::view([2, 1, 7, 2, 8, 9])?;
+    let mut output = [0u8; 7];
+    Foo::<Variable>::builder(&mut output[..])
+        .items(|items| items.copy_from(source.items()))?
+        .tail(5)?
+        .finish()?;
+    assert_eq!(output, [2, 1, 7, 2, 8, 9, 5]);
+    Ok(())
+}
+
+#[test]
+fn fixed_array_forwarding_revalidates_item_constants_before_copying() -> TestResult {
+    let source = Terminal::<ConstantBar>::view([1, 2, 0])?;
+    let mut output = [0u8; 4];
+    let error = match Foo::<ConstantBar>::builder(&mut output[..])
+        .items(|items| items.copy_from(source.items()))
+    {
+        Ok(_) => panic!("invalid fixed item unexpectedly copied"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(FooWriteError::Items(wire_repr::ArrayError::Item {
+            index: 0,
+            ..
+        }))
+    ));
+    Ok(())
+}
+
+#[test]
+fn terminal_fixed_array_forwarding_preserves_exact_shortage_precedence() -> TestResult {
+    let source = Terminal::<Bar>::view([2, 0x11, 0x22])?;
+    let mut output = [0u8; 6];
+    let error =
+        match Foo::<Bar>::builder(&mut output[..]).items(|items| items.copy_from(source.items())) {
+            Ok(_) => panic!("truncated fixed array unexpectedly copied"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(FooWriteError::Items(wire_repr::ArrayError::NeedMore(
+            wire_repr::NeedMore {
+                additional_at_least: 2,
+                ..
+            }
+        )))
+    ));
+    Ok(())
+}
+
+#[test]
+fn terminal_array_placement_beyond_input_returns_shortage_before_getter() {
+    let error = match PlacedTerminal::<Bar>::view([0]) {
+        Ok(_) => panic!("out-of-input terminal array unexpectedly framed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        PlacedTerminalViewError::Items(wire_repr::ArrayError::NeedMore(wire_repr::NeedMore {
+            offset: 1,
+            additional_at_least: 9,
+        }))
+    ));
 }
 
 #[test]
