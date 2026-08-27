@@ -25,9 +25,11 @@ pub mod wire {
 #[doc(hidden)]
 pub mod __private {
     pub use crate::recursive::{
-        FlattenRecursiveError, RecursiveArrayView, RecursiveBody, RecursiveDepth, RecursiveError,
-        RecursiveFrame, RecursiveGeometry, RecursiveGeometryBuilder, RecursiveMeasure,
-        RecursiveSlot, RecursiveStep, flatten_recursive_array_error, frame_recursive_array_extent,
+        FlattenRecursiveError, RecursiveArrayView, RecursiveBody, RecursiveCursor, RecursiveDepth,
+        RecursiveError, RecursiveFrame, RecursiveGeometry, RecursiveGeometryBuilder,
+        RecursiveMeasure, RecursiveSlot, RecursiveStep, RecursiveWrite, RecursiveWriteBody,
+        RecursiveWriteError, RecursiveWriteSlot, flatten_recursive_array_error,
+        frame_recursive_array_extent,
     };
     pub use crate::schema::{
         ArrayError, ArrayItem, ArrayView, ConstantMismatch, FieldExpr, FieldPath, FieldPrefix,

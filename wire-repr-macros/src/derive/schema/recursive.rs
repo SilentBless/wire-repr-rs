@@ -112,6 +112,28 @@ pub(super) fn root_slot_marker(
     root: &Ident,
     runtime: &TokenStream,
 ) -> syn::Result<Option<Type>> {
+    let Some((normalized, selected)) = root_slot(body, root)? else {
+        return Ok(None);
+    };
+    Ok(Some(syn::parse_quote!(
+        <#normalized as #runtime::__private::RecursiveSlot<#selected>>::Marker
+    )))
+}
+
+pub(super) fn root_write_slot_marker(
+    body: &Type,
+    root: &Ident,
+    runtime: &TokenStream,
+) -> syn::Result<Option<Type>> {
+    let Some((normalized, selected)) = root_slot(body, root)? else {
+        return Ok(None);
+    };
+    Ok(Some(syn::parse_quote!(
+        <#normalized as #runtime::__private::RecursiveWriteSlot<#selected>>::Marker
+    )))
+}
+
+fn root_slot(body: &Type, root: &Ident) -> syn::Result<Option<(Type, usize)>> {
     if !contains_root_generic_argument(body, root) {
         return Ok(None);
     }
@@ -167,11 +189,7 @@ pub(super) fn root_slot_marker(
             "recursive enum body must pass the root as a direct generic argument",
         ));
     };
-
-    let normalized = normalize_root_self(body, root);
-    Ok(Some(syn::parse_quote!(
-        <#normalized as #runtime::__private::RecursiveSlot<#selected>>::Marker
-    )))
+    Ok(Some((normalize_root_self(body, root), selected)))
 }
 
 pub(super) fn contains_root_generic_argument(body: &Type, root: &Ident) -> bool {

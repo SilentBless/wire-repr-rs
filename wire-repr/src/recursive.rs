@@ -233,6 +233,175 @@ pub trait RecursiveBody<C, Slot>: Sized {
     where
         C: RecursiveFrame<Slot>;
 }
+/// Finite schema failure crossing a progressive recursive-write boundary.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum RecursiveWriteError {
+    /// An ordinary leaf or nested recursive body failed.
+    #[error("recursive child `{field}` failed")]
+    Child {
+        /// Variant or field that owned the failing child.
+        field: &'static str,
+    },
+    /// A streamed recursive collection exceeded the recursive count limit or stored representation.
+    #[error(
+        "recursive collection `{field}` count {count} exceeds its recursive limit or controller"
+    )]
+    CountOverflow {
+        /// Counted collection field.
+        field: &'static str,
+        /// Emitted item count.
+        count: usize,
+    },
+}
+
+/// Associates a generic recursive body with its generated progressive-write slot marker.
+#[doc(hidden)]
+pub trait RecursiveWriteSlot<const INDEX: usize> {
+    /// Marker statically binding a body grammar to one recursive root callback.
+    type Marker;
+}
+
+/// Restricted progressive cursor accepted by generated recursive writers.
+#[doc(hidden)]
+pub trait RecursiveCursor {
+    /// Caller-controlled output growth failure.
+    type GrowError: core::error::Error + 'static;
+
+    /// Current absolute output offset.
+    fn position(&self) -> usize;
+
+    /// Writes bytes sequentially.
+    fn write(&mut self, bytes: &[u8]) -> Result<(), crate::OutputError<Self::GrowError>>;
+
+    /// Patches bytes already emitted by this cursor.
+    fn patch_at(
+        &mut self,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), crate::OutputError<Self::GrowError>>;
+
+    /// Writes one detached ordinary child through its existing schema capability.
+    fn write_value<Schema, Value>(
+        &mut self,
+        value: Value,
+    ) -> Result<(), crate::WriteError<Schema::Error, Self::GrowError>>
+    where
+        Schema: crate::WireWrite<Value>;
+}
+
+impl<O: crate::Output> RecursiveCursor for crate::ChildWriter<'_, O> {
+    type GrowError = O::GrowError;
+
+    fn position(&self) -> usize {
+        crate::ChildWriter::position(self)
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), crate::OutputError<Self::GrowError>> {
+        crate::ChildWriter::write(self, bytes)
+    }
+
+    fn patch_at(
+        &mut self,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), crate::OutputError<Self::GrowError>> {
+        crate::ChildWriter::patch_at(self, offset, bytes)
+    }
+
+    fn write_value<Schema, Value>(
+        &mut self,
+        value: Value,
+    ) -> Result<(), crate::WriteError<Schema::Error, Self::GrowError>>
+    where
+        Schema: crate::WireWrite<Value>,
+    {
+        Schema::write(value, self)
+    }
+}
+
+impl<O: crate::Output> RecursiveCursor for crate::Writer<O> {
+    type GrowError = O::GrowError;
+
+    fn position(&self) -> usize {
+        crate::Writer::position(self)
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), crate::OutputError<Self::GrowError>> {
+        crate::Writer::write(self, bytes)
+    }
+
+    fn patch_at(
+        &mut self,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), crate::OutputError<Self::GrowError>> {
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or(crate::OutputError::LengthOverflow)?;
+        if end > self.position() {
+            return Err(crate::OutputError::Backwards {
+                position: end,
+                written: self.position(),
+            });
+        }
+        crate::Writer::write_at(self, offset, bytes)
+    }
+
+    fn write_value<Schema, Value>(
+        &mut self,
+        value: Value,
+    ) -> Result<(), crate::WriteError<Schema::Error, Self::GrowError>>
+    where
+        Schema: crate::WireWrite<Value>,
+    {
+        let start = self.position();
+        let mut child = self.child_at(start)?;
+        Schema::write(value, &mut child)?;
+        child.finish()?;
+        Ok(())
+    }
+}
+
+/// Generated progressive writer callback for one recursive root.
+#[doc(hidden)]
+pub trait RecursiveWrite {
+    /// Initial recursive root writer owning one progressive cursor.
+    type Writer<Cursor: RecursiveCursor>;
+
+    /// Completed recursive root writer returning the same cursor.
+    type Complete<Cursor: RecursiveCursor>;
+
+    /// Transfers one cursor into this recursive root writer.
+    fn writer<Cursor: RecursiveCursor>(
+        output: Cursor,
+    ) -> Result<Self::Writer<Cursor>, crate::WriteError<RecursiveWriteError, Cursor::GrowError>>;
+
+    /// Returns the cursor after one recursive root completed.
+    fn finish<Cursor: RecursiveCursor>(
+        complete: Self::Complete<Cursor>,
+    ) -> Result<Cursor, crate::WriteError<RecursiveWriteError, Cursor::GrowError>>;
+}
+
+/// Generated progressive writer for one recursive body grammar.
+#[doc(hidden)]
+pub trait RecursiveWriteBody<Callback, Slot> {
+    /// Initial body writer owning one progressive cursor.
+    type Writer<Cursor: RecursiveCursor>;
+
+    /// Completed body writer returning the same cursor.
+    type Complete<Cursor: RecursiveCursor>;
+
+    /// Transfers one cursor into this body writer.
+    fn writer<Cursor: RecursiveCursor>(
+        output: Cursor,
+    ) -> Result<Self::Writer<Cursor>, crate::WriteError<RecursiveWriteError, Cursor::GrowError>>;
+
+    /// Returns the cursor after every required body field was written.
+    fn finish<Cursor: RecursiveCursor>(
+        complete: Self::Complete<Cursor>,
+    ) -> Result<Cursor, crate::WriteError<RecursiveWriteError, Cursor::GrowError>>;
+}
 
 /// Flattens a recursive array facade error without retaining recursive generic error types.
 #[doc(hidden)]

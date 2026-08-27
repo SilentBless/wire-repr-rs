@@ -105,7 +105,7 @@ Primitive schemas support all fixed-width Rust integers and floats. `usize`, `is
 `char` require an explicit physical representation such as `#[wire(as = u32, le)]`; both read and
 write conversions are checked.
 
-## Recursive array and object views
+## Recursive array/object views and writers
 
 A closed selector enum may pass itself directly to a generic body containing either an unsigned
 stored count followed by terminal `wire::Array<T>` or fixed sequential fields separated by
@@ -126,6 +126,12 @@ repetition retain their absolute offset but flatten to finite `RecursiveError::C
 Recursive object bodies compile their fixed segments and child markers into static `start` and
 `resume` transitions. Their views retain direct field boundaries only; a recursive child getter
 re-frames its already-proven exact range into the same generated root view family.
+
+Deriving `WireBuilder` generates an output-owning recursive root writer. Object fields transfer the
+cursor through physical-order typestate stages; recursive array items stream through the same
+root-wide callback and patch their count after completion. The callback is monomorphized and
+retains no recursive tree, plan, allocation, or hidden depth stack. Exact recursive views can be
+copied through either the progressive root writer or the root's copy-only detached capability.
 
 ## Guarantees
 
@@ -153,10 +159,12 @@ re-frames its already-proven exact range into the same generated root view famil
 - Heterogeneous cursors yield coexisting views and never advance on failure.
 - Recursive enum arrays and object bodies retain no per-item offset index, accept caller-selected
   depths beyond 64, and fail with `DepthExceeded` before crossing that bound.
+- Progressive recursive writers stream object and array children directly, retaining only the
+  output cursor, current count/controller offset, and compile-time typestate.
 - Fixed writers return `NeedMore`; growable collections use their existing `Extend<u8>` capability.
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-General traversal and recursive builders remain future composition work. The core does not add
-negotiated selector maps, hidden indexes, general resource-limit machinery, runtime schemas,
-semantic object materialization, async I/O, or feature-selected renderers.
+General traversal is the remaining future composition surface. The core does not add negotiated
+selector maps, hidden indexes, general resource-limit machinery, runtime schemas, semantic object
+materialization, async I/O, or feature-selected renderers.

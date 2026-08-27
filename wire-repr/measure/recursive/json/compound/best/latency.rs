@@ -3,6 +3,40 @@
 const COUNT: u16 = 200;
 const DEPTH: usize = 64;
 
+pub fn pair_build(seed: u64) -> u64 {
+    let depth = 4 + seed as usize % 8;
+    let mut output = [0u8; 256];
+    output[..depth].fill(4);
+    output[depth..depth + 2].copy_from_slice(&[1, seed as u8]);
+    let mut cursor = depth + 2;
+    for level in 1..=depth {
+        output[cursor] = (seed as u8) ^ level as u8;
+        output[cursor + 1] = 1;
+        output[cursor + 2] = (seed as u8).wrapping_add(level as u8);
+        cursor += 3;
+    }
+    hash_bytes(&output[..cursor])
+}
+
+pub fn array_build(seed: u64) -> u64 {
+    let count = 16 + seed as usize % 16;
+    let mut output = [0u8; 256];
+    output[0] = 2;
+    output[1..3].copy_from_slice(&(count as u16).to_le_bytes());
+    for index in 0..count {
+        let cursor = 3 + 2 * index;
+        output[cursor] = 1;
+        output[cursor + 1] = (seed as u8).wrapping_add(index as u8);
+    }
+    hash_bytes(&output[..3 + 2 * count])
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+    })
+}
+
 pub fn pair_view(seed: u64) -> u64 {
     let input = opaque_pair_input(seed);
     let depth = 16 + seed as usize % 16;

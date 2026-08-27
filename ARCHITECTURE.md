@@ -5,9 +5,10 @@ This document defines the target production architecture and clean-cutover contr
 constants, explicit logical conversions, validators, nested children, demand geometry, controller
 dependencies, conditional choice groups, counted runtime arrays, static enums, nominal and inline
 bitfields, nested physical selections, computed fields, homogeneous views, heterogeneous cursors,
-exact View forwarding, depth-bounded recursive enum arrays, and recursive object continuations.
-General traversal and recursive builders remain future composition work. New layout classes extend
-this one model rather than restoring the removed legacy renderer or introducing parallel modes.
+exact View forwarding, depth-bounded recursive enum arrays, recursive object continuations, and
+progressive recursive writers. General traversal remains future composition work. New layout
+classes extend this one model rather than restoring the removed legacy renderer or introducing
+parallel modes.
 
 ## 1. Product boundary
 
@@ -112,7 +113,8 @@ Counted arrays use the continuation as an authoritative remaining count. Object 
 fixed segments and recursive fields into `start`/`resume` transitions; after a child completes, the
 machine resumes at the following scalar, byte array, or child. Their local state keeps one boundary
 per direct physical field, while a recursive child getter re-frames only its already-proven exact
-range. Recursive builders and public traversal remain independent future composition work.
+range. Progressive recursive writers use the corresponding body grammar but transfer one output
+cursor by value through consuming typestate stages; they retain no recursive value tree.
 
 The current fixed-layout vertical cannot inspect a generic child's associated fixed-size capability
 during macro expansion. Instantiating a nonterminal child whose `FIXED_SIZE` is `None` therefore
@@ -315,6 +317,27 @@ packet.items(|mut items| {
 })?
 ```
 
+Recursive roots use the same public `Root::builder(output)` entry point. Object body setters follow
+physical order and invoke root closures directly on the transferred cursor; counted bodies stream
+items and patch their stored count after the closure completes:
+
+```rust
+Value::builder(output)
+    .pair(|pair| {
+        let pair = pair.left(|value| value.leaf(|leaf| leaf.value(10)))?;
+        let pair = pair.opcode(7)?;
+        pair.right(|value| value.leaf(|leaf| leaf.value(20)))
+    })?
+    .finish()?
+```
+
+The generated callback family is root-wide and monomorphized, so recursive trait solving never
+requires `Value: WireBuilder -> Pair<Value>: WireBuilder -> Value: WireBuilder`. Runtime nesting is
+represented only by the caller's closure calls and the cursor moving through them. Recursive array
+items may be built semantically or copied from exact root views. The detached `WireBuilder` surface
+for a recursive root intentionally supports exact View copying only; semantic recursive
+construction stays on the progressive output-owning path rather than retaining an encoded tree.
+
 Generated views implement the same item write capability by copying their exact represented bytes.
 `items.copy_from(source.items())` forwards a parent-validated array as one range and patches its
 authoritative count; a terminal array validates deferred item geometry once before copying. No
@@ -402,9 +425,9 @@ runtime budget.
 ## 11. Implementation order
 
 The fixed, demand-geometry, dependency, collection, enum, bitfield, root-selection, computed,
-sequence, cursor, bounded-recursive-array, recursive-object, nested-selection, fuzz,
-protocol-fixture, example, and release-verification verticals are complete. General traversal and
-recursive builders are separate future composition work.
+sequence, cursor, bounded-recursive-array, recursive-object, recursive-writer, nested-selection,
+fuzz, protocol-fixture, example, and release-verification verticals are complete. General
+traversal is the remaining future composition surface.
 
 Each shipped vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads,
 behavioral tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not
@@ -416,14 +439,14 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fifteen discovered zones and fifty-two cases: fixed scalars and
+The current mandatory corpus has fifteen discovered zones and fifty-four cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, conditional
 controllers, runtime collection decode/build/copy, static enum decode/build/copy, nominal and
 inline bitfields, fragmented and nested physical selections, fixed and dynamic computed fields,
 fixed and variable homogeneous views, heterogeneous cursors, all eight compact recursive geometry
-forms plus replay, recursive pair continuations, and fixed, automatic, and callback-driven output
-growth. Each covers read and
+forms plus replay, recursive pair continuations, progressive recursive object and array builds, and
+fixed, automatic, and callback-driven output growth. Each covers read and
 write paths where applicable. The measurement tool inspects final linked consumer symbols for code
 shape, call topology, stack, allocation, and dispatch evidence.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM

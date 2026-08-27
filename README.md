@@ -264,7 +264,7 @@ declared wire width produce nominal field-site errors rather than truncating.
 - Writers and views do not allocate or dispatch dynamically inside wire-repr.
 - The public read API is identical for borrowed and retained-owned backing.
 
-## Recursive arrays and object continuations
+## Recursive arrays, object continuations, and writers
 
 A closed selector enum may recurse through a generic counted-array body or a fixed sequential
 object body containing `wire::Recursive<T>`. The caller selects a compile-time depth; zero returns
@@ -274,7 +274,7 @@ code never uses recursive Rust calls, allocation, or a per-item offset index. Re
 counts must fit `u32` even when their physical controller is wider.
 
 ```rust
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Values<T> {
     #[wire(le)]
     count: u16,
@@ -282,19 +282,19 @@ struct Values<T> {
     items: wire_repr::wire::Array<T>,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Pair<T> {
     left: wire_repr::wire::Recursive<T>,
     opcode: u8,
     right: wire_repr::wire::Recursive<T>,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Leaf {
     value: u8,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 #[wire(selector = u8)]
 enum Value {
     #[wire(value = 0)]
@@ -324,7 +324,24 @@ cycle in an object body. Fixed sequential scalars and byte arrays may appear bef
 after recursive fields. Generated `start`/`resume` transitions skip the body iteratively; direct
 child getters re-frame only their already-proven exact ranges. Schema-specific errors crossing a
 recursive boundary retain their absolute offset but flatten to a finite `RecursiveError::Child`.
-The capability remains read-side; recursive builders are separate work.
+
+Deriving `WireBuilder` on the body and root generates a progressive recursive writer:
+
+```rust
+Value::builder(output)
+    .pair(|pair| {
+        let pair = pair.left(|value| value.leaf(|leaf| leaf.value(10)))?;
+        let pair = pair.opcode(7)?;
+        pair.right(|value| value.leaf(|leaf| leaf.value(20)))
+    })?
+    .finish()?
+```
+
+The cursor moves by value through generated typestate stages, so no recursive value tree, plan,
+allocation, or hidden depth stack is retained. Object fields are written in physical order.
+Recursive arrays stream items and patch their count after the closure; exact root views may be
+copied directly. The detached `WireBuilder` path for a recursive root deliberately exposes exact
+View copying only—semantic recursive construction remains progressive.
 
 ## Examples
 
@@ -360,9 +377,9 @@ logical conversions, validators, nested children, demand geometry, controller de
 conditional groups, runtime arrays, static enums with exact unknown forwarding, nominal and inline
 bitfields, nested physical selections, computed fields, homogeneous `views`, heterogeneous
 cursors, exact View forwarding, depth-bounded recursive enum arrays, recursive object
-continuations, and progressive typestate writers.
+continuations, progressive recursive object/array writers, and ordinary progressive typestate
+writers.
 
-General traversal and recursive builders remain separate future composition work. Negotiated
-selector maps, hidden indexes, eager semantic-tree validation, and a general limits framework are
-not part of the target core.
-Every shipped class adds behavioral plus generated/idiomatic/best-safe workload evidence.
+General traversal is the remaining future composition surface. Negotiated selector maps, hidden
+indexes, eager semantic-tree validation, and a general limits framework are not part of the target
+core. Every shipped class adds behavioral plus generated/idiomatic/best-safe workload evidence.

@@ -5,6 +5,7 @@ mod enumeration;
 mod model;
 mod recursive;
 mod recursive_object;
+mod recursive_writer;
 mod view;
 mod writer;
 
@@ -47,19 +48,17 @@ pub(super) fn render_builder(
         bitfield::render_builder(input, runtime)
     } else {
         let schema = model::Schema::parse(input, "WireBuilder")?;
+        let recursive = recursive_writer::render_bodies(&schema, runtime)?;
         if schema
             .fields
             .iter()
             .any(|field| matches!(field.kind, model::FieldKind::Recursive(_)))
         {
-            return Err(syn::Error::new_spanned(
-                &schema.name,
-                "recursive object builders are not supported by the current read-side recursive capability",
-            ));
+            return Ok(recursive);
         }
         let detached = builder::render(&schema, runtime)?;
         let progressive = writer::render(&schema, runtime);
-        Ok(quote!(#detached #progressive))
+        Ok(quote!(#detached #progressive #recursive))
     }
 }
 

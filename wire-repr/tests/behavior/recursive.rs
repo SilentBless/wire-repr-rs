@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use wire_repr::WireView;
+use wire_repr::{WireBuilder, WireView};
 
 #[derive(WireView)]
 struct JsonNull {}
@@ -106,6 +106,91 @@ enum TwinValue {
 enum SelfValue {
     #[wire(value = 6)]
     Array(JsonArray<Self>),
+}
+
+#[derive(WireView, WireBuilder)]
+struct WriteLeaf {
+    value: u8,
+}
+
+#[derive(WireView, WireBuilder)]
+struct WriteArray<T> {
+    count: u8,
+    #[wire(counted_by = count)]
+    items: wire_repr::wire::Array<T>,
+}
+
+#[derive(WireView, WireBuilder)]
+struct WritePair<T> {
+    left: wire_repr::wire::Recursive<T>,
+    opcode: u8,
+    right: wire_repr::wire::Recursive<T>,
+}
+
+#[derive(WireView, WireBuilder)]
+struct WriteDecorated<T> {
+    prefix: [u8; 2],
+    left: wire_repr::wire::Recursive<T>,
+    #[wire(le)]
+    opcode: u16,
+    right: wire_repr::wire::Recursive<T>,
+    suffix: [u8; 2],
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum WriteValue {
+    #[wire(value = 1)]
+    Leaf(WriteLeaf),
+    #[wire(value = 2)]
+    Pair(WritePair<WriteValue>),
+    #[wire(value = 3)]
+    Array(WriteArray<WriteValue>),
+    #[wire(value = 4)]
+    Decorated(WriteDecorated<WriteValue>),
+}
+
+#[derive(WireBuilder)]
+#[wire(selector = u8)]
+enum RecursiveWriterCollision {
+    #[wire(value = 1)]
+    Leaf(WriteLeaf),
+    #[wire(value = 2)]
+    CopyFrom(WritePair<RecursiveWriterCollision>),
+}
+
+#[derive(WireBuilder)]
+struct WriteEnvelope<T> {
+    prefix: u8,
+    value: T,
+}
+
+struct WriteFailing;
+
+impl WireBuilder for WriteFailing {
+    type Builder = ();
+
+    fn builder() -> Self::Builder {}
+}
+
+impl wire_repr::WireWrite<()> for WriteFailing {
+    type Error = ManualError;
+
+    fn write<O: wire_repr::Output>(
+        _value: (),
+        _writer: &mut wire_repr::ChildWriter<'_, O>,
+    ) -> Result<(), wire_repr::WriteError<Self::Error, O::GrowError>> {
+        Err(wire_repr::WriteError::Schema(ManualError))
+    }
+}
+
+#[derive(WireBuilder)]
+#[wire(selector = u8)]
+enum WriteFailureValue {
+    #[wire(value = 1)]
+    Fail(WriteFailing),
+    #[wire(value = 2)]
+    Pair(WritePair<WriteFailureValue>),
 }
 
 mod qualified {
@@ -773,6 +858,188 @@ fn recursive_geometry_errors_keep_the_nested_absolute_site() {
     ));
 }
 
+#[test]
+fn progressive_recursive_writer_streams_object_and_array_children()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut output = Vec::new();
+    let written = WriteValue::builder(&mut output)
+        .pair(|pair| {
+            let pair = pair.left(|value| value.leaf(|leaf| leaf.value(10)))?;
+            let pair = pair.opcode(0xaa)?;
+            pair.right(|value| {
+                value.array(|array| {
+                    array.items(|mut items| {
+                        items = items.item(|value| value.leaf(|leaf| leaf.value(20)))?;
+                        items = items.item(|value| value.leaf(|leaf| leaf.value(30)))?;
+                        Ok(items)
+                    })
+                })
+            })
+        })?
+        .finish()?;
+    assert_eq!(written.as_bytes(), [2, 1, 10, 0xaa, 3, 2, 1, 20, 1, 30]);
+    Ok(())
+}
+
+#[test]
+fn progressive_recursive_writer_keeps_partial_unpublished_output_on_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut output = [0xcc; 6];
+    let error = match WriteValue::builder(&mut output[..]).pair(|pair| {
+        let pair = pair.left(|value| value.leaf(|leaf| leaf.value(10)))?;
+        let pair = pair.opcode(0xaa)?;
+        pair.right(|value| {
+            value.array(|array| {
+                array.items(|items| items.item(|value| value.leaf(|leaf| leaf.value(20))))
+            })
+        })
+    }) {
+        Ok(_) => panic!("short recursive output unexpectedly completed"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("output needs 7 bytes"));
+    assert_eq!(output, [2, 1, 10, 0xaa, 3, 0]);
+    Ok(())
+}
+
+#[test]
+fn recursive_writer_forwards_an_exact_root_view() -> Result<(), Box<dyn std::error::Error>> {
+    let input = [2, 1, 10, 0xaa, 1, 20];
+    let source = WriteValue::view::<16>(input)?;
+    let mut output = [0u8; 6];
+    let written = WriteValue::builder(&mut output[..])
+        .copy_from(source)?
+        .finish()?;
+    assert_eq!(written.as_bytes(), input);
+    Ok(())
+}
+
+#[test]
+fn recursive_writer_reserves_the_exact_copy_method_name() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut output = [0u8; 6];
+    let written = RecursiveWriterCollision::builder(&mut output[..])
+        .copy_from_2(|pair| {
+            let pair = pair.left(|value| value.leaf(|leaf| leaf.value(10)))?;
+            let pair = pair.opcode(0xaa)?;
+            pair.right(|value| value.leaf(|leaf| leaf.value(20)))
+        })?
+        .finish()?;
+    assert_eq!(written.as_bytes(), [2, 1, 10, 0xaa, 1, 20]);
+    Ok(())
+}
+
+#[test]
+fn recursive_writer_composes_exact_roots_through_ordinary_parents()
+-> Result<(), Box<dyn std::error::Error>> {
+    let input = [2, 1, 10, 0xaa, 1, 20];
+    let source = WriteValue::view::<16>(input)?;
+    let mut output = [0u8; 7];
+    let written = WriteEnvelope::<WriteValue>::builder(&mut output[..])
+        .prefix(9)?
+        .value(|value| value.copy_from(source))?
+        .finish()?;
+    assert_eq!(written.as_bytes(), [9, 2, 1, 10, 0xaa, 1, 20]);
+    Ok(())
+}
+
+#[test]
+fn progressive_recursive_writer_streams_fixed_segments_between_children()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut output = [0u8; 11];
+    let written = WriteValue::builder(&mut output[..])
+        .decorated(|pair| {
+            let pair = pair.prefix([0xa0, 0xa1])?;
+            let pair = pair.left(|value| value.leaf(|leaf| leaf.value(10)))?;
+            let pair = pair.opcode(0x1234)?;
+            let pair = pair.right(|value| value.leaf(|leaf| leaf.value(20)))?;
+            pair.suffix([0xb0, 0xb1])
+        })?
+        .finish()?;
+    assert_eq!(
+        written.as_bytes(),
+        [4, 0xa0, 0xa1, 1, 10, 0x34, 0x12, 1, 20, 0xb0, 0xb1]
+    );
+    Ok(())
+}
+#[test]
+fn recursive_writer_flattens_normal_leaf_errors_at_the_variant_site() {
+    let mut output = [0u8; 1];
+    let error = match WriteFailureValue::builder(&mut output[..]).fail(|()| ()) {
+        Ok(_) => panic!("failing recursive leaf unexpectedly completed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(wire_repr::__private::RecursiveWriteError::Child {
+            field: "Fail"
+        })
+    ));
+    assert_eq!(output, [1]);
+}
+
+#[test]
+fn recursive_array_writer_copies_exact_item_views() -> Result<(), Box<dyn std::error::Error>> {
+    let source = WriteValue::view::<8>([1, 40])?;
+    let mut output = [0u8; 4];
+    let written = WriteValue::builder(&mut output[..])
+        .array(|array| array.items(|items| items.item_view(source)))?
+        .finish()?;
+    assert_eq!(written.as_bytes(), [3, 1, 1, 40]);
+    Ok(())
+}
+
+#[test]
+fn recursive_array_writer_fails_after_streaming_an_unrepresentable_count()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut output = Vec::new();
+    let error = match WriteValue::builder(&mut output).array(|array| {
+        array.items(|mut items| {
+            for value in 0..=u8::MAX {
+                items = items.item(|root| root.leaf(|leaf| leaf.value(value)))?;
+            }
+            Ok(items)
+        })
+    }) {
+        Ok(_) => panic!("256-item u8-count array unexpectedly completed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(wire_repr::__private::RecursiveWriteError::CountOverflow {
+            field: "count",
+            count: 256,
+        })
+    ));
+    assert_eq!(output[0..2], [3, 0]);
+    assert!(output.len() >= 2 + 2 * 256);
+    assert_eq!(output[512..514], [1, 255]);
+    Ok(())
+}
+#[test]
+fn recursive_array_writer_patches_zero_and_maximum_counts() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut empty = [0xcc; 2];
+    let written = WriteValue::builder(&mut empty[..])
+        .array(|array| array.items(Ok))?
+        .finish()?;
+    assert_eq!(written.as_bytes(), [3, 0]);
+
+    let mut maximum = Vec::new();
+    let written = WriteValue::builder(&mut maximum)
+        .array(|array| {
+            array.items(|mut items| {
+                for value in 0..u8::MAX {
+                    items = items.item(|root| root.leaf(|leaf| leaf.value(value)))?;
+                }
+                Ok(items)
+            })
+        })?
+        .finish()?;
+    assert_eq!(written.range(), 0..512);
+    assert_eq!(written.as_bytes()[0..2], [3, 255]);
+    Ok(())
+}
 #[test]
 fn recursive_pair_continuation_errors_keep_absolute_offsets() {
     let missing_opcode = PairValue::view::<16>([2, 1, 10])

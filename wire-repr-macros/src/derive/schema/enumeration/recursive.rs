@@ -1,4 +1,5 @@
 mod skip;
+pub(super) mod writer;
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -284,7 +285,9 @@ pub(super) fn render_view(
 
     let trait_declaration = quote! {
         #[doc = "Exact-source view API generated for this recursive enum schema."]
-        #vis trait #view_trait<const #depth: usize>: AsRef<[u8]> {
+        #vis trait #view_trait<const #depth: usize>:
+            AsRef<[u8]> + #runtime::ExactWire<#name>
+        {
             fn as_bytes(&self) -> &[u8];
             fn selector(&self) -> #selector_ty;
             fn variant<#variant_lifetime>(

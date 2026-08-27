@@ -1,25 +1,25 @@
 #![allow(dead_code)]
 
-use wire_repr::WireView;
+use wire_repr::{WireBuilder, WireView};
 
 const COUNT: u16 = 200;
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Null {}
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Bool {
     value: u8,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Bytes {
     len: u8,
     #[wire(bytes = len)]
     value: wire_repr::wire::Bytes,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Array<T> {
     #[wire(le)]
     count: u16,
@@ -27,7 +27,7 @@ struct Array<T> {
     items: wire_repr::wire::Array<T>,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 #[wire(selector = u8)]
 enum Value {
     #[wire(value = 0)]
@@ -41,14 +41,14 @@ enum Value {
     Bytes(Bytes),
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Pair<T> {
     left: wire_repr::wire::Recursive<T>,
     opcode: u8,
     right: wire_repr::wire::Recursive<T>,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct DecoratedPair<T> {
     prefix: u8,
     left: wire_repr::wire::Recursive<T>,
@@ -57,7 +57,7 @@ struct DecoratedPair<T> {
     right: wire_repr::wire::Recursive<T>,
     suffix: u8,
 }
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 #[wire(selector = u8)]
 enum PairValue {
     #[wire(value = 1)]
@@ -86,6 +86,73 @@ pub fn pair_view(seed: u64) -> u64 {
         return u64::MAX;
     };
     (u64::from(opcode) << 32) | (u64::from(right.value()) << 16) | input.len as u64
+}
+
+pub fn pair_build(seed: u64) -> u64 {
+    let mut output = [0u8; 256];
+    let depth = 4 + seed as u8 % 8;
+    let complete = match write_pair(PairValue::builder(&mut output[..]), depth, seed as u8) {
+        Ok(complete) => complete,
+        Err(_) => return u64::MAX,
+    };
+    let written = match complete.finish() {
+        Ok(written) => written,
+        Err(_) => return u64::MAX,
+    };
+    hash_bytes(written.as_bytes())
+}
+
+fn write_pair<Cursor>(
+    writer: PairValueWriter<Cursor>,
+    depth: u8,
+    seed: u8,
+) -> Result<
+    PairValueWriterComplete<Cursor>,
+    wire_repr::WriteError<
+        wire_repr::__private::RecursiveWriteError,
+        <Cursor as wire_repr::__private::RecursiveCursor>::GrowError,
+    >,
+>
+where
+    Cursor: wire_repr::__private::RecursiveCursor,
+{
+    if depth == 0 {
+        return writer.leaf(|leaf| leaf.value(seed));
+    }
+    writer.pair(|pair| {
+        let pair = pair.left(|value| write_pair(value, depth - 1, seed))?;
+        let pair = pair.opcode(seed ^ depth)?;
+        pair.right(|value| value.leaf(|leaf| leaf.value(seed.wrapping_add(depth))))
+    })
+}
+
+pub fn array_build(seed: u64) -> u64 {
+    let mut output = [0u8; 256];
+    let count = 16 + seed as usize % 16;
+    let complete = match Value::builder(&mut output[..]).array(|array| {
+        array.items(|mut items| {
+            for index in 0..count {
+                items = items.item(|value| {
+                    value.bool(|body| body.value((seed as u8).wrapping_add(index as u8)))
+                })?;
+            }
+            Ok(items)
+        })
+    }) {
+        Ok(complete) => complete,
+        Err(_) => return u64::MAX,
+    };
+    let written = match complete.finish() {
+        Ok(written) => written,
+        Err(_) => return u64::MAX,
+    };
+    hash_bytes(written.as_bytes())
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 struct PairInput {

@@ -107,11 +107,24 @@ struct Terminal<T> {
     items: wire_repr::wire::Array<T>,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct PlacedTerminal<T> {
     count: u8,
     #[wire(counted_by = count, at = 10)]
     items: wire_repr::wire::Array<T>,
+}
+
+#[test]
+fn ordinary_generic_array_writer_keeps_placement_geometry() -> TestResult {
+    let mut output = [0xff; 12];
+    let written = PlacedTerminal::<Bar>::builder(&mut output[..])
+        .items(|items| items.item(|bar| bar.value(0x1122)))?
+        .finish()?;
+    assert_eq!(
+        written.as_bytes(),
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x22]
+    );
+    Ok(())
 }
 
 #[test]

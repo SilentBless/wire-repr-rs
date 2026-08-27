@@ -168,7 +168,7 @@ pub(super) fn render(
     })
 }
 
-fn validate(schema: &Schema, root: &Ident) -> syn::Result<()> {
+pub(super) fn validate(schema: &Schema, root: &Ident) -> syn::Result<()> {
     if !schema.validators.is_empty() {
         return Err(syn::Error::new_spanned(
             &schema.name,

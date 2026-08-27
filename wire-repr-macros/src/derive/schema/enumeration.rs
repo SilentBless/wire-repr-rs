@@ -874,6 +874,15 @@ pub(super) fn render_builder(
     runtime: &TokenStream,
 ) -> syn::Result<TokenStream> {
     let schema = EnumSchema::parse(input, "WireBuilder")?;
+    let recursive_slots = schema
+        .known_variants()
+        .map(|variant| {
+            super::recursive::root_write_slot_marker(&variant.body, &schema.name, runtime)
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    if recursive_slots.iter().any(Option::is_some) {
+        return recursive::writer::render(schema, runtime);
+    }
     if schema.known_variants().any(|variant| {
         super::recursive::contains_root_generic_argument(&variant.body, &schema.name)
     }) {
@@ -892,7 +901,8 @@ pub(super) fn render_builder(
     let output = fresh_type_ident(&schema.generics, "Output");
 
     let known = schema.known_variants().collect::<Vec<_>>();
-    let method_names = variant_method_names(&known, schema.unknown().is_some());
+    let reserved = schema.unknown().is_some().then_some("unknown");
+    let method_names = variant_method_names(&known, reserved.as_slice());
     let mut bounded = schema.generics.clone();
     for variant in &known {
         let body = &variant.body;
@@ -1514,11 +1524,11 @@ fn variant_type_stems(variants: &[&Variant], reserve_unknown: bool) -> Vec<Strin
         .collect()
 }
 
-fn variant_method_names(variants: &[&Variant], reserve_unknown: bool) -> Vec<Ident> {
-    let mut used = BTreeSet::new();
-    if reserve_unknown {
-        used.insert("unknown".to_owned());
-    }
+fn variant_method_names(variants: &[&Variant], reserved: &[&str]) -> Vec<Ident> {
+    let mut used = reserved
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
     variants
         .iter()
         .map(|variant| {
