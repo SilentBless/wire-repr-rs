@@ -3,6 +3,50 @@
 const COUNT: u16 = 200;
 const DEPTH: usize = 64;
 
+pub fn pair_view(seed: u64) -> u64 {
+    let input = opaque_pair_input(seed);
+    let depth = 16 + seed as usize % 16;
+    let opcode = 4 * depth - 1;
+    if input.len != 4 * depth + 2
+        || input.bytes[..depth].iter().any(|selector| *selector != 4)
+        || input.bytes[opcode + 1] != 1
+    {
+        return u64::MAX;
+    }
+    (u64::from(input.bytes[opcode]) << 32)
+        | (u64::from(input.bytes[opcode + 2]) << 16)
+        | input.len as u64
+}
+
+struct PairInput {
+    bytes: [u8; 256],
+    len: usize,
+}
+
+#[inline(never)]
+fn opaque_pair_input(seed: u64) -> PairInput {
+    let depth = 16 + seed as usize % 16;
+    let mut input = PairInput {
+        bytes: [0; 256],
+        len: 0,
+    };
+    for _ in 0..depth {
+        input.bytes[input.len] = 4;
+        input.len += 1;
+    }
+    input.bytes[input.len..input.len + 2].copy_from_slice(&[1, seed as u8]);
+    input.len += 2;
+    for index in 0..depth {
+        input.bytes[input.len..input.len + 3].copy_from_slice(&[
+            index as u8,
+            1,
+            (seed as u8).wrapping_add(index as u8).wrapping_add(1),
+        ]);
+        input.len += 3;
+    }
+    input
+}
+
 pub fn direct_batch(seed: u64) -> u64 {
     let input = opaque_input(seed, true);
     let bytes = input.as_slice();

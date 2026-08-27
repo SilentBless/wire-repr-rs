@@ -24,6 +24,7 @@ pub(super) enum FieldKind {
     Bytes(FixedBytes),
     RawBytes(RawBytes),
     Array(ArrayField),
+    Recursive(RecursiveField),
     Flag(FlagField),
     Nested(NestedField),
     BitProjection(BitProjection),
@@ -46,6 +47,10 @@ pub(super) enum DynamicExtent {
 pub(super) struct ArrayField {
     pub(super) item: Type,
     pub(super) controller: Ident,
+}
+
+pub(super) struct RecursiveField {
+    pub(super) root: Type,
 }
 
 pub(super) struct FieldLayout {
@@ -207,6 +212,7 @@ impl FieldKind {
             Self::Bytes(bytes) => bytes.constant.as_ref(),
             Self::RawBytes(_)
             | Self::Array(_)
+            | Self::Recursive(_)
             | Self::Flag(_)
             | Self::BitProjection(_)
             | Self::Nested(_) => None,
@@ -217,7 +223,7 @@ impl FieldKind {
         match self {
             Self::Scalar(scalar) => SizeTerm::Fixed(scalar.width()),
             Self::Bytes(bytes) => SizeTerm::Expr(bytes.len.clone()),
-            Self::RawBytes(_) | Self::Array(_) => SizeTerm::Dynamic,
+            Self::RawBytes(_) | Self::Array(_) | Self::Recursive(_) => SizeTerm::Dynamic,
             Self::Flag(_) | Self::BitProjection(_) => SizeTerm::Fixed(0),
             Self::Nested(nested) => SizeTerm::Nested(nested.ty.clone()),
         }
@@ -229,6 +235,7 @@ impl FieldKind {
             Self::Bytes(_)
             | Self::RawBytes(_)
             | Self::Array(_)
+            | Self::Recursive(_)
             | Self::Flag(_)
             | Self::Nested(_)
             | Self::BitProjection(_) => None,
@@ -464,6 +471,25 @@ impl Schema {
                     ));
                 }
                 FieldKind::Bytes(FixedBytes { len, constant })
+            } else if let Some(root) = recursive_item_type(&ty) {
+                if endian.is_some()
+                    || representation.is_some()
+                    || constant.is_some()
+                    || computed.is_some()
+                    || bytes.is_some()
+                    || rest
+                    || counted_by.is_some()
+                    || layout.condition.is_some()
+                    || layout.position.is_some()
+                    || layout.pad_before.is_some()
+                    || layout.align_before.is_some()
+                {
+                    return Err(syn::Error::new_spanned(
+                        &ty,
+                        "recursive fields do not accept scalar, extent, dependency, or placement attributes",
+                    ));
+                }
+                FieldKind::Recursive(RecursiveField { root })
             } else if let Some(item) = array_item_type(&ty) {
                 if endian.is_some()
                     || representation.is_some()
@@ -723,6 +749,7 @@ impl Schema {
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
+            | FieldKind::Recursive(_)
             | FieldKind::Flag(_)
             | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => false,
@@ -746,6 +773,7 @@ impl Schema {
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
+            | FieldKind::Recursive(_)
             | FieldKind::Flag(_)
             | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => false,
@@ -957,6 +985,7 @@ fn validate_computed_controller_roles(fields: &[Field]) -> syn::Result<()> {
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
+            | FieldKind::Recursive(_)
             | FieldKind::Nested(_) => false,
         }) || fields.iter().any(|field| {
             matches!(
@@ -1142,6 +1171,7 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
+            | FieldKind::Recursive(_)
             | FieldKind::Flag(_)
             | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => None,
@@ -1203,6 +1233,7 @@ fn validate_arrays(fields: &[Field]) -> syn::Result<()> {
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
+            | FieldKind::Recursive(_)
             | FieldKind::Nested(_) => false,
         });
         let placement_role = fields.iter().any(|candidate| {
@@ -1246,6 +1277,7 @@ fn validate_bit_controller_roles(fields: &[Field]) -> syn::Result<()> {
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
+            | FieldKind::Recursive(_)
             | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => false,
         }) || fields.iter().any(|field| {
@@ -1773,6 +1805,7 @@ fn parse_bit_range(expression: Expr) -> syn::Result<(u32, u32)> {
         ));
     };
     let start = start.base10_parse()?;
+
     let end = end.base10_parse()?;
     if start > end {
         return Err(syn::Error::new(
@@ -1803,6 +1836,31 @@ fn array_item_type(ty: &Type) -> Option<Type> {
         return None;
     }
     let syn::PathArguments::AngleBracketed(arguments) = &array.arguments else {
+        return None;
+    };
+    if arguments.args.len() != 1 {
+        return None;
+    }
+    match arguments.args.first()? {
+        syn::GenericArgument::Type(item) => Some(item.clone()),
+        _ => None,
+    }
+}
+fn recursive_item_type(ty: &Type) -> Option<Type> {
+    marker_item_type(ty, "Recursive")
+}
+
+fn marker_item_type(ty: &Type, marker_name: &str) -> Option<Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let mut segments = path.path.segments.iter().rev();
+    let marker = segments.next()?;
+    let wire = segments.next()?;
+    if marker.ident != marker_name || wire.ident != "wire" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &marker.arguments else {
         return None;
     };
     if arguments.args.len() != 1 {

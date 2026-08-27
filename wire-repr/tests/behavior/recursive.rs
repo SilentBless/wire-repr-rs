@@ -46,6 +46,52 @@ enum JsonValue {
     #[wire(value = 8)]
     Constant(JsonConstant),
 }
+
+#[derive(WireView)]
+struct Pair<T> {
+    left: wire_repr::wire::Recursive<T>,
+    opcode: u8,
+    right: wire_repr::wire::Recursive<T>,
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum PairValue {
+    #[wire(value = 1)]
+    Leaf(JsonBool),
+    #[wire(value = 2)]
+    Pair(Pair<PairValue>),
+}
+
+#[derive(WireView)]
+struct DecoratedPair<T> {
+    prefix: [u8; 2],
+    left: wire_repr::wire::Recursive<T>,
+    #[wire(le)]
+    opcode: u16,
+    right: wire_repr::wire::Recursive<T>,
+    suffix: [u8; 2],
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum DecoratedValue {
+    #[wire(value = 1)]
+    Leaf(JsonBool),
+    #[wire(value = 2)]
+    Pair(DecoratedPair<DecoratedValue>),
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum MixedValue {
+    #[wire(value = 1)]
+    Leaf(JsonBool),
+    #[wire(value = 2)]
+    Pair(Pair<MixedValue>),
+    #[wire(value = 3)]
+    Decorated(DecoratedPair<MixedValue>),
+}
 #[derive(WireView)]
 #[wire(selector = u8)]
 enum TwinValue {
@@ -82,6 +128,23 @@ impl core::fmt::Display for ManualError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter.write_str("manual recursive leaf failed")
     }
+}
+
+#[allow(non_camel_case_types)]
+#[derive(WireView)]
+struct ObjectNameCollision<__WireReprRecursiveCallback> {
+    left: wire_repr::wire::Recursive<__WireReprRecursiveCallback>,
+    opcode: u8,
+    right: wire_repr::wire::Recursive<__WireReprRecursiveCallback>,
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum ObjectNameValue {
+    #[wire(value = 1)]
+    Leaf(JsonBool),
+    #[wire(value = 2)]
+    Pair(ObjectNameCollision<ObjectNameValue>),
 }
 
 impl core::error::Error for ManualError {}
@@ -212,6 +275,16 @@ fn mixed_class(index: usize, modulo: usize) -> usize {
     ((value ^ (value >> 31)) % modulo as u64) as usize
 }
 
+fn left_pair_chain(depth: usize) -> Vec<u8> {
+    let mut input = Vec::with_capacity(depth * 4 + 2);
+    input.extend(core::iter::repeat_n(2, depth));
+    input.extend_from_slice(&[1, 7]);
+    for index in 0..depth {
+        input.extend_from_slice(&[index as u8, 1, (index as u8).wrapping_add(1)]);
+    }
+    input
+}
+
 fn encoded_widths(widths: &[usize]) -> Vec<u8> {
     let mut input = Vec::new();
     push_array(&mut input, |output| {
@@ -269,6 +342,24 @@ where
         worker.join().expect("worker");
     });
 }
+
+fn assert_pair_leaf_over_scoped_channel<const DEPTH: usize, V>(value: V, expected: u8)
+where
+    V: PairValueView<DEPTH> + Send,
+{
+    let (sender, receiver) = std::sync::mpsc::channel::<V>();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            let received = receiver.recv().expect("recursive object child");
+            assert!(matches!(
+                received.variant(),
+                PairValueVariant::Leaf(value) if value.value() == expected
+            ));
+        });
+        assert!(sender.send(value).is_ok());
+        worker.join().expect("worker");
+    });
+}
 #[test]
 fn recursive_slots_support_reuse_self_and_import_aliases() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -304,6 +395,131 @@ fn recursive_slots_support_reuse_self_and_import_aliases() -> Result<(), Box<dyn
     Ok(())
 }
 
+#[test]
+fn recursive_pair_continuations_resume_between_children() -> Result<(), Box<dyn std::error::Error>>
+{
+    let input = [2, 1, 10, 0xaa, 2, 1, 20, 0xbb, 1, 30];
+    let root = PairValue::view::<16>(input)?;
+    let PairValueVariant::Pair(pair) = root.variant() else {
+        panic!("pair root")
+    };
+    assert_eq!(pair.opcode(), 0xaa);
+    assert!(matches!(
+        pair.left()?.variant(),
+        PairValueVariant::Leaf(value) if value.value() == 10
+    ));
+    let right = pair.right()?;
+    let PairValueVariant::Pair(right) = right.variant() else {
+        panic!("nested pair")
+    };
+    assert_eq!(right.opcode(), 0xbb);
+    assert!(matches!(
+        right.left()?.variant(),
+        PairValueVariant::Leaf(value) if value.value() == 20
+    ));
+    assert!(matches!(
+        right.right()?.variant(),
+        PairValueVariant::Leaf(value) if value.value() == 30
+    ));
+    Ok(())
+}
+
+#[test]
+fn recursive_object_continuations_cross_fixed_segments() -> Result<(), Box<dyn std::error::Error>> {
+    let input = [2, 0xa0, 0xa1, 1, 10, 0x34, 0x12, 1, 20, 0xb0, 0xb1];
+    let root = DecoratedValue::view::<16>(input)?;
+    let DecoratedValueVariant::Pair(pair) = root.variant() else {
+        panic!("decorated pair")
+    };
+    assert_eq!(pair.prefix(), [0xa0, 0xa1]);
+    assert_eq!(pair.opcode(), 0x1234);
+    assert_eq!(pair.suffix(), [0xb0, 0xb1]);
+    assert!(matches!(
+        pair.left()?.variant(),
+        DecoratedValueVariant::Leaf(value) if value.value() == 10
+    ));
+    assert!(matches!(
+        pair.right()?.variant(),
+        DecoratedValueVariant::Leaf(value) if value.value() == 20
+    ));
+    Ok(())
+}
+
+#[test]
+fn recursive_body_kind_stack_resumes_distinct_object_grammars()
+-> Result<(), Box<dyn std::error::Error>> {
+    let input = [
+        2, 3, 0xa0, 0xa1, 1, 10, 0x34, 0x12, 1, 20, 0xb0, 0xb1, 0xcc, 1, 30,
+    ];
+    let root = MixedValue::view::<16>(input)?;
+    let MixedValueVariant::Pair(pair) = root.variant() else {
+        panic!("mixed root pair")
+    };
+    assert_eq!(pair.opcode(), 0xcc);
+    let left = pair.left()?;
+    let MixedValueVariant::Decorated(left) = left.variant() else {
+        panic!("mixed decorated child")
+    };
+    assert_eq!(left.prefix(), [0xa0, 0xa1]);
+    assert_eq!(left.opcode(), 0x1234);
+    assert_eq!(left.suffix(), [0xb0, 0xb1]);
+    assert!(matches!(
+        pair.right()?.variant(),
+        MixedValueVariant::Leaf(value) if value.value() == 30
+    ));
+    Ok(())
+}
+
+#[test]
+fn recursive_object_child_crosses_scoped_channel_while_parent_continues()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = PairValue::view::<16>(vec![2, 1, 10, 0xaa, 1, 20])?;
+    let PairValueVariant::Pair(pair) = root.variant() else {
+        panic!("pair root")
+    };
+    let left = pair.left()?;
+    assert_pair_leaf_over_scoped_channel::<16, _>(left, 10);
+
+    assert!(matches!(
+        pair.right()?.variant(),
+        PairValueVariant::Leaf(value) if value.value() == 20
+    ));
+    Ok(())
+}
+#[test]
+fn recursive_object_internal_generic_names_are_hygienic() -> Result<(), Box<dyn std::error::Error>>
+{
+    let root = ObjectNameValue::view::<8>([2, 1, 10, 0xaa, 1, 20])?;
+    let ObjectNameValueVariant::Pair(pair) = root.variant() else {
+        panic!("hygienic pair")
+    };
+    assert_eq!(pair.opcode(), 0xaa);
+    Ok(())
+}
+#[test]
+fn recursive_pair_descent_uses_the_caller_selected_iterative_depth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let input = left_pair_chain(256);
+    let value = PairValue::view::<257>(&input)?;
+    let PairValueVariant::Pair(pair) = value.variant() else {
+        panic!("pair chain")
+    };
+    assert_eq!(pair.opcode(), 255);
+    assert!(matches!(
+        pair.right()?.variant(),
+        PairValueVariant::Leaf(leaf) if leaf.value() == 0
+    ));
+
+    let error = match PairValue::view::<256>(&input) {
+        Ok(_) => panic!("depth-257 pair unexpectedly fit depth 256"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        PairValueViewError::DepthExceeded(wire_repr::DepthExceeded { limit: 256, .. })
+    ));
+    Ok(())
+}
 #[test]
 fn recursive_array_returns_the_ordinary_root_view_family() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -554,6 +770,32 @@ fn recursive_geometry_errors_keep_the_nested_absolute_site() {
     assert!(matches!(
         bad_constant,
         JsonValueViewError::Recursive(wire_repr::__private::RecursiveError::Child { offset: 4 })
+    ));
+}
+
+#[test]
+fn recursive_pair_continuation_errors_keep_absolute_offsets() {
+    let missing_opcode = PairValue::view::<16>([2, 1, 10])
+        .err()
+        .expect("missing pair opcode");
+    assert!(matches!(
+        missing_opcode,
+        PairValueViewError::Recursive(wire_repr::__private::RecursiveError::NeedMore(
+            wire_repr::NeedMore {
+                offset: 3,
+                additional_at_least: 1,
+            }
+        ))
+    ));
+
+    let bad_right = PairValue::view::<16>([2, 1, 10, 0xaa, 9])
+        .err()
+        .expect("unknown right selector");
+    assert!(matches!(
+        bad_right,
+        PairValueViewError::Recursive(wire_repr::__private::RecursiveError::UnknownSelector {
+            offset: 4
+        })
     ));
 }
 

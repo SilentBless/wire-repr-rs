@@ -126,14 +126,22 @@ where
         }
     }
 }
-/// Prefix geometry of a recursive counted body.
+/// One transition in a generated iterative recursive-body grammar.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RecursiveChildren {
-    /// Number of recursive roots in the body.
-    pub count: u32,
-    /// Bytes before the first child.
-    pub prefix: usize,
+pub enum RecursiveStep {
+    /// The body completes after advancing over one final nonrecursive segment.
+    Done {
+        /// Bytes consumed before body completion.
+        advance: usize,
+    },
+    /// The body advances to one recursive child and retains a continuation token.
+    Child {
+        /// Bytes consumed before the child root begins.
+        advance: usize,
+        /// Body-local token resumed after the child completes.
+        continuation: u32,
+    },
 }
 
 /// Resolves a generated recursive slot without reconstructing hidden item names.
@@ -193,11 +201,15 @@ pub trait RecursiveBody<C, Slot>: Sized {
     /// Body view borrowing the immutable root item span.
     type View<'view, const DEPTH: usize>: AsRef<[u8]>;
 
-    /// Decodes the count and child-start prefix without traversing children.
-    fn recursive_children(
+    /// Starts the generated body machine before its first recursive child.
+    fn recursive_start(input: &[u8], absolute_offset: usize) -> Result<RecursiveStep, Self::Error>;
+
+    /// Resumes the generated body machine after one recursive child completed.
+    fn recursive_resume(
         input: &[u8],
         absolute_offset: usize,
-    ) -> Result<RecursiveChildren, Self::Error>;
+        continuation: u32,
+    ) -> Result<RecursiveStep, Self::Error>;
 
     /// Frames the complete body and builds compact exact item geometry.
     fn frame_recursive<const DEPTH: usize>(

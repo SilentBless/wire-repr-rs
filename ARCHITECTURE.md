@@ -5,9 +5,9 @@ This document defines the target production architecture and clean-cutover contr
 constants, explicit logical conversions, validators, nested children, demand geometry, controller
 dependencies, conditional choice groups, counted runtime arrays, static enums, nominal and inline
 bitfields, nested physical selections, computed fields, homogeneous views, heterogeneous cursors,
-exact View forwarding, and depth-bounded recursive enum arrays. General traversal, recursive object
-bodies, and recursive builders remain future composition work. New layout classes extend this one
-model rather than restoring the removed legacy renderer or introducing parallel modes.
+exact View forwarding, depth-bounded recursive enum arrays, and recursive object continuations.
+General traversal and recursive builders remain future composition work. New layout classes extend
+this one model rather than restoring the removed legacy renderer or introducing parallel modes.
 
 ## 1. Product boundary
 
@@ -98,16 +98,21 @@ Generated descriptors and getters specialize by geometry:
 - controller values are retained only when later geometry needs them.
 
 The shipped recursive read capability covers a closed static enum whose recursive variants pass
-the root directly to a generic `count` plus terminal `wire::Array<T>` body. The generated entry
-point is `Schema::view::<DEPTH>(backing)` for any caller-selected const depth, including zero as a
-typed `DepthExceeded` boundary. It uses one iterative `[MaybeUninit<u32>; DEPTH]` pending-count
-stack, hidden static callbacks, and the same backing-generic generated root `ViewImpl`; it has no
-registry, dynamic dispatch, allocation, recursive Rust calls, or per-item offset index. Stack
-storage grows by four bytes per permitted recursive level, so a caller choosing `128` reserves
-512 bytes for continuations. Recursive count values are represented internally as `u32`; a wider
-physical controller is accepted only while its stored value fits that range. Recursive object
-bodies, pair-style continuations, public traversal, and recursive builders remain independent
-future composition work.
+the root directly either to a generic `count` plus terminal `wire::Array<T>` body or to a fixed
+sequential object body containing `wire::Recursive<T>` fields. The generated entry point is
+`Schema::view::<DEPTH>(backing)` for any caller-selected const depth, including zero as a typed
+`DepthExceeded` boundary.
+
+Generated root skipping uses one iterative `[MaybeUninit<u32>; DEPTH]` continuation stack, hidden
+static callbacks, and the same backing-generic root `ViewImpl`; it has no registry, dynamic
+dispatch, allocation, recursive Rust calls, or per-item offset index. One recursive body kind costs
+four bytes per permitted level, so depth `128` reserves 512 bytes. An enum with multiple recursive
+body grammars additionally retains a generated one- or two-byte body-kind stack per level.
+Counted arrays use the continuation as an authoritative remaining count. Object bodies compile
+fixed segments and recursive fields into `start`/`resume` transitions; after a child completes, the
+machine resumes at the following scalar, byte array, or child. Their local state keeps one boundary
+per direct physical field, while a recursive child getter re-frames only its already-proven exact
+range. Recursive builders and public traversal remain independent future composition work.
 
 The current fixed-layout vertical cannot inspect a generic child's associated fixed-size capability
 during macro expansion. Instantiating a nonterminal child whose `FIXED_SIZE` is `None` therefore
@@ -397,8 +402,8 @@ runtime budget.
 ## 11. Implementation order
 
 The fixed, demand-geometry, dependency, collection, enum, bitfield, root-selection, computed,
-sequence, cursor, bounded-recursive-array, nested-selection, fuzz, protocol-fixture, example, and
-release-verification verticals are complete. General traversal, recursive object bodies, and
+sequence, cursor, bounded-recursive-array, recursive-object, nested-selection, fuzz,
+protocol-fixture, example, and release-verification verticals are complete. General traversal and
 recursive builders are separate future composition work.
 
 Each shipped vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads,
@@ -411,13 +416,14 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fifteen discovered zones and fifty-one cases: fixed scalars and
+The current mandatory corpus has fifteen discovered zones and fifty-two cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, conditional
 controllers, runtime collection decode/build/copy, static enum decode/build/copy, nominal and
 inline bitfields, fragmented and nested physical selections, fixed and dynamic computed fields,
 fixed and variable homogeneous views, heterogeneous cursors, all eight compact recursive geometry
-forms plus replay, and fixed, automatic, and callback-driven output growth. Each covers read and
+forms plus replay, recursive pair continuations, and fixed, automatic, and callback-driven output
+growth. Each covers read and
 write paths where applicable. The measurement tool inspects final linked consumer symbols for code
 shape, call topology, stack, allocation, and dispatch evidence.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM

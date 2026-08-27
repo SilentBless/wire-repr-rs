@@ -4,6 +4,7 @@ mod computed;
 mod enumeration;
 mod model;
 mod recursive;
+mod recursive_object;
 mod view;
 mod writer;
 
@@ -24,6 +25,13 @@ pub(super) fn render_view(
     } else {
         let schema = model::Schema::parse(input, "WireView")?;
         let recursive = recursive::render_bodies(&schema, runtime)?;
+        if schema
+            .fields
+            .iter()
+            .any(|field| matches!(field.kind, model::FieldKind::Recursive(_)))
+        {
+            return Ok(recursive);
+        }
         let ordinary = view::render(&schema, runtime)?;
         Ok(quote!(#ordinary #recursive))
     }
@@ -39,6 +47,16 @@ pub(super) fn render_builder(
         bitfield::render_builder(input, runtime)
     } else {
         let schema = model::Schema::parse(input, "WireBuilder")?;
+        if schema
+            .fields
+            .iter()
+            .any(|field| matches!(field.kind, model::FieldKind::Recursive(_)))
+        {
+            return Err(syn::Error::new_spanned(
+                &schema.name,
+                "recursive object builders are not supported by the current read-side recursive capability",
+            ));
+        }
         let detached = builder::render(&schema, runtime)?;
         let progressive = writer::render(&schema, runtime);
         Ok(quote!(#detached #progressive))

@@ -278,7 +278,10 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 let total = view_offset_for_end(schema, last, runtime);
                 quote!(#total.expect("framed fixed schema width"))
             }
-            FieldKind::RawBytes(_) | FieldKind::Array(_) | FieldKind::Flag(_) => {
+            FieldKind::RawBytes(_)
+            | FieldKind::Array(_)
+            | FieldKind::Recursive(_)
+            | FieldKind::Flag(_) => {
                 unreachable!("dynamic fields use explicit geometry")
             }
         }
@@ -953,6 +956,7 @@ fn error_names(schema: &Schema) -> ErrorNames {
                 | FieldKind::Bytes(_)
                 | FieldKind::RawBytes(_)
                 | FieldKind::Array(_)
+                | FieldKind::Recursive(_)
                 | FieldKind::Flag(_)
                 | FieldKind::BitProjection(_)
                 | FieldKind::Nested(_) => None,
@@ -1087,6 +1091,7 @@ fn render_flatten_error(
                 FieldKind::Scalar(_)
                 | FieldKind::Bytes(_)
                 | FieldKind::RawBytes(_)
+                | FieldKind::Recursive(_)
                 | FieldKind::Flag(_)
                 | FieldKind::BitProjection(_) => unreachable!("nested error owner"),
             }
@@ -1186,6 +1191,7 @@ fn render_error(
                 }
                 FieldKind::RawBytes(_)
                 | FieldKind::Array(_)
+                | FieldKind::Recursive(_)
                 | FieldKind::Flag(_)
                 | FieldKind::BitProjection(_)
                 | FieldKind::Nested(_) => unreachable!(),
@@ -1547,6 +1553,7 @@ fn render_frame_steps(
             FieldKind::RawBytes(_) => unreachable!("explicit geometry uses its own frame renderer"),
             FieldKind::Flag(_) => unreachable!("explicit geometry uses its own frame renderer"),
             FieldKind::BitProjection(_) => {}
+            FieldKind::Recursive(_) => unreachable!("recursive body uses its own frame renderer"),
         }
     }
     steps
@@ -1917,6 +1924,9 @@ fn render_explicit_frame_steps(
                     #finish_end
                 });
             }
+            FieldKind::Recursive(_) => {
+                unreachable!("recursive body uses its own frame renderer")
+            }
         }
         steps.push(quote! {
             #cursor = #end;
@@ -1992,6 +2002,9 @@ fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStre
                         #[doc = concat!("Returns nested field `", stringify!(#name), "`.")]
                         fn #name<#field_lifetime>(&#field_lifetime self) -> #ty;
                     }
+                }
+                FieldKind::Recursive(_) => {
+                    unreachable!("recursive body uses its own view renderer")
                 }
             }
         })
@@ -2074,7 +2087,7 @@ fn geometry_end(schema: &Schema, index: usize, runtime: &TokenStream) -> TokenSt
                 )
             }
         }
-        FieldKind::RawBytes(_) | FieldKind::Array(_) => {
+        FieldKind::RawBytes(_) | FieldKind::Array(_) | FieldKind::Recursive(_) => {
             unreachable!("dynamic field end is retained")
         }
     }
@@ -2314,6 +2327,9 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                         }
                     }
                 }
+                FieldKind::Recursive(_) => {
+                    unreachable!("recursive body uses its own view renderer")
+                }
             }
         })
         .collect()
@@ -2337,6 +2353,7 @@ fn view_offset_for_end(
         FieldKind::BitProjection(_) => quote!(0usize),
         FieldKind::RawBytes(_)
         | FieldKind::Array(_)
+        | FieldKind::Recursive(_)
         | FieldKind::Flag(_)
         | FieldKind::Nested(_) => unreachable!(),
     };

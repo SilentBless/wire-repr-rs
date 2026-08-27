@@ -161,6 +161,9 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
                 SlotKind::Value(quote!(#ty))
             }
             FieldKind::Nested(nested) => SlotKind::Nested(Box::new(nested.ty.clone())),
+            FieldKind::Recursive(_) => {
+                unreachable!("recursive builder is rejected before rendering")
+            }
         };
         slots.push(Slot {
             field: field.name.clone(),
@@ -625,6 +628,7 @@ fn render_complete(
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
+            | FieldKind::Recursive(_)
             | FieldKind::Flag(_)
             | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => None,
@@ -1022,6 +1026,9 @@ fn render_complete(
                         }
                         #patch
                     }
+                }
+                FieldKind::Recursive(_) => {
+                    unreachable!("recursive builder is rejected before rendering")
                 }
             }
         });

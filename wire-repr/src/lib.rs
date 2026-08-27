@@ -17,14 +17,17 @@ pub mod wire {
     /// A zero-sized runtime array marker controlled by `counted_by = path`.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct Array<T>(core::marker::PhantomData<fn() -> T>);
+
+    /// One recursive root occurrence inside a generated recursive object body.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct Recursive<T>(core::marker::PhantomData<fn() -> T>);
 }
 #[doc(hidden)]
 pub mod __private {
     pub use crate::recursive::{
-        FlattenRecursiveError, RecursiveArrayView, RecursiveBody, RecursiveChildren,
-        RecursiveDepth, RecursiveError, RecursiveFrame, RecursiveGeometry,
-        RecursiveGeometryBuilder, RecursiveMeasure, RecursiveSlot, flatten_recursive_array_error,
-        frame_recursive_array_extent,
+        FlattenRecursiveError, RecursiveArrayView, RecursiveBody, RecursiveDepth, RecursiveError,
+        RecursiveFrame, RecursiveGeometry, RecursiveGeometryBuilder, RecursiveMeasure,
+        RecursiveSlot, RecursiveStep, flatten_recursive_array_error, frame_recursive_array_extent,
     };
     pub use crate::schema::{
         ArrayError, ArrayItem, ArrayView, ConstantMismatch, FieldExpr, FieldPath, FieldPrefix,

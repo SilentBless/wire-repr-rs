@@ -32,10 +32,16 @@ pub(super) fn schema_slots(schema: &Schema) -> Vec<RecursiveSlot> {
                     FieldKind::Array(array) if type_is_parameter(&array.item, &generic) => {
                         Some(index)
                     }
+                    FieldKind::Recursive(recursive)
+                        if type_is_parameter(&recursive.root, &generic) =>
+                    {
+                        Some(index)
+                    }
                     FieldKind::Scalar(_)
                     | FieldKind::Bytes(_)
                     | FieldKind::RawBytes(_)
                     | FieldKind::Array(_)
+                    | FieldKind::Recursive(_)
                     | FieldKind::Flag(_)
                     | FieldKind::Nested(_)
                     | FieldKind::BitProjection(_) => None,
@@ -189,13 +195,29 @@ impl<'ast> Visit<'ast> for RootArgumentVisitor<'_> {
 }
 
 pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Result<TokenStream> {
+    let has_recursive_marker = schema
+        .fields
+        .iter()
+        .any(|field| matches!(field.kind, FieldKind::Recursive(_)));
     let slots = schema_slots(schema);
     if slots.is_empty() {
+        if has_recursive_marker {
+            return Err(syn::Error::new_spanned(
+                &schema.name,
+                "wire::Recursive<T> requires one direct generic root type parameter",
+            ));
+        }
         return Ok(TokenStream::new());
     }
     if schema.generics.params.len() != 1
         || !matches!(schema.generics.params.first(), Some(GenericParam::Type(_)))
     {
+        if has_recursive_marker {
+            return Err(syn::Error::new_spanned(
+                &schema.generics,
+                "recursive object body requires exactly one direct generic root type parameter",
+            ));
+        }
         return Ok(TokenStream::new());
     }
 
@@ -206,6 +228,20 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
     let mut rendered = TokenStream::new();
 
     for slot in slots {
+        if slot
+            .fields
+            .iter()
+            .any(|&index| matches!(schema.fields[index].kind, FieldKind::Recursive(_)))
+        {
+            rendered.extend(super::recursive_object::render(
+                schema,
+                slot.index,
+                &slot.marker,
+                &slot.generic,
+                runtime,
+            )?);
+            continue;
+        }
         if slot.fields.len() != 1 {
             continue;
         }
@@ -375,10 +411,10 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                     #recursive_depth,
                 >;
 
-                fn recursive_children(
+                fn recursive_start(
                     input: &[u8],
                     absolute_offset: usize,
-                ) -> Result<#runtime::__private::RecursiveChildren, Self::Error> {
+                ) -> Result<#runtime::__private::RecursiveStep, Self::Error> {
                     let bytes: [u8; #width] = input
                         .get(..#width)
                         .ok_or(#runtime::__private::RecursiveError::NeedMore(
@@ -395,9 +431,33 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                             field: stringify!(#count_name),
                         })
                     })?;
-                    Ok(#runtime::__private::RecursiveChildren {
-                        count,
-                        prefix: #width,
+                    Ok(if count == 0 {
+                        #runtime::__private::RecursiveStep::Done { advance: #width }
+                    } else {
+                        #runtime::__private::RecursiveStep::Child {
+                            advance: #width,
+                            continuation: count,
+                        }
+                    })
+                }
+
+                fn recursive_resume(
+                    _input: &[u8],
+                    absolute_offset: usize,
+                    continuation: u32,
+                ) -> Result<#runtime::__private::RecursiveStep, Self::Error> {
+                    let remaining = continuation.checked_sub(1).ok_or(
+                        #runtime::__private::RecursiveError::Layout(
+                            #runtime::LayoutError { field: stringify!(#items_name) },
+                        ),
+                    )?;
+                    Ok(if remaining == 0 {
+                        #runtime::__private::RecursiveStep::Done { advance: 0 }
+                    } else {
+                        #runtime::__private::RecursiveStep::Child {
+                            advance: 0,
+                            continuation: remaining,
+                        }
                     })
                 }
 
@@ -409,17 +469,26 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                 where
                     #callback: #runtime::__private::RecursiveFrame<#marker<#root>>,
                 {
-                    let children = <Self as #runtime::__private::RecursiveBody<
+                    let step = <Self as #runtime::__private::RecursiveBody<
                         #callback,
                         #marker<#root>,
-                    >>::recursive_children(input, absolute_offset)?;
-                    let count = usize::try_from(children.count).map_err(|_| {
-                        #runtime::__private::RecursiveError::Layout(#runtime::LayoutError {
-                            field: stringify!(#count_name),
-                        })
-                    })?;
-                    let available = &input[children.prefix..];
-                    let array_offset = absolute_offset.checked_add(children.prefix).ok_or(
+                    >>::recursive_start(input, absolute_offset)?;
+                    let (count, prefix) = match step {
+                        #runtime::__private::RecursiveStep::Done { advance } => (0usize, advance),
+                        #runtime::__private::RecursiveStep::Child {
+                            advance,
+                            continuation,
+                        } => (
+                            usize::try_from(continuation).map_err(|_| {
+                                #runtime::__private::RecursiveError::Layout(
+                                    #runtime::LayoutError { field: stringify!(#count_name) },
+                                )
+                            })?,
+                            advance,
+                        ),
+                    };
+                    let available = &input[prefix..];
+                    let array_offset = absolute_offset.checked_add(prefix).ok_or(
                         #runtime::__private::RecursiveError::Layout(#runtime::LayoutError {
                             field: stringify!(#items_name),
                         }),
@@ -431,12 +500,9 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                         #recursive_depth,
                     >(available, count, array_offset, depth, &mut geometry)
                     .map_err(|error| {
-                        #runtime::__private::flatten_recursive_array_error(
-                            error,
-                            array_offset,
-                        )
+                        #runtime::__private::flatten_recursive_array_error(error, array_offset)
                     })?;
-                    let end = children.prefix.checked_add(consumed).ok_or(
+                    let end = prefix.checked_add(consumed).ok_or(
                         #runtime::__private::RecursiveError::Layout(#runtime::LayoutError {
                             field: stringify!(#items_name),
                         }),
@@ -444,7 +510,7 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                     Ok(#runtime::Frame::new(
                         #state {
                             count,
-                            start: children.prefix,
+                            start: prefix,
                             end,
                             geometry,
                         },
@@ -474,6 +540,12 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                 }
             }
         });
+    }
+    if has_recursive_marker && rendered.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &schema.name,
+            "unsupported recursive object body layout",
+        ));
     }
     Ok(rendered)
 }

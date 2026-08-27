@@ -3,6 +3,99 @@
 const COUNT: u16 = 200;
 const DEPTH: usize = 64;
 
+pub fn pair_view(seed: u64) -> u64 {
+    let input = opaque_pair_input(seed);
+    let bytes = input.as_slice();
+    if skip_pair(bytes, 0) != Some(bytes.len()) {
+        return u64::MAX;
+    }
+    let Some(left_end) = skip_pair(bytes, 1) else {
+        return u64::MAX;
+    };
+    let Some(&opcode) = bytes.get(left_end) else {
+        return u64::MAX;
+    };
+    let right = left_end + 1;
+    if bytes.get(right) != Some(&1) || skip_pair(bytes, right) != Some(bytes.len()) {
+        return u64::MAX;
+    }
+    (u64::from(opcode) << 32)
+        | (u64::from(bytes[right + 1]) << 16)
+        | u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+}
+
+fn skip_pair(input: &[u8], start: usize) -> Option<usize> {
+    let mut pending = [0u8; DEPTH];
+    let mut depth = 0usize;
+    let mut cursor = start;
+    'parse: loop {
+        match *input.get(cursor)? {
+            1 => {
+                input.get(cursor..cursor + 2)?;
+                cursor += 2;
+            }
+            4 => {
+                if depth == DEPTH {
+                    return None;
+                }
+                cursor += 1;
+                pending[depth] = 0;
+                depth += 1;
+                continue;
+            }
+            _ => return None,
+        }
+        loop {
+            if depth == 0 {
+                return Some(cursor);
+            }
+            let frame = depth - 1;
+            if pending[frame] == 0 {
+                input.get(cursor)?;
+                cursor += 1;
+                pending[frame] = 1;
+                continue 'parse;
+            }
+            depth -= 1;
+        }
+    }
+}
+
+struct PairInput {
+    bytes: [u8; 256],
+    len: usize,
+}
+
+impl PairInput {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+#[inline(never)]
+fn opaque_pair_input(seed: u64) -> PairInput {
+    let depth = 16 + seed as usize % 16;
+    let mut input = PairInput {
+        bytes: [0; 256],
+        len: 0,
+    };
+    for _ in 0..depth {
+        input.bytes[input.len] = 4;
+        input.len += 1;
+    }
+    input.bytes[input.len..input.len + 2].copy_from_slice(&[1, seed as u8]);
+    input.len += 2;
+    for index in 0..depth {
+        input.bytes[input.len..input.len + 3].copy_from_slice(&[
+            index as u8,
+            1,
+            (seed as u8).wrapping_add(index as u8).wrapping_add(1),
+        ]);
+        input.len += 3;
+    }
+    input
+}
+
 pub fn direct_batch(seed: u64) -> u64 {
     let input = opaque_input(seed, true);
     let bytes = input.as_slice();

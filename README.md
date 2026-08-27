@@ -264,13 +264,14 @@ declared wire width produce nominal field-site errors rather than truncating.
 - Writers and views do not allocate or dispatch dynamically inside wire-repr.
 - The public read API is identical for borrowed and retained-owned backing.
 
-## Recursive array views
+## Recursive arrays and object continuations
 
-A closed selector enum may recurse through a generic body containing a stored count followed by a
-terminal `wire::Array<T>`. The caller selects a compile-time depth; zero returns `DepthExceeded`,
-while positive values reserve one `[MaybeUninit<u32>; DEPTH]` pending-count stack, or
-`4 * DEPTH` bytes. Generated code never uses recursive Rust calls, allocation, or a per-item offset
-index. Recursive stored counts must fit `u32` even when their physical controller is wider.
+A closed selector enum may recurse through a generic counted-array body or a fixed sequential
+object body containing `wire::Recursive<T>`. The caller selects a compile-time depth; zero returns
+`DepthExceeded`, while positive values reserve one `[MaybeUninit<u32>; DEPTH]` continuation stack,
+or `4 * DEPTH` bytes. Multiple recursive body grammars add a generated u8/u16 kind stack. Generated
+code never uses recursive Rust calls, allocation, or a per-item offset index. Recursive stored
+counts must fit `u32` even when their physical controller is wider.
 
 ```rust
 #[derive(WireView)]
@@ -282,14 +283,32 @@ struct Values<T> {
 }
 
 #[derive(WireView)]
+struct Pair<T> {
+    left: wire_repr::wire::Recursive<T>,
+    opcode: u8,
+    right: wire_repr::wire::Recursive<T>,
+}
+
+#[derive(WireView)]
+struct Leaf {
+    value: u8,
+}
+
+#[derive(WireView)]
 #[wire(selector = u8)]
 enum Value {
+    #[wire(value = 0)]
+    Leaf(Leaf),
     #[wire(value = 1)]
     Array(Values<Value>),
+    #[wire(value = 2)]
+    Pair(Pair<Value>),
 }
 
 let root = Value::view::<128>(input)?;
-let ValueVariant::Array(array) = root.variant();
+let ValueVariant::Array(array) = root.variant() else {
+    panic!("array")
+};
 let fifth = array.items().get(5)?;
 ```
 
@@ -299,9 +318,13 @@ descriptors are selected only after generated framing validates every represente
 candidate falls back to exact prefix replay; no mode stores item offsets. `get(n)` therefore has
 mode-dependent complexity. `iter()` always keeps one forward cursor and remains linear in the
 complete represented range.
-Schema-specific errors crossing recursive repetition retain their absolute offset but flatten to a
-finite `RecursiveError::Child`. The current capability is read-side; recursive object
-continuations and recursive builders remain separate work.
+
+`wire::Recursive<T>` is the zero-sized schema marker required by Rust to break the nominal type
+cycle in an object body. Fixed sequential scalars and byte arrays may appear before, between, or
+after recursive fields. Generated `start`/`resume` transitions skip the body iteratively; direct
+child getters re-frame only their already-proven exact ranges. Schema-specific errors crossing a
+recursive boundary retain their absolute offset but flatten to a finite `RecursiveError::Child`.
+The capability remains read-side; recursive builders are separate work.
 
 ## Examples
 
@@ -336,10 +359,10 @@ The implemented surface currently covers fixed scalars and byte arrays, constant
 logical conversions, validators, nested children, demand geometry, controller dependencies,
 conditional groups, runtime arrays, static enums with exact unknown forwarding, nominal and inline
 bitfields, nested physical selections, computed fields, homogeneous `views`, heterogeneous
-cursors, exact View forwarding, depth-bounded recursive enum arrays, and progressive typestate
-writers.
+cursors, exact View forwarding, depth-bounded recursive enum arrays, recursive object
+continuations, and progressive typestate writers.
 
-General traversal, recursive object continuations, and recursive builders remain separate future
-composition work. Negotiated selector maps, hidden indexes, eager semantic-tree validation, and a
-general limits framework are not part of the target core.
+General traversal and recursive builders remain separate future composition work. Negotiated
+selector maps, hidden indexes, eager semantic-tree validation, and a general limits framework are
+not part of the target core.
 Every shipped class adds behavioral plus generated/idiomatic/best-safe workload evidence.

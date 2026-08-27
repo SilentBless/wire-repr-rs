@@ -813,6 +813,7 @@ fn render_finish(
                 }
                 FieldKind::RawBytes(_)
                 | FieldKind::Array(_)
+                | FieldKind::Recursive(_)
                 | FieldKind::Flag(_)
                 | FieldKind::BitProjection(_)
                 | FieldKind::Nested(_) => unreachable!(),
@@ -956,6 +957,7 @@ fn writer_error_names(schema: &Schema) -> (Vec<Option<syn::Ident>>, Vec<Option<s
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
+            | FieldKind::Recursive(_)
             | FieldKind::Flag(_)
             | FieldKind::BitProjection(_)
             | FieldKind::Nested(_) => None,
@@ -1108,6 +1110,7 @@ fn render_pending_constants(
                 }
                 FieldKind::RawBytes(_)
                 | FieldKind::Array(_)
+                | FieldKind::Recursive(_)
                 | FieldKind::Flag(_)
                 | FieldKind::BitProjection(_)
                 | FieldKind::Nested(_) => unreachable!(),

@@ -105,13 +105,15 @@ Primitive schemas support all fixed-width Rust integers and floats. `usize`, `is
 `char` require an explicit physical representation such as `#[wire(as = u32, le)]`; both read and
 write conversions are checked.
 
-## Recursive array views
+## Recursive array and object views
 
-A closed selector enum may pass itself directly to a generic body containing an unsigned stored
-count followed by a terminal `wire::Array<T>`. Such roots expose `Schema::view::<DEPTH>(backing)`
-for a caller-selected const depth; zero returns `DepthExceeded`. Framing uses an iterative
-`[MaybeUninit<u32>; DEPTH]` continuation stack, so stack cost is `4 * DEPTH` bytes rather than
-hidden allocation or recursive Rust calls. Recursive count values must fit `u32`.
+A closed selector enum may pass itself directly to a generic body containing either an unsigned
+stored count followed by terminal `wire::Array<T>` or fixed sequential fields separated by
+`wire::Recursive<T>` markers. Such roots expose `Schema::view::<DEPTH>(backing)` for a
+caller-selected const depth; zero returns `DepthExceeded`. Framing uses an iterative
+`[MaybeUninit<u32>; DEPTH]` continuation stack rather than allocation or recursive Rust calls.
+One recursive body grammar costs `4 * DEPTH` stack bytes; multiple body grammars add a generated
+one- or two-byte kind stack per level. Recursive count values must fit `u32`.
 
 Recursive item getters return the same generated root view family. Arrays retain at most 384 bytes
 for exact fixed, affine-formula, interval-event, ranked-palette, factorized, recursive-shape,
@@ -120,6 +122,10 @@ represented sequence before selection; failures use exact prefix replay. No mode
 offsets, and a forward iterator always retains one physical cursor.
 Schema-specific constant, conversion, validator, and manual-leaf errors crossing recursive
 repetition retain their absolute offset but flatten to finite `RecursiveError::Child` values.
+
+Recursive object bodies compile their fixed segments and child markers into static `start` and
+`resume` transitions. Their views retain direct field boundaries only; a recursive child getter
+re-frames its already-proven exact range into the same generated root view family.
 
 ## Guarantees
 
@@ -145,13 +151,12 @@ repetition retain their absolute offset but flatten to finite `RecursiveError::C
 - Syntactically fixed structs/bitfields expose prevalidated `ExactSizeIterator` views; closed enums
   and variable structs frame lazily.
 - Heterogeneous cursors yield coexisting views and never advance on failure.
-- Recursive enum arrays retain no per-item offset index, accept caller-selected depths beyond 64,
-  and fail with `DepthExceeded` before crossing that bound.
+- Recursive enum arrays and object bodies retain no per-item offset index, accept caller-selected
+  depths beyond 64, and fail with `DepthExceeded` before crossing that bound.
 - Fixed writers return `NeedMore`; growable collections use their existing `Extend<u8>` capability.
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-General traversal, recursive object continuations, and recursive builders remain future composition
-work. The core does not add negotiated selector maps, hidden indexes, general resource-limit
-machinery, runtime schemas, semantic object materialization, async I/O, or feature-selected
-renderers.
+General traversal and recursive builders remain future composition work. The core does not add
+negotiated selector maps, hidden indexes, general resource-limit machinery, runtime schemas,
+semantic object materialization, async I/O, or feature-selected renderers.

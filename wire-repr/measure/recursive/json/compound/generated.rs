@@ -40,6 +40,88 @@ enum Value {
     #[wire(value = 3)]
     Bytes(Bytes),
 }
+
+#[derive(WireView)]
+struct Pair<T> {
+    left: wire_repr::wire::Recursive<T>,
+    opcode: u8,
+    right: wire_repr::wire::Recursive<T>,
+}
+
+#[derive(WireView)]
+struct DecoratedPair<T> {
+    prefix: u8,
+    left: wire_repr::wire::Recursive<T>,
+    #[wire(le)]
+    opcode: u16,
+    right: wire_repr::wire::Recursive<T>,
+    suffix: u8,
+}
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum PairValue {
+    #[wire(value = 1)]
+    Leaf(Bool),
+    #[wire(value = 4)]
+    Pair(Pair<PairValue>),
+    #[wire(value = 5)]
+    Decorated(DecoratedPair<PairValue>),
+}
+
+pub fn pair_view(seed: u64) -> u64 {
+    let input = opaque_pair_input(seed);
+    let root = match PairValue::view::<64>(input.as_slice()) {
+        Ok(root) => root,
+        Err(_) => return u64::MAX,
+    };
+    let PairValueVariant::Pair(pair) = root.variant() else {
+        return u64::MAX;
+    };
+    let opcode = pair.opcode();
+    let right = match pair.right() {
+        Ok(right) => right,
+        Err(_) => return u64::MAX,
+    };
+    let PairValueVariant::Leaf(right) = right.variant() else {
+        return u64::MAX;
+    };
+    (u64::from(opcode) << 32) | (u64::from(right.value()) << 16) | input.len as u64
+}
+
+struct PairInput {
+    bytes: [u8; 256],
+    len: usize,
+}
+
+impl PairInput {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+#[inline(never)]
+fn opaque_pair_input(seed: u64) -> PairInput {
+    let depth = 16 + seed as usize % 16;
+    let mut input = PairInput {
+        bytes: [0; 256],
+        len: 0,
+    };
+    for _ in 0..depth {
+        input.bytes[input.len] = 4;
+        input.len += 1;
+    }
+    input.bytes[input.len..input.len + 2].copy_from_slice(&[1, seed as u8]);
+    input.len += 2;
+    for index in 0..depth {
+        input.bytes[input.len..input.len + 3].copy_from_slice(&[
+            index as u8,
+            1,
+            (seed as u8).wrapping_add(index as u8).wrapping_add(1),
+        ]);
+        input.len += 3;
+    }
+    input
+}
 pub fn direct_batch(seed: u64) -> u64 {
     let input = opaque_input(seed, true);
     let root = match Value::view::<64>(input.as_slice()) {
