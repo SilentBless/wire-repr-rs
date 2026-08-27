@@ -113,9 +113,11 @@ for a caller-selected const depth; zero returns `DepthExceeded`. Framing uses an
 `[MaybeUninit<u32>; DEPTH]` continuation stack, so stack cost is `4 * DEPTH` bytes rather than
 hidden allocation or recursive Rust calls. Recursive count values must fit `u32`.
 
-Recursive item getters return the same generated root view family. Fixed and short-period item
-geometry use exact direct formulas; irregular input uses exact prefix replay. A forward iterator
-always retains one physical cursor and remains linear in the represented bytes.
+Recursive item getters return the same generated root view family. Arrays retain at most 384 bytes
+for exact fixed, affine-formula, interval-event, ranked-palette, factorized, recursive-shape,
+periodic-palette, or packed-run geometry. Every candidate is validated across the complete
+represented sequence before selection; failures use exact prefix replay. No mode stores item
+offsets, and a forward iterator always retains one physical cursor.
 Schema-specific constant, conversion, validator, and manual-leaf errors crossing recursive
 repetition retain their absolute offset but flatten to finite `RecursiveError::Child` values.
 

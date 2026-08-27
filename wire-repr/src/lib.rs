@@ -23,7 +23,7 @@ pub mod __private {
     pub use crate::recursive::{
         FlattenRecursiveError, RecursiveArrayView, RecursiveBody, RecursiveChildren,
         RecursiveDepth, RecursiveError, RecursiveFrame, RecursiveGeometry,
-        RecursiveGeometryBuilder, RecursiveSlot, flatten_recursive_array_error,
+        RecursiveGeometryBuilder, RecursiveMeasure, RecursiveSlot, flatten_recursive_array_error,
         frame_recursive_array_extent,
     };
     pub use crate::schema::{

@@ -252,10 +252,12 @@ Views yielded by a cursor borrow the original backing, not the cursor, and may c
 
 A runtime array getter returns a facade retaining only the collection range and authoritative
 count. Its iterator frames one exact item per `next`; a repeated traversal replays item geometry.
-Recursive arrays additionally retain compact exact geometry: fixed and short-period representations
-use direct ordinal formulas, while irregular inputs replay the prefix. `get(n)` is therefore exact
-but has schema- and data-dependent complexity; `iter()` always keeps one forward cursor and remains
-linear in the represented bytes. The core does not retain or allocate a per-item range index.
+Recursive arrays additionally retain at most 384 bytes of compact exact geometry. Generated
+framing validates, then selects fixed, affine formula, interval-event, ranked-palette, factorized,
+recursive-shape, periodic-palette, or packed-run geometry when the complete observed sequence proves
+that representation. Unsupported widths, cardinalities, or formulas fail closed to exact replay.
+No mode stores item offsets. `get(n)` therefore has mode-dependent complexity, while `iter()` always
+keeps one forward cursor and remains linear in the represented bytes.
 
 ## 8. Progressive writers
 
@@ -400,15 +402,15 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fifteen discovered zones and thirty-nine cases: fixed scalars and
+The current mandatory corpus has fifteen discovered zones and forty-nine cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
-lattice, fixed byte arrays with multiple nested children, dynamic geometry, controller and
-conditional dependencies, runtime collection decode/build/copy, static enum decode/build/copy,
-nominal and inline bitfields, fragmented physical selections, fixed and dynamic computed fields,
-fixed and variable homogeneous views, heterogeneous cursors, fixed/periodic/replay recursive
-ordinal geometry, and fixed, automatic, and callback-driven output growth. Each covers read and
-write paths where applicable. The measurement tool inspects final linked consumer symbols for code
-shape, call topology, stack, allocation, and dispatch evidence.
+lattice, fixed byte arrays with multiple nested children, dynamic geometry, conditional
+controllers, runtime collection decode/build/copy, static enum decode/build/copy, nominal and
+inline bitfields, fragmented physical selections, fixed and dynamic computed fields, fixed and
+variable homogeneous views, heterogeneous cursors, all eight compact recursive geometry forms
+plus replay, and fixed, automatic, and callback-driven output growth. Each covers read and write
+paths where applicable. The measurement tool inspects final linked consumer symbols for code shape,
+call topology, stack, allocation, and dispatch evidence.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
 IR may explain an optimization result but is not treated as a latency oracle. State and
 artifact-size probes remain isolated from measured hot-path implementations.

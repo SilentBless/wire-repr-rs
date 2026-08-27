@@ -1134,6 +1134,11 @@ fn render_recursive_view(
                             }
                             other => #view_error::Recursive(other),
                         })?;
+                        shape ^= 0xa11a_0000_0000_0000u64
+                            ^ u64::from(children.count)
+                            ^ (children.prefix as u64).rotate_left(17);
+                        shape = shape.wrapping_mul(0x0000_0100_0000_01b3);
+                        nested_depth = nested_depth.max((stack_depth + 1) as u32);
                         cursor = cursor
                             .checked_add(#selector_width)
                             .and_then(|position| position.checked_add(children.prefix))
@@ -1172,6 +1177,9 @@ fn render_recursive_view(
                         )
                         .map_err(#view_error::#error_variant)?;
                         let (_, consumed) = frame.into_parts();
+                        shape ^= 0x1eaf_0000_0000_0000u64
+                            ^ (consumed as u64).rotate_left(23);
+                        shape = shape.wrapping_mul(0x0000_0100_0000_01b3);
                         cursor = body_start.checked_add(consumed).ok_or(
                             #view_error::Layout(#runtime::LayoutError {
                                 field: stringify!(#variant_name),
@@ -1198,8 +1206,10 @@ fn render_recursive_view(
         ];
         let mut stack_depth = 0usize;
         let mut cursor = 0usize;
+        let mut shape = 0xcbf2_9ce4_8422_2325u64;
+        let mut nested_depth = 0u32;
         loop {
-            if stack_depth >= depth.remaining() {
+            if stack_depth >= depth.remaining() || stack_depth >= #depth {
                 return Err(#view_error::DepthExceeded(#runtime::DepthExceeded {
                     limit: depth.limit(),
                     offset: absolute_offset.saturating_add(cursor),
@@ -1216,6 +1226,8 @@ fn render_recursive_view(
                     .try_into()
                     .expect("selector width checked"),
             );
+            shape ^= selector as u64;
+            shape = shape.wrapping_mul(0x0000_0100_0000_01b3);
             match selector {
                 #(#skip_arms)*
                 value => {
@@ -1228,7 +1240,11 @@ fn render_recursive_view(
 
             loop {
                 if stack_depth == 0 {
-                    return Ok(cursor);
+                    return Ok(#runtime::__private::RecursiveMeasure {
+                        consumed: cursor,
+                        shape,
+                        nested_depth,
+                    });
                 }
                 // SAFETY: each level is written immediately before `stack_depth` includes it.
                 let remaining = unsafe {
@@ -1263,7 +1279,6 @@ fn render_recursive_view(
                 #depth,
             >;
 
-            #[inline]
             fn frame<const #depth: usize>(
                 input: &[u8],
                 #frame_offset: usize,
@@ -1278,7 +1293,7 @@ fn render_recursive_view(
                 input: &[u8],
                 absolute_offset: usize,
                 depth: #runtime::__private::RecursiveDepth,
-            ) -> Result<usize, Self::Error> {
+            ) -> Result<#runtime::__private::RecursiveMeasure, Self::Error> {
                 #render_skip
             }
 
@@ -1430,6 +1445,8 @@ fn render_recursive_view(
                 #(#recursive_bounds,)*
             {
                 #selector_validation
+                let bytes = input.as_ref();
+                let input_len = bytes.len();
                 let body_depth = #runtime::__private::RecursiveDepth::new(
                     __WIRE_REPR_DEPTH,
                 )
@@ -1437,12 +1454,19 @@ fn render_recursive_view(
                 .map_err(#view_error::DepthExceeded)?;
                 let frame = <#callback as #runtime::__private::RecursiveFrame<
                     #primary_marker,
-                >>::frame::<__WIRE_REPR_DEPTH>(input.as_ref(), 0, body_depth)?;
+                >>::frame::<__WIRE_REPR_DEPTH>(bytes, 0, body_depth)?;
                 let (state, consumed) = frame.into_parts();
-                if consumed != input.as_ref().len() {
+                if consumed > input_len {
+                    return Err(#view_error::InvalidFrame(#runtime::InvalidFrameExtent {
+                        offset: 0,
+                        consumed,
+                        available: input_len,
+                    }));
+                }
+                if consumed < input_len {
                     return Err(#view_error::Trailing(#runtime::TrailingBytes {
                         offset: consumed,
-                        trailing: input.as_ref().len() - consumed,
+                        trailing: input_len - consumed,
                     }));
                 }
                 Ok(#view_impl {

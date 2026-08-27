@@ -285,9 +285,12 @@ let ValueVariant::Array(array) = root.variant();
 let fifth = array.items().get(5)?;
 ```
 
-Fixed and short-period item geometry receives a direct ordinal formula. Irregular geometry falls
-back to exact prefix replay: `get(n)` may therefore be linear in the preceding represented bytes.
-`iter()` always keeps one forward cursor and is linear in the complete represented range.
+Recursive arrays retain at most 384 bytes of compact geometry. Exact fixed, affine-formula,
+interval-event, ranked-palette, factorized, recursive-shape, periodic-palette, and packed-run
+descriptors are selected only after generated framing validates every represented item. Any failed
+candidate falls back to exact prefix replay; no mode stores item offsets. `get(n)` therefore has
+mode-dependent complexity. `iter()` always keeps one forward cursor and remains linear in the
+complete represented range.
 Schema-specific errors crossing recursive repetition retain their absolute offset but flatten to a
 finite `RecursiveError::Child`. The current capability is read-side; recursive object
 continuations and recursive builders remain separate work.

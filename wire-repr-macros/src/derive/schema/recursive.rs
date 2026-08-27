@@ -424,18 +424,18 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                             field: stringify!(#items_name),
                         }),
                     )?;
-                    let (consumed, geometry) =
-                        #runtime::__private::frame_recursive_array_extent::<
-                            #callback,
-                            #marker<#root>,
-                            #recursive_depth,
-                        >(available, count, array_offset, depth)
-                        .map_err(|error| {
-                            #runtime::__private::flatten_recursive_array_error(
-                                error,
-                                array_offset,
-                            )
-                        })?;
+                    let mut geometry = #runtime::__private::RecursiveGeometry::new();
+                    let consumed = #runtime::__private::frame_recursive_array_extent::<
+                        #callback,
+                        #marker<#root>,
+                        #recursive_depth,
+                    >(available, count, array_offset, depth, &mut geometry)
+                    .map_err(|error| {
+                        #runtime::__private::flatten_recursive_array_error(
+                            error,
+                            array_offset,
+                        )
+                    })?;
                     let end = children.prefix.checked_add(consumed).ok_or(
                         #runtime::__private::RecursiveError::Layout(#runtime::LayoutError {
                             field: stringify!(#items_name),

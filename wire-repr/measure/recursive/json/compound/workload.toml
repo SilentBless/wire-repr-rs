@@ -28,7 +28,7 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
 [[cases.rules]]
 name = "amortized lookup attention"
 level = "attention"
@@ -59,7 +59,7 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
@@ -72,8 +72,8 @@ assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.10"
 message = "generated direct recursive lookup trails the fused safe implementation"
 
 [[cases]]
-name = "replay_lookup_200"
-entry = "replay_lookup"
+name = "mixed_lookup_200"
+entry = "mixed_lookup"
 seeds = [0, 1, 127, 199, 81985529216486895, -1]
 [cases.runtime]
 samples = 7
@@ -90,17 +90,17 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
 assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.10"
-message = "generated replay lookup has optimization headroom"
+message = "generated mixed recursive lookup has optimization headroom"
 [[cases.rules]]
 name = "best safe attention"
 level = "attention"
 assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.10"
-message = "generated replay lookup trails the fused safe implementation"
+message = "generated mixed recursive lookup trails the fused safe implementation"
 
 [[cases]]
 name = "iterate_200"
@@ -121,7 +121,7 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
@@ -132,3 +132,183 @@ name = "best safe attention"
 level = "attention"
 assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.10"
 message = "generated recursive iterator trails the fused safe implementation"
+
+[[cases]]
+name = "geometry_fixed"
+entry = "fixed_mode"
+seeds = [0, 1, 127, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"
+
+[[cases]]
+name = "geometry_exact_formula"
+entry = "formula_mode"
+seeds = [0, 1, 127, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"
+
+[[cases]]
+name = "geometry_interval_events"
+entry = "interval_mode"
+seeds = [0, 1, 63, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"
+
+[[cases]]
+name = "geometry_ranked_palette"
+entry = "ranked_mode"
+seeds = [0, 1, 127, 199, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"
+
+[[cases]]
+name = "geometry_factorized"
+entry = "factorized_mode"
+seeds = [0, 1, 127, 299, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"
+
+[[cases]]
+name = "geometry_recursive_shape"
+entry = "shape_mode"
+seeds = [0, 1, 63, 127, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"
+
+[[cases]]
+name = "geometry_periodic_palette"
+entry = "periodic_mode"
+seeds = [0, 1, 127, 199, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"
+
+[[cases]]
+name = "geometry_packed_runs"
+entry = "packed_mode"
+seeds = [0, 1, 127, 511, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"
+
+[[cases]]
+name = "geometry_replay"
+entry = "replay_mode"
+seeds = [0, 1, 127, 599, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"
+
+[[cases]]
+name = "geometry_factorized_rank_overflow"
+entry = "factorized_fallback_mode"
+seeds = [0, 1, 63, 127, -1]
+[cases.runtime]
+samples = 5
+target_ms = 2
+warmup = 20
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+[[cases.rules]]
+name = "geometry latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "generated compact geometry mode has safe optimization headroom"

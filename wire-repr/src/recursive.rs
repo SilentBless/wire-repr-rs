@@ -2,6 +2,11 @@
 
 use crate::{ArrayError, Frame, InvalidFrameExtent, LayoutError, NeedMore, TrailingBytes};
 
+mod geometry;
+pub use geometry::{
+    RecursiveGeometry, RecursiveGeometryBuilder, RecursiveMeasure, frame_recursive_array_extent,
+};
+
 /// Recursive representation exceeded the caller-selected depth.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("recursive depth {limit} exceeded at absolute offset {offset}")]
@@ -163,7 +168,7 @@ pub trait RecursiveFrame<Slot> {
         input: &[u8],
         absolute_offset: usize,
         depth: RecursiveDepth,
-    ) -> Result<usize, Self::Error>;
+    ) -> Result<RecursiveMeasure, Self::Error>;
 
     /// Reconstructs the same generated root view family over one exact item span.
     ///
@@ -217,314 +222,6 @@ pub trait RecursiveBody<C, Slot>: Sized {
         C: RecursiveFrame<Slot>;
 }
 
-const GEOMETRY_PERIOD: usize = 64;
-const GEOMETRY_REPLAY: u8 = 0;
-const GEOMETRY_FIXED: u8 = 1;
-const GEOMETRY_PERIODIC: u8 = 2;
-
-/// Compact exact geometry retained for one recursive array.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct RecursiveGeometry {
-    widths: [u8; GEOMETRY_PERIOD],
-    run_len: u32,
-    cycle_bytes: u32,
-    fixed_width: u16,
-    period: u8,
-    kind: u8,
-}
-
-impl RecursiveGeometry {
-    /// Reports the selected exact lookup strategy for diagnostics and measurement.
-    #[doc(hidden)]
-    #[must_use]
-    pub const fn kind(&self) -> &'static str {
-        match self.kind {
-            GEOMETRY_FIXED => "fixed",
-            GEOMETRY_PERIODIC => "periodic",
-            GEOMETRY_REPLAY => "replay",
-            _ => "invalid",
-        }
-    }
-    fn span<C, Slot, const DEPTH: usize>(
-        &self,
-        input: &[u8],
-        count: usize,
-        offset: usize,
-        depth: RecursiveDepth,
-        requested: usize,
-    ) -> Result<Option<core::ops::Range<usize>>, ArrayError<RecursiveError>>
-    where
-        C: RecursiveFrame<Slot>,
-    {
-        if requested >= count {
-            return Ok(None);
-        }
-
-        let direct = match self.kind {
-            GEOMETRY_FIXED => {
-                let width = usize::from(self.fixed_width);
-                let start = requested
-                    .checked_mul(width)
-                    .ok_or(ArrayError::InvalidExtent {
-                        index: requested,
-                        consumed: usize::MAX,
-                        available: input.len(),
-                    })?;
-                Some(start..start + width)
-            }
-            GEOMETRY_PERIODIC => {
-                let period = usize::from(self.period);
-                let run = requested / self.run_len as usize;
-                let class = run % period;
-                let cycles = run / period;
-                let prefix = self.widths[..class]
-                    .iter()
-                    .map(|width| usize::from(*width))
-                    .sum::<usize>();
-                let width = usize::from(self.widths[class]);
-                let start = cycles * self.cycle_bytes as usize * self.run_len as usize
-                    + prefix * self.run_len as usize
-                    + requested % self.run_len as usize * width;
-                Some(start..start + width)
-            }
-            GEOMETRY_REPLAY => None,
-            _ => unreachable!("generated geometry kind"),
-        };
-        if let Some(range) = direct {
-            return Ok(Some(range));
-        }
-
-        let mut cursor = 0usize;
-        for index in 0..=requested {
-            let absolute = offset
-                .checked_add(cursor)
-                .ok_or(ArrayError::InvalidExtent {
-                    index,
-                    consumed: usize::MAX,
-                    available: input.len().saturating_sub(cursor),
-                })?;
-            let consumed =
-                C::skip::<DEPTH>(&input[cursor..], absolute, depth).map_err(|source| {
-                    ArrayError::Item {
-                        index,
-                        source: source.flatten_recursive(absolute),
-                    }
-                })?;
-            if consumed == 0 {
-                return Err(ArrayError::NonProgress {
-                    index,
-                    offset: absolute,
-                });
-            }
-            let end = cursor
-                .checked_add(consumed)
-                .ok_or(ArrayError::InvalidExtent {
-                    index,
-                    consumed,
-                    available: input.len().saturating_sub(cursor),
-                })?;
-            if end > input.len() {
-                return Err(ArrayError::InvalidExtent {
-                    index,
-                    consumed,
-                    available: input.len().saturating_sub(cursor),
-                });
-            }
-            if index == requested {
-                return Ok(Some(cursor..end));
-            }
-            cursor = end;
-        }
-        unreachable!("requested index is bounded")
-    }
-}
-
-/// In-place geometry accumulator used only while framing one array.
-#[doc(hidden)]
-pub struct RecursiveGeometryBuilder {
-    observed: [u8; GEOMETRY_PERIOD],
-    candidates: u64,
-    run_count: usize,
-    current_width: usize,
-    current_len: u32,
-    common_run_len: u32,
-    fixed_width: Option<usize>,
-    started: bool,
-    failed: bool,
-}
-
-impl RecursiveGeometryBuilder {
-    /// Creates an empty geometry accumulator.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            observed: [0; GEOMETRY_PERIOD],
-            candidates: u64::MAX,
-            run_count: 0,
-            current_width: 0,
-            current_len: 0,
-            common_run_len: 0,
-            fixed_width: None,
-            started: false,
-            failed: false,
-        }
-    }
-
-    /// Observes one exact item width.
-    pub fn push(&mut self, width: usize) {
-        self.fixed_width = match self.fixed_width {
-            None => Some(width),
-            Some(previous) if previous == width => Some(previous),
-            Some(_) => Some(usize::MAX),
-        };
-        if !self.started {
-            self.started = true;
-            self.current_width = width;
-            self.current_len = 1;
-        } else if self.current_width == width {
-            self.current_len += 1;
-        } else {
-            self.finish_run(false);
-            self.current_width = width;
-            self.current_len = 1;
-        }
-    }
-
-    /// Finishes the exact compact geometry or a replay marker.
-    #[must_use]
-    pub fn finish(mut self) -> RecursiveGeometry {
-        if self.started {
-            self.finish_run(true);
-        }
-        if let Some(width) = self.fixed_width
-            && width != usize::MAX
-            && let Ok(width) = u16::try_from(width)
-        {
-            return RecursiveGeometry {
-                widths: [0; GEOMETRY_PERIOD],
-                run_len: 0,
-                cycle_bytes: 0,
-                fixed_width: width,
-                period: 0,
-                kind: GEOMETRY_FIXED,
-            };
-        }
-        if !self.failed {
-            let period = (1..=self.run_count.min(GEOMETRY_PERIOD))
-                .find(|period| self.candidates & (1u64 << (period - 1)) != 0);
-            if let Some(period) = period {
-                let mut widths = [0u8; GEOMETRY_PERIOD];
-                let mut cycle_bytes = 0u32;
-                for (index, width) in widths.iter_mut().enumerate().take(period) {
-                    *width = self.observed[index];
-                    cycle_bytes += u32::from(*width);
-                }
-                return RecursiveGeometry {
-                    widths,
-                    run_len: self.common_run_len,
-                    cycle_bytes,
-                    fixed_width: 0,
-                    period: period as u8,
-                    kind: GEOMETRY_PERIODIC,
-                };
-            }
-        }
-        RecursiveGeometry {
-            widths: [0; GEOMETRY_PERIOD],
-            run_len: 0,
-            cycle_bytes: 0,
-            fixed_width: 0,
-            period: 0,
-            kind: GEOMETRY_REPLAY,
-        }
-    }
-
-    fn finish_run(&mut self, final_run: bool) {
-        let Ok(width) = u8::try_from(self.current_width) else {
-            self.failed = true;
-            return;
-        };
-        if self.common_run_len == 0 {
-            self.common_run_len = self.current_len;
-        } else if (!final_run && self.current_len != self.common_run_len)
-            || (final_run && self.current_len > self.common_run_len)
-        {
-            self.failed = true;
-            return;
-        }
-        let index = self.run_count;
-        if index < GEOMETRY_PERIOD {
-            self.observed[index] = width;
-        }
-        for period in 1..=GEOMETRY_PERIOD {
-            if index >= period && width != self.observed[index % period] {
-                self.candidates &= !(1u64 << (period - 1));
-            }
-        }
-        self.failed |= self.candidates == 0;
-        self.run_count += 1;
-    }
-}
-
-impl Default for RecursiveGeometryBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Frames one counted recursive array without retaining per-item states or offsets.
-#[doc(hidden)]
-pub fn frame_recursive_array_extent<C, Slot, const DEPTH: usize>(
-    input: &[u8],
-    count: usize,
-    offset: usize,
-    depth: RecursiveDepth,
-) -> Result<(usize, RecursiveGeometry), ArrayError<RecursiveError>>
-where
-    C: RecursiveFrame<Slot>,
-{
-    let mut cursor = 0usize;
-    let mut geometry = RecursiveGeometryBuilder::new();
-    for index in 0..count {
-        let absolute = offset
-            .checked_add(cursor)
-            .ok_or(ArrayError::InvalidExtent {
-                index,
-                consumed: usize::MAX,
-                available: input.len().saturating_sub(cursor),
-            })?;
-        let consumed = C::skip::<DEPTH>(&input[cursor..], absolute, depth).map_err(|source| {
-            ArrayError::Item {
-                index,
-                source: source.flatten_recursive(absolute),
-            }
-        })?;
-        if consumed == 0 {
-            return Err(ArrayError::NonProgress {
-                index,
-                offset: absolute,
-            });
-        }
-        let end = cursor
-            .checked_add(consumed)
-            .ok_or(ArrayError::InvalidExtent {
-                index,
-                consumed,
-                available: input.len().saturating_sub(cursor),
-            })?;
-        if end > input.len() {
-            return Err(ArrayError::InvalidExtent {
-                index,
-                consumed,
-                available: input.len().saturating_sub(cursor),
-            });
-        }
-        geometry.push(consumed);
-        cursor = end;
-    }
-    Ok((cursor, geometry.finish()))
-}
 /// Flattens a recursive array facade error without retaining recursive generic error types.
 #[doc(hidden)]
 pub fn flatten_recursive_array_error(
@@ -612,6 +309,7 @@ where
     }
 
     /// Returns one exact recursive root view by ordinal.
+    #[inline(always)]
     #[allow(unsafe_code)]
     pub fn get(
         &self,
@@ -699,7 +397,7 @@ where
     C: RecursiveFrame<Slot>,
 {
     type Item = Result<C::View<'input, DEPTH>, ArrayError<RecursiveError>>;
-
+    #[inline(always)]
     #[allow(unsafe_code)]
     fn next(&mut self) -> Option<Self::Item> {
         if self.failed {

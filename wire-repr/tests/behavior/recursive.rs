@@ -191,6 +191,66 @@ fn push_array(output: &mut Vec<u8>, body: impl FnOnce(&mut Vec<u8>) -> u16) {
 
     output[count_offset..count_offset + 2].copy_from_slice(&count.to_le_bytes());
 }
+
+fn push_width(output: &mut Vec<u8>, width: usize) {
+    match width {
+        1 => push_null(output),
+        2 => push_bool(output, false),
+        3..=258 => {
+            let bytes = [0u8; 255];
+            push_bytes(output, &bytes[..width - 3]);
+        }
+        _ => panic!("test width outside JSON fixture range"),
+    }
+}
+
+fn mixed_class(index: usize, modulo: usize) -> usize {
+    let mut value = index as u64 ^ 0x6a09_e667_f3bc_c909;
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    ((value ^ (value >> 31)) % modulo as u64) as usize
+}
+
+fn encoded_widths(widths: &[usize]) -> Vec<u8> {
+    let mut input = Vec::new();
+    push_array(&mut input, |output| {
+        for width in widths {
+            push_width(output, *width);
+        }
+        u16::try_from(widths.len()).expect("fixture count")
+    });
+    input
+}
+
+fn assert_geometry(
+    input: Vec<u8>,
+    expected_kind: &str,
+    widths: &[usize],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = JsonValue::view::<128>(input)?;
+    let JsonValueVariant::Array(array) = root.variant() else {
+        panic!("geometry fixture root array")
+    };
+    let items = array.items();
+    assert_eq!(items.geometry_kind(), expected_kind);
+    assert_eq!(items.len(), widths.len());
+    let base = array.as_ref()[2..].as_ptr() as usize;
+    let mut expected_start = 0usize;
+    for (index, expected_width) in widths.iter().copied().enumerate() {
+        let item = items.get(index)?.expect("represented item");
+        assert_eq!(item.as_ref().len(), expected_width, "item {index} width");
+        let start = item.as_ref().as_ptr() as usize;
+        assert_eq!(
+            start.checked_sub(base),
+            Some(expected_start),
+            "item {index} start",
+        );
+        expected_start += expected_width;
+    }
+    assert!(items.get(widths.len())?.is_none());
+    Ok(())
+}
 fn assert_bool_over_scoped_channel<const DEPTH: usize, V>(value: V)
 where
     V: JsonValueView<DEPTH> + Send,
@@ -291,43 +351,116 @@ fn recursive_array_returns_the_ordinary_root_view_family() -> Result<(), Box<dyn
 }
 
 #[test]
-fn recursive_geometry_selects_periodic_and_replay_modes_exactly()
+fn recursive_geometry_selects_formula_and_segment_modes_exactly()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut periodic = Vec::new();
-    push_array(&mut periodic, |output| {
-        for _ in 0..2 {
-            push_bool(output, true);
-        }
-        for _ in 0..2 {
-            push_null(output);
-        }
-        for _ in 0..2 {
-            push_bool(output, false);
-        }
-        for _ in 0..2 {
-            push_null(output);
-        }
-        8
-    });
-    let root = JsonValue::view::<16>(periodic)?;
-    let JsonValueVariant::Array(array) = root.variant() else {
-        panic!("periodic root array")
-    };
-    assert_eq!(array.items().geometry_kind(), "periodic");
+    let fixed = vec![1; 64];
+    assert_geometry(encoded_widths(&fixed), "fixed", &fixed)?;
 
-    let mut replay = Vec::new();
-    push_array(&mut replay, |output| {
-        for length in 0..65u8 {
-            let bytes = [length; 64];
-            push_bytes(output, &bytes[..usize::from(length)]);
+    let formula = (0..100).map(|index| 3 + index).collect::<Vec<_>>();
+    assert_geometry(encoded_widths(&formula), "exact_formula", &formula)?;
+
+    let mut intervals = Vec::new();
+    for run in 0..12 {
+        intervals.extend(core::iter::repeat_n(5 + run * 3, run + 1));
+    }
+    assert_geometry(encoded_widths(&intervals), "interval_events", &intervals)?;
+
+    let factorized = (0..9_000usize)
+        .map(|index| {
+            let variant = 2 + ((index % 16) * 7) % 13;
+            let depth_class = (index / 16) % 64;
+            let depth = (depth_class * 5 + depth_class / 7) % 17;
+            let flags = ((index / 1_024) % 8).count_ones() as usize * 3;
+            let controller = (index / 8_192) % 32;
+            let controller = (controller * controller + 3 * controller) % 29;
+            8 + variant + depth + flags + controller
+        })
+        .collect::<Vec<_>>();
+    assert_geometry(encoded_widths(&factorized), "factorized", &factorized)?;
+
+    let short_factorized = (0..128usize)
+        .map(|index| {
+            let low = ((index % 16) * 7) % 16;
+            let high = ((index / 16) % 8) * 16;
+            3 + low + high
+        })
+        .collect::<Vec<_>>();
+    assert_geometry(
+        encoded_widths(&short_factorized),
+        "factorized",
+        &short_factorized,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn recursive_geometry_selects_palette_shape_and_replay_modes_exactly()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert!(core::mem::size_of::<wire_repr::__private::RecursiveGeometry>() <= 384);
+    assert!(core::mem::size_of::<wire_repr::__private::RecursiveGeometryBuilder>() <= 384);
+
+    let periodic = [2, 2, 1, 1].repeat(8);
+    assert_geometry(encoded_widths(&periodic), "periodic_palette", &periodic)?;
+
+    let ranked = (0..200)
+        .map(|index| 3 + mixed_class(index, 50))
+        .collect::<Vec<_>>();
+    assert_geometry(encoded_widths(&ranked), "ranked_palette", &ranked)?;
+
+    let mut packed = Vec::with_capacity(512);
+    let mut previous = usize::MAX;
+    for run in 0..256 {
+        let mut class = mixed_class(run, 50);
+        if class == previous {
+            class = (class + 1) % 50;
         }
-        65
+        previous = class;
+        let width = 3 + class;
+        packed.extend([width, width]);
+    }
+    assert_geometry(encoded_widths(&packed), "packed_runs", &packed)?;
+
+    let mut recursive_shape = Vec::new();
+    let mut shape_widths = Vec::new();
+    push_array(&mut recursive_shape, |output| {
+        for _ in 0..150 {
+            push_array(output, |_| 0);
+            shape_widths.push(3);
+            push_array(output, |output| {
+                push_null(output);
+                1
+            });
+            shape_widths.push(4);
+        }
+        300
     });
-    let root = JsonValue::view::<16>(replay)?;
-    let JsonValueVariant::Array(array) = root.variant() else {
-        panic!("replay root array")
-    };
-    assert_eq!(array.items().geometry_kind(), "replay");
+    assert_geometry(recursive_shape, "recursive_shape", &shape_widths)?;
+
+    let replay = (0..1_200)
+        .map(|index| 3 + mixed_class(index, 200))
+        .collect::<Vec<_>>();
+    assert_geometry(encoded_widths(&replay), "replay", &replay)?;
+    Ok(())
+}
+
+#[test]
+fn recursive_geometry_capacity_boundaries_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let mut widths = Vec::with_capacity(257);
+    let mut previous = usize::MAX;
+    for index in 0..257 {
+        let mut class = mixed_class(index, 50);
+        if class == previous {
+            class = (class + 1) % 50;
+        }
+        previous = class;
+        widths.push(3 + class);
+    }
+    assert_geometry(
+        encoded_widths(&widths[..256]),
+        "ranked_palette",
+        &widths[..256],
+    )?;
+    assert_geometry(encoded_widths(&widths), "replay", &widths)?;
     Ok(())
 }
 
@@ -421,6 +554,26 @@ fn recursive_geometry_errors_keep_the_nested_absolute_site() {
     assert!(matches!(
         bad_constant,
         JsonValueViewError::Recursive(wire_repr::__private::RecursiveError::Child { offset: 4 })
+    ));
+}
+
+#[test]
+fn generated_recursive_skip_checks_const_stack_capacity() {
+    type Slot = <JsonArray<JsonValue> as wire_repr::__private::RecursiveSlot<0>>::Marker;
+    let error = <__WireReprJsonValueRecursiveCallback as wire_repr::__private::RecursiveFrame<
+        Slot,
+    >>::skip::<0>(
+        &[3, 1, 0, 0],
+        0,
+        wire_repr::__private::RecursiveDepth::new(1),
+    )
+    .expect_err("zero-capacity generated stack");
+    assert!(matches!(
+        error,
+        JsonValueViewError::DepthExceeded(wire_repr::DepthExceeded {
+            limit: 1,
+            offset: 0,
+        })
     ));
 }
 
