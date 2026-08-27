@@ -27,10 +27,11 @@ pub mod __private {
         frame_recursive_array_extent,
     };
     pub use crate::schema::{
-        ArrayError, ArrayItem, ArrayView, ConstantMismatch, FieldExpr, Frame, InvalidFrameExtent,
-        IsSet, LayoutError, LeadingWire, NeedMore, ScalarBuildConversionError,
-        ScalarConversionError, Set, TrailingBytes, Unset, WireFields, WireSelect, checked_align,
-        checked_optional_equal, checked_optional_sum, frame_array_extent,
+        ArrayError, ArrayItem, ArrayView, ConstantMismatch, FieldExpr, FieldPath, FieldPrefix,
+        FieldRoute, FieldRouteEnd, FieldRouteStep, FieldUnion, Frame, InvalidFrameExtent, IsSet,
+        LayoutError, LeadingWire, NeedMore, NestedField, ScalarBuildConversionError,
+        ScalarConversionError, Set, TrailingBytes, Unset, WireFieldSchema, WireFields, WireSelect,
+        checked_align, checked_optional_equal, checked_optional_sum, frame_array_extent,
     };
     pub use thiserror::Error as ThisError;
 }
@@ -41,10 +42,10 @@ pub use output::{
 pub use recursive::DepthExceeded;
 pub use schema::{
     ArrayError, ArrayItem, ArrayIter, ArrayView, ByteSelection, ConstantMismatch, Cursor,
-    ExactWire, FieldPath, FieldUnion, FixedViews, Frame, InvalidFrameExtent, LayoutError, NeedMore,
-    NextView, ScalarBuildConversionError, ScalarConversionError, Selection, SelectionBytes,
-    SelectionChunks, SequenceError, TrailingBytes, VariableViews, WireBuilder, WireBytes, WireView,
-    WireWrite, select,
+    ExactWire, FixedViews, Frame, InvalidFrameExtent, LayoutError, NeedMore, NextView,
+    ScalarBuildConversionError, ScalarConversionError, Selection, SelectionBytes, SelectionChunks,
+    SequenceError, TrailingBytes, VariableViews, WireBuilder, WireBytes, WireView, WireWrite,
+    select,
 };
 #[doc(inline)]
 pub use wire_repr_macros::{WireBuilder, WireView, computed, validator};

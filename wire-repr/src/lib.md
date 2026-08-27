@@ -140,7 +140,7 @@ repetition retain their absolute offset but flatten to finite `RecursiveError::C
 - Exact array forwarding copies one validated collection range and patches its authoritative count.
 - Static enums expose borrowed exhaustive variants and preserve exact unknown bodies.
 - Nominal and inline bitfields use checked logical ranges while fresh writers zero undeclared bits.
-- Root-relative typed selections expose merged chunks and physical-order byte iteration.
+- Typed selections expose merged root-relative chunks and zero-sized paths through nested children.
 - Computed scalar destinations patch from logical fields and physical selections in DAG order.
 - Syntactically fixed structs/bitfields expose prevalidated `ExactSizeIterator` views; closed enums
   and variable structs frame lazily.
@@ -151,7 +151,7 @@ repetition retain their absolute offset but flatten to finite `RecursiveError::C
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-Nested selection paths, general traversal, recursive object continuations, and recursive builders
-remain future composition work. The core does not add negotiated selector maps, hidden indexes,
-general resource-limit machinery, runtime schemas, semantic object materialization, async I/O, or
-feature-selected renderers.
+General traversal, recursive object continuations, and recursive builders remain future composition
+work. The core does not add negotiated selector maps, hidden indexes, general resource-limit
+machinery, runtime schemas, semantic object materialization, async I/O, or feature-selected
+renderers.

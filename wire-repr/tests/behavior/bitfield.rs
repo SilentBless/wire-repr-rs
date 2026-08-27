@@ -47,6 +47,13 @@ struct HighBit {
     high: bool,
 }
 
+#[derive(WireView)]
+#[wire(as = u8)]
+struct MarkerName {
+    #[wire(bit = 0)]
+    marker: bool,
+}
+
 #[test]
 fn nominal_bitfield_views_decode_declared_ranges_and_keep_exact_bits() -> TestResult {
     let view = Foo::view([0b1010_1010, 0b0101_1011])?;
@@ -143,5 +150,11 @@ fn u128_full_width_and_high_bit_paths_do_not_shift_by_128() -> TestResult {
     HighBit::builder(&mut high[..]).high(true)?.finish()?;
     assert_eq!(high[15], 0x80);
     assert!(HighBit::view(high)?.high());
+    Ok(())
+}
+
+#[test]
+fn bitfield_field_named_marker_does_not_collide_with_generated_paths() -> TestResult {
+    assert!(MarkerName::view([1])?.marker());
     Ok(())
 }

@@ -343,22 +343,57 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let (common_impl, common_types, common_where) = common_generics.split_for_impl();
     let trait_path = quote!(#view_trait #type_generics);
 
-    let field_count = schema.fields.len();
+    let field_prefix = super::fresh_type_ident(&bounded, "FieldPrefix");
+    let fields_marker = private_ident(schema, "fields_marker");
+    let mut fields_generics = bounded.clone();
+    fields_generics
+        .params
+        .push(GenericParam::Type(TypeParam::from(field_prefix.clone())));
+    fields_generics
+        .make_where_clause()
+        .predicates
+        .push(parse_quote!(#field_prefix: #runtime::__private::FieldPrefix));
+    let (fields_impl, _, fields_where) = fields_generics.split_for_impl();
+    let root_fields_type = quote!(
+        #fields_type<
+            #(#schema_arguments,)*
+            #runtime::__private::FieldRouteEnd<#self_type>
+        >
+    );
     let field_members = schema
-        .fields
-        .iter()
-        .map(|field| {
-            let name = &field.name;
-            quote!(pub #name: #runtime::FieldPath,)
-        })
-        .collect::<Vec<_>>();
-    let field_values = schema
         .fields
         .iter()
         .enumerate()
         .map(|(index, field)| {
             let name = &field.name;
-            quote!(#name: #runtime::FieldPath::new(base + #index),)
+            let route = quote!(
+                <#field_prefix as #runtime::__private::FieldPrefix>::Append<#index>
+            );
+            match &field.kind {
+                FieldKind::Nested(nested) => {
+                    let ty = &nested.ty;
+                    quote!(pub #name: #runtime::__private::NestedField<#route, #ty>,)
+                }
+                _ => quote!(pub #name: #runtime::__private::FieldPath<#route>,),
+            }
+        })
+        .collect::<Vec<_>>();
+    let field_values = schema
+        .fields
+        .iter()
+        .map(|field| {
+            let name = &field.name;
+            if matches!(&field.kind, FieldKind::Nested(_)) {
+                quote!(#name: unsafe {
+                    // SAFETY: this route is emitted from the matching schema and prefix family.
+                    #runtime::__private::NestedField::new()
+                },)
+            } else {
+                quote!(#name: unsafe {
+                    // SAFETY: this route is emitted from the matching schema and prefix family.
+                    #runtime::__private::FieldPath::new()
+                },)
+            }
         })
         .collect::<Vec<_>>();
     let range_arms = schema
@@ -369,6 +404,30 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             let start = geometry_start(schema, index, runtime);
             let end = geometry_end(schema, index, runtime);
             quote!(#index => Some(#start..#end),)
+        })
+        .collect::<Vec<_>>();
+    let nested_selection_arms = schema
+        .fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let FieldKind::Nested(nested) = &field.kind else {
+                return None;
+            };
+            let name = &field.name;
+            let ty = &nested.ty;
+            Some(quote! {
+                #index => {
+                    // SAFETY: this hook receives the parent schema's retained exact span/state pair.
+                    let parent = unsafe { Self::selection_field_range(input, state, #index) }?;
+                    let child_input = input.get(parent.clone())?;
+                    // SAFETY: child_input and child state were framed together at this field site.
+                    let child_range = unsafe { Route::resolve::<#ty>(child_input, &state.#name) }?;
+                    let start = parent.start.checked_add(child_range.start)?;
+                    let end = parent.start.checked_add(child_range.end)?;
+                    (end <= parent.end).then_some(start..end)
+                }
+            })
         })
         .collect::<Vec<_>>();
     let sequence_lifetime = fresh_schema_lifetime(schema, &bounded, "sequence");
@@ -459,8 +518,30 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
 
 
         #[doc = "Typed physical field paths generated for this schema."]
-        #vis struct #fields_type {
+        #vis struct #fields_type #fields_impl #fields_where {
             #(#field_members)*
+            #fields_marker: ::core::marker::PhantomData<fn() -> (#self_type, #field_prefix)>,
+        }
+
+
+        // SAFETY: generated field routes preserve their supplied root prefix and the hooks below
+        // resolve only checked descriptor ranges for the matching framed schema.
+        #[allow(unsafe_code)]
+        unsafe impl #impl_generics #runtime::__private::WireFieldSchema
+            for #self_type #where_clause
+        {
+            type Fields<#field_prefix: #runtime::__private::FieldPrefix> =
+                #fields_type<#(#schema_arguments,)* #field_prefix>;
+
+            unsafe fn fields<#field_prefix: #runtime::__private::FieldPrefix>()
+                -> Self::Fields<#field_prefix>
+            {
+                #fields_type {
+                    #(#field_values)*
+                    #fields_marker: ::core::marker::PhantomData,
+                }
+            }
+
         }
         #[doc(hidden)]
         #vis struct #view_impl #common_impl #common_where {
@@ -472,7 +553,10 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
 
         #[doc = "Exact-source view API generated for this schema."]
         #vis trait #view_trait #impl_generics:
-            #runtime::__private::WireFields<Fields = #fields_type>
+            #runtime::__private::WireFields<
+                Fields = #root_fields_type,
+                SelectionRoot = #self_type,
+            >
             #where_clause
         {
             /// Returns the exact represented bytes.
@@ -497,15 +581,22 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #(#retained_methods)*
         }
 
-        impl #retained_impl #runtime::__private::WireFields
+        // SAFETY: this retained view owns the exact input/state pair supplied to route resolution.
+        #[allow(unsafe_code)]
+        unsafe impl #retained_impl #runtime::__private::WireFields
             for #retained_type #retained_where
         {
-            type Fields = #fields_type;
-            const FIELD_COUNT: usize = #field_count;
+            type Fields = #root_fields_type;
+            type SelectionRoot = #self_type;
 
             #[inline(always)]
-            fn fields(&self, base: usize) -> Self::Fields {
-                #fields_type { #(#field_values)* }
+            fn fields(&self) -> Self::Fields {
+                // SAFETY: the generated root prefix matches this view's SelectionRoot.
+                unsafe {
+                    <#self_type as #runtime::__private::WireFieldSchema>::fields::<
+                        #runtime::__private::FieldRouteEnd<#self_type>
+                    >()
+                }
             }
 
             #[inline(always)]
@@ -514,6 +605,14 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     #(#range_arms)*
                     _ => None,
                 }
+            }
+
+            unsafe fn resolve_field_route<Route>(&self) -> Option<::core::ops::Range<usize>>
+            where
+                Route: #runtime::__private::FieldRoute<Root = Self::SelectionRoot>,
+            {
+                // SAFETY: this view owns the exact input and descriptor passed to the route.
+                unsafe { Route::resolve::<#self_type>(self.as_ref(), &self.descriptor) }
             }
         }
 
@@ -526,15 +625,22 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #(#projected_methods)*
         }
 
-        impl #projected_impl #runtime::__private::WireFields
+        // SAFETY: this projected view borrows the exact input/state pair supplied to route resolution.
+        #[allow(unsafe_code)]
+        unsafe impl #projected_impl #runtime::__private::WireFields
             for #projected_type #projected_where
         {
-            type Fields = #fields_type;
-            const FIELD_COUNT: usize = #field_count;
+            type Fields = #root_fields_type;
+            type SelectionRoot = #self_type;
 
             #[inline(always)]
-            fn fields(&self, base: usize) -> Self::Fields {
-                #fields_type { #(#field_values)* }
+            fn fields(&self) -> Self::Fields {
+                // SAFETY: the generated root prefix matches this view's SelectionRoot.
+                unsafe {
+                    <#self_type as #runtime::__private::WireFieldSchema>::fields::<
+                        #runtime::__private::FieldRouteEnd<#self_type>
+                    >()
+                }
             }
 
             #[inline(always)]
@@ -544,7 +650,16 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     _ => None,
                 }
             }
+
+            unsafe fn resolve_field_route<Route>(&self) -> Option<::core::ops::Range<usize>>
+            where
+                Route: #runtime::__private::FieldRoute<Root = Self::SelectionRoot>,
+            {
+                // SAFETY: this view borrows the exact input and descriptor passed to the route.
+                unsafe { Route::resolve::<#self_type>(self.as_ref(), self.descriptor) }
+            }
         }
+
 
         impl #common_impl #runtime::ExactWire<#self_type>
             for #view_impl #common_types #common_where
@@ -588,6 +703,32 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     #represented_length_field: input.len(),
                     descriptor: state,
                     #view_marker: ::core::marker::PhantomData,
+                }
+            }
+
+            #[allow(unsafe_code)]
+            #[inline(always)]
+            unsafe fn selection_field_range(
+                input: &[u8],
+                state: &Self::State,
+                index: usize,
+            ) -> Option<::core::ops::Range<usize>> {
+                // SAFETY: route resolution receives the exact span and state retained by framing.
+                let view = unsafe {
+                    <Self as #runtime::WireView>::from_validated_parts(input, state)
+                };
+                #runtime::__private::WireFields::field_range(&view, index)
+            }
+
+            #[inline(always)]
+            unsafe fn selection_nested_range<Route: #runtime::__private::FieldRoute>(
+                input: &[u8],
+                state: &Self::State,
+                index: usize,
+            ) -> Option<::core::ops::Range<usize>> {
+                match index {
+                    #(#nested_selection_arms)*
+                    _ => None,
                 }
             }
             #flatten_error

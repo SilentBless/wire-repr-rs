@@ -370,10 +370,30 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
     } else {
         quote!(#variant_view<#(#trait_body_views),*>)
     };
+    let schema_arguments = generic_arguments(&bounded);
+    let field_prefix = fresh_type_ident(&bounded, "FieldPrefix");
+    let mut fields_generics = bounded.clone();
+    fields_generics
+        .params
+        .push(GenericParam::Type(parse_quote!(#field_prefix)));
+    fields_generics
+        .make_where_clause()
+        .predicates
+        .push(parse_quote!(#field_prefix: #runtime::__private::FieldPrefix));
+    let (fields_impl, _, fields_where) = fields_generics.split_for_impl();
+    let root_fields_type = quote!(
+        #fields_type<
+            #(#schema_arguments,)*
+            #runtime::__private::FieldRouteEnd<#self_type>
+        >
+    );
     let trait_declaration = quote! {
         #[doc = "Exact-source view API generated for this static enum schema."]
         #vis trait #view_trait #impl_generics:
-            #runtime::__private::WireFields<Fields = #fields_type>
+            #runtime::__private::WireFields<
+                Fields = #root_fields_type,
+                SelectionRoot = #self_type,
+            >
             #where_clause
         {
             fn as_bytes(&self) -> &[u8];
@@ -383,7 +403,6 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             ) -> #trait_variant_type;
         }
     };
-    let schema_arguments = generic_arguments(&bounded);
     let retained_type = quote!(#view_impl<#(#schema_arguments,)* #backing, #state_type, #marker>);
     let projected_type = quote!(
         #view_impl<
@@ -500,9 +519,41 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
         #error_declaration
 
         #[doc = "Typed physical enum paths generated for this schema."]
-        #vis struct #fields_type {
-            pub selector: #runtime::FieldPath,
-            pub body: #runtime::FieldPath,
+        #vis struct #fields_type #fields_impl #fields_where {
+            pub selector: #runtime::__private::FieldPath<
+                <#field_prefix as #runtime::__private::FieldPrefix>::Append<0>
+            >,
+            pub body: #runtime::__private::FieldPath<
+                <#field_prefix as #runtime::__private::FieldPrefix>::Append<1>
+            >,
+            marker: ::core::marker::PhantomData<fn() -> (#self_type, #field_prefix)>,
+        }
+
+        // SAFETY: generated enum routes preserve their root prefix and map selector/body ordinals
+        // to ranges established by exact enum framing.
+        #[allow(unsafe_code)]
+        unsafe impl #impl_generics #runtime::__private::WireFieldSchema
+            for #self_type #where_clause
+        {
+            type Fields<#field_prefix: #runtime::__private::FieldPrefix> =
+                #fields_type<#(#schema_arguments,)* #field_prefix>;
+
+            unsafe fn fields<#field_prefix: #runtime::__private::FieldPrefix>()
+                -> Self::Fields<#field_prefix>
+            {
+                #fields_type {
+                    selector: unsafe {
+                        // SAFETY: this route is emitted from the matching enum and root prefix.
+                        #runtime::__private::FieldPath::new()
+                    },
+                    body: unsafe {
+                        // SAFETY: this route is emitted from the matching enum and root prefix.
+                        #runtime::__private::FieldPath::new()
+                    },
+                    marker: ::core::marker::PhantomData,
+                }
+            }
+
         }
 
         #[doc(hidden)]
@@ -531,14 +582,18 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             #retained_view_methods
         }
 
-        impl #retained_impl #runtime::__private::WireFields for #retained_type #retained_where {
-            type Fields = #fields_type;
-            const FIELD_COUNT: usize = 2;
+        // SAFETY: this retained view owns the exact input/state pair supplied to route resolution.
+        #[allow(unsafe_code)]
+        unsafe impl #retained_impl #runtime::__private::WireFields for #retained_type #retained_where {
+            type Fields = #root_fields_type;
+            type SelectionRoot = #self_type;
 
-            fn fields(&self, base: usize) -> Self::Fields {
-                #fields_type {
-                    selector: #runtime::FieldPath::new(base),
-                    body: #runtime::FieldPath::new(base + 1),
+            fn fields(&self) -> Self::Fields {
+                // SAFETY: the generated root prefix matches this view's SelectionRoot.
+                unsafe {
+                    <#self_type as #runtime::__private::WireFieldSchema>::fields::<
+                        #runtime::__private::FieldRouteEnd<#self_type>
+                    >()
                 }
             }
 
@@ -548,6 +603,14 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
                     1 => Some(#selector_width..self.represented_length),
                     _ => None,
                 }
+            }
+
+            unsafe fn resolve_field_route<Route>(&self) -> Option<::core::ops::Range<usize>>
+            where
+                Route: #runtime::__private::FieldRoute<Root = Self::SelectionRoot>,
+            {
+                // SAFETY: this view owns the exact input and state passed to the route.
+                unsafe { Route::resolve::<#self_type>(self.as_ref(), &self.state) }
             }
         }
 
@@ -559,14 +622,18 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             #projected_view_methods
         }
 
-        impl #projected_impl #runtime::__private::WireFields for #projected_type #projected_where {
-            type Fields = #fields_type;
-            const FIELD_COUNT: usize = 2;
+        // SAFETY: this projected view borrows the exact input/state pair supplied to route resolution.
+        #[allow(unsafe_code)]
+        unsafe impl #projected_impl #runtime::__private::WireFields for #projected_type #projected_where {
+            type Fields = #root_fields_type;
+            type SelectionRoot = #self_type;
 
-            fn fields(&self, base: usize) -> Self::Fields {
-                #fields_type {
-                    selector: #runtime::FieldPath::new(base),
-                    body: #runtime::FieldPath::new(base + 1),
+            fn fields(&self) -> Self::Fields {
+                // SAFETY: the generated root prefix matches this view's SelectionRoot.
+                unsafe {
+                    <#self_type as #runtime::__private::WireFieldSchema>::fields::<
+                        #runtime::__private::FieldRouteEnd<#self_type>
+                    >()
                 }
             }
 
@@ -576,6 +643,14 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
                     1 => Some(#selector_width..self.represented_length),
                     _ => None,
                 }
+            }
+
+            unsafe fn resolve_field_route<Route>(&self) -> Option<::core::ops::Range<usize>>
+            where
+                Route: #runtime::__private::FieldRoute<Root = Self::SelectionRoot>,
+            {
+                // SAFETY: this view borrows the exact input and state passed to the route.
+                unsafe { Route::resolve::<#self_type>(self.as_ref(), self.state) }
             }
         }
 
@@ -641,6 +716,26 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
                 }
             }
 
+
+            unsafe fn selection_field_range(
+                input: &[u8],
+                _state: &Self::State,
+                index: usize,
+            ) -> Option<::core::ops::Range<usize>> {
+                match index {
+                    0 => Some(0..#selector_width),
+                    1 => Some(#selector_width..input.len()),
+                    _ => None,
+                }
+            }
+
+            unsafe fn selection_nested_range<Route: #runtime::__private::FieldRoute>(
+                _input: &[u8],
+                _state: &Self::State,
+                _index: usize,
+            ) -> Option<::core::ops::Range<usize>> {
+                None
+            }
             fn flatten_recursive_error(
                 error: Self::Error,
                 fallback_offset: usize,

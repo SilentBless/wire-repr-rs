@@ -58,21 +58,32 @@ enum NonLeadingChoice {
 
 struct Manual<const MODE: u8>;
 
-struct ManualRoot<B>(B);
+struct ManualRoot<const MODE: u8, B>(B);
 
-impl<B: AsRef<[u8]>> AsRef<[u8]> for ManualRoot<B> {
+impl<const MODE: u8, B: AsRef<[u8]>> AsRef<[u8]> for ManualRoot<MODE, B> {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
     }
 }
 
-impl<B: AsRef<[u8]>> wire_repr::__private::WireFields for ManualRoot<B> {
+// SAFETY: this manual root exposes no fields or routes and retains its complete input.
+#[allow(unsafe_code)]
+unsafe impl<const MODE: u8, B: AsRef<[u8]>> wire_repr::__private::WireFields
+    for ManualRoot<MODE, B>
+{
     type Fields = ();
-    const FIELD_COUNT: usize = 0;
+    type SelectionRoot = Manual<MODE>;
 
-    fn fields(&self, _base: usize) -> Self::Fields {}
+    fn fields(&self) -> Self::Fields {}
 
     fn field_range(&self, _index: usize) -> Option<core::ops::Range<usize>> {
+        None
+    }
+
+    unsafe fn resolve_field_route<Route>(&self) -> Option<core::ops::Range<usize>>
+    where
+        Route: wire_repr::__private::FieldRoute<Root = Self::SelectionRoot>,
+    {
         None
     }
 }
@@ -110,9 +121,17 @@ unsafe impl<const MODE: u8> wire_repr::WireView for Manual<MODE> {
     }
 }
 
+// SAFETY: the empty field family creates no routes and needs no range hooks.
+#[allow(unsafe_code)]
+unsafe impl<const MODE: u8> wire_repr::__private::WireFieldSchema for Manual<MODE> {
+    type Fields<Prefix: wire_repr::__private::FieldPrefix> = ();
+
+    unsafe fn fields<Prefix: wire_repr::__private::FieldPrefix>() -> Self::Fields<Prefix> {}
+}
+
 impl<const MODE: u8> wire_repr::__private::WireSelect for Manual<MODE> {
     type Root<B>
-        = ManualRoot<B>
+        = ManualRoot<MODE, B>
     where
         B: AsRef<[u8]>;
 

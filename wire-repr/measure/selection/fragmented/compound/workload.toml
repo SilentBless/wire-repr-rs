@@ -48,3 +48,47 @@ name = "latency attention"
 level = "attention"
 assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.50"
 message = "selection chunk iteration has safe optimization headroom"
+
+[[cases]]
+name = "nested_bytes"
+entry = "nested_bytes"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "nested selection byte iteration has safe optimization headroom"
+
+[[cases]]
+name = "nested_chunks"
+entry = "nested_chunks"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 2"
+message = "nested selection chunk iteration has safe optimization headroom"

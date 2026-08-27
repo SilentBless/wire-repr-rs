@@ -11,6 +11,31 @@ struct Foo {
     tail: u8,
 }
 
+#[derive(WireView)]
+struct Leaf {
+    head: u8,
+    length: u8,
+    #[wire(bytes = length)]
+    body: wire_repr::wire::Bytes,
+    tail: u8,
+}
+
+#[derive(WireView)]
+struct Middle {
+    leaf_length: u8,
+    #[wire(bytes = leaf_length)]
+    leaf: Leaf,
+    end: u8,
+}
+
+#[derive(WireView)]
+struct Root {
+    middle_length: u8,
+    #[wire(bytes = middle_length)]
+    middle: Middle,
+    suffix: u8,
+}
+
 pub fn bytes(seed: u64) -> u64 {
     let input = input(seed);
     let Ok(view) = Foo::view(input) else {
@@ -37,6 +62,58 @@ pub fn chunks(seed: u64) -> u64 {
                     value.rotate_left(5) ^ u64::from(*byte)
                 })
         })
+}
+
+pub fn nested_bytes(seed: u64) -> u64 {
+    let input = nested_input(seed);
+    let Ok(view) = Root::view(input) else {
+        return u64::MAX;
+    };
+    select(&view)
+        .include(|fields| {
+            fields
+                .middle
+                .fields(|middle| middle.leaf.fields(|leaf| leaf.body))
+                | fields.suffix
+        })
+        .bytes()
+        .fold(0u64, |value, byte| value.rotate_left(5) ^ u64::from(byte))
+}
+
+pub fn nested_chunks(seed: u64) -> u64 {
+    let input = nested_input(seed);
+    let Ok(view) = Root::view(input) else {
+        return u64::MAX;
+    };
+    select(&view)
+        .exclude(|fields| {
+            fields
+                .middle
+                .fields(|middle| middle.leaf.fields(|leaf| leaf.body))
+        })
+        .chunks()
+        .fold(0u64, |value, chunk| {
+            chunk
+                .iter()
+                .fold(value ^ chunk.len() as u64, |value, byte| {
+                    value.rotate_left(5) ^ u64::from(*byte)
+                })
+        })
+}
+
+#[inline(never)]
+fn nested_input(seed: u64) -> [u8; 9] {
+    [
+        7,
+        5,
+        seed as u8,
+        2,
+        (seed >> 8) as u8,
+        (seed >> 16) as u8,
+        (seed >> 24) as u8,
+        (seed >> 32) as u8,
+        (seed >> 40) as u8,
+    ]
 }
 
 #[inline(never)]

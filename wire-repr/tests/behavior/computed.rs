@@ -83,6 +83,20 @@ struct Fallible {
     tail: u8,
 }
 
+#[derive(WireView, WireBuilder)]
+struct ComputedChild {
+    first: u8,
+    tail: u8,
+}
+
+#[derive(WireView, WireBuilder)]
+struct NestedComputed {
+    #[wire(le, computed = checksum16(include(child.first, suffix)))]
+    checksum: u16,
+    child: ComputedChild,
+    suffix: u8,
+}
+
 #[test]
 fn computed_field_patches_its_stored_value_from_physical_selection() -> TestResult {
     let mut output = [0u8; 6];
@@ -151,4 +165,16 @@ fn fallible_computed_error_keeps_the_destination_field_site() {
         error,
         wire_repr::WriteError::Schema(FallibleWriteError::ChecksumComputed(_))
     ));
+}
+
+#[test]
+fn computed_callbacks_accept_nested_physical_paths() -> TestResult {
+    let mut output = [0u8; 5];
+    NestedComputed::builder(&mut output[..])
+        .child(|child| child.first(3).tail(9))?
+        .suffix(4)?
+        .finish()?;
+    assert_eq!(output, [7, 0, 3, 9, 4]);
+    assert_eq!(NestedComputed::view(output)?.checksum(), 7);
+    Ok(())
 }

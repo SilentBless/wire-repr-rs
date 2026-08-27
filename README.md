@@ -136,12 +136,20 @@ Use the collision-free `select(&view)` entry point; it reserves no generated sch
 use wire_repr::select;
 
 let selected = select(&view).exclude(|fields| fields.checksum);
+let nested = select(&view).include(|fields| {
+    fields.header.fields(|header| header.kind | header.flags)
+        | fields.payload
+});
 ```
 
 Selections retain no flattened buffer. `chunks()` merges adjacent or overlapping spans in physical
-order, while `bytes()` iterates the same fragmented representation. Stored scalar destinations use
+order, while `bytes()` iterates the same fragmented representation. Nested paths are zero-sized
+types with no runtime depth limit, path buffer, allocation, or dispatch. A manual child remains
+selectable whole; descending through it requires an explicit unsafe field-schema implementation
+that binds its typed field family to exact range hooks. Stored scalar destinations use
 `computed = callback(...)`; fallible callbacks use `try_computed` plus `#[computed]` error metadata.
-Callbacks may mix logical getters with `include(...)` and `exclude(...)`. The generated dependency
+Callbacks may mix logical getters with `include(...)` and
+`exclude(...)`, including paths such as `include(header.kind, payload)`. The generated dependency
 DAG orders computed patches independently of declaration order. Destinations must precede
 demand-derived offsets, while their selections may consume demand-framed fields.
 
@@ -327,11 +335,11 @@ fixtures, both public examples, cross-target checks, rustdoc, and package-conten
 The implemented surface currently covers fixed scalars and byte arrays, constants, explicit
 logical conversions, validators, nested children, demand geometry, controller dependencies,
 conditional groups, runtime arrays, static enums with exact unknown forwarding, nominal and inline
-bitfields, root-relative physical selections, computed fields, homogeneous `views`, heterogeneous
+bitfields, nested physical selections, computed fields, homogeneous `views`, heterogeneous
 cursors, exact View forwarding, depth-bounded recursive enum arrays, and progressive typestate
 writers.
 
-General traversal, recursive object continuations, recursive builders, and nested physical
-selection paths remain separate future composition work. Negotiated selector maps, hidden indexes,
-eager semantic-tree validation, and a general limits framework are not part of the target core.
+General traversal, recursive object continuations, and recursive builders remain separate future
+composition work. Negotiated selector maps, hidden indexes, eager semantic-tree validation, and a
+general limits framework are not part of the target core.
 Every shipped class adds behavioral plus generated/idiomatic/best-safe workload evidence.

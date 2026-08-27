@@ -4,11 +4,10 @@ This document defines the target production architecture and clean-cutover contr
 `wire-repr`. The current implementation covers named structs, fixed scalars and byte arrays,
 constants, explicit logical conversions, validators, nested children, demand geometry, controller
 dependencies, conditional choice groups, counted runtime arrays, static enums, nominal and inline
-bitfields, root-relative physical selections, computed fields, homogeneous views, heterogeneous
-cursors, exact View forwarding, and depth-bounded recursive enum arrays. Nested selection paths,
-general traversal, recursive object bodies, and recursive builders remain future composition work.
-New layout classes extend this one model rather than restoring the removed legacy renderer or
-introducing parallel modes.
+bitfields, nested physical selections, computed fields, homogeneous views, heterogeneous cursors,
+exact View forwarding, and depth-bounded recursive enum arrays. General traversal, recursive object
+bodies, and recursive builders remain future composition work. New layout classes extend this one
+model rather than restoring the removed legacy renderer or introducing parallel modes.
 
 ## 1. Product boundary
 
@@ -323,18 +322,28 @@ or buffer-pool ownership outside wire-repr.
 
 ## 9. Physical byte selections and computed fields
 
-Generated struct views expose root-relative typed physical selections through the collision-free
-`select(&view)` function:
+Generated struct views expose root-relative typed physical selections, including paths through
+nested derived or generic children, through the collision-free `select(&view)` function:
 
 ```rust
 select(&view).include(|fields| fields.header | fields.payload)
 select(&view).exclude(|fields| fields.checksum)
+select(&view).include(|fields| {
+    fields.header.fields(|header| header.kind | header.flags)
+        | fields.payload
+})
 ```
 
 Selections preserve physical order, merge overlap, and remain fragmented without materialization.
 They expose `len()`, borrowed `chunks()`, byte iteration, and exact copying. A simple byte algorithm
 may fold `selection.bytes()`; an optimized checksum feeds each `selection.chunks()` slice directly
 to its update routine.
+
+Nested paths are zero-sized type-level routes. They impose no runtime depth limit, allocation,
+registry, or encoded path buffer. Resolution walks generated retained child state and translates
+each exact child range to the root span. A manual child remains selectable as one whole physical
+field; descending into it additionally requires an explicit unsafe field-schema implementation
+that binds its typed field family to exact range hooks.
 
 Computed callbacks retain the earlier field-expression syntax and may mix logical values with
 physical selections:
@@ -388,8 +397,8 @@ runtime budget.
 ## 11. Implementation order
 
 The fixed, demand-geometry, dependency, collection, enum, bitfield, root-selection, computed,
-sequence, cursor, bounded-recursive-array, fuzz, protocol-fixture, example, and release-verification
-verticals are complete. Nested selection paths, general traversal, recursive object bodies, and
+sequence, cursor, bounded-recursive-array, nested-selection, fuzz, protocol-fixture, example, and
+release-verification verticals are complete. General traversal, recursive object bodies, and
 recursive builders are separate future composition work.
 
 Each shipped vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads,
@@ -402,19 +411,18 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fifteen discovered zones and forty-nine cases: fixed scalars and
+The current mandatory corpus has fifteen discovered zones and fifty-one cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, conditional
 controllers, runtime collection decode/build/copy, static enum decode/build/copy, nominal and
-inline bitfields, fragmented physical selections, fixed and dynamic computed fields, fixed and
-variable homogeneous views, heterogeneous cursors, all eight compact recursive geometry forms
-plus replay, and fixed, automatic, and callback-driven output growth. Each covers read and write
-paths where applicable. The measurement tool inspects final linked consumer symbols for code shape,
-call topology, stack, allocation, and dispatch evidence.
+inline bitfields, fragmented and nested physical selections, fixed and dynamic computed fields,
+fixed and variable homogeneous views, heterogeneous cursors, all eight compact recursive geometry
+forms plus replay, and fixed, automatic, and callback-driven output growth. Each covers read and
+write paths where applicable. The measurement tool inspects final linked consumer symbols for code
+shape, call topology, stack, allocation, and dispatch evidence.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
 IR may explain an optimization result but is not treated as a latency oracle. State and
 artifact-size probes remain isolated from measured hot-path implementations.
-Nested selections become mandatory corpus coverage when that composition class ships.
 
 Behavioral tests cover success, truncation at every accessed field boundary, constant mismatch,
 declared outer-extent mismatch, nested error propagation, absolute offsets, retained backing

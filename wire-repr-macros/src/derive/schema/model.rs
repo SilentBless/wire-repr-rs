@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use syn::{Data, DeriveInput, Expr, Fields, Generics, Ident, Path, Type, Visibility};
+use syn::{Data, DeriveInput, Expr, Fields, Generics, Ident, Member, Path, Type, Visibility};
 
 pub(super) struct Schema {
     pub(super) vis: Visibility,
@@ -1049,27 +1049,45 @@ fn computed_dependency_names(
                     .args
                     .iter()
                     .map(|argument| {
-                        let Expr::Path(path) = argument else {
-                            return Err(syn::Error::new_spanned(
-                                argument,
-                                "selection fields must be simple names",
-                            ));
-                        };
-                        let name = simple_computed_name(path)?;
-                        Ok(if name == "self" {
+                        fn root(expression: &Expr) -> syn::Result<(Ident, bool)> {
+                            match expression {
+                                Expr::Path(path) => Ok((simple_computed_name(path)?.clone(), true)),
+                                Expr::Field(field) => {
+                                    if !matches!(&field.member, Member::Named(_)) {
+                                        return Err(syn::Error::new_spanned(
+                                            &field.member,
+                                            "selection paths require named fields",
+                                        ));
+                                    }
+                                    let (root, _) = root(&field.base)?;
+                                    Ok((root, false))
+                                }
+                                _ => Err(syn::Error::new_spanned(
+                                    expression,
+                                    "selection fields must be physical field paths",
+                                )),
+                            }
+                        }
+                        let (name, whole) = root(argument)?;
+                        let name = if name == "self" {
                             destination.clone()
                         } else {
-                            name.clone()
-                        })
+                            name
+                        };
+                        Ok((name, whole))
                     })
-                    .collect::<syn::Result<BTreeSet<_>>>()?;
+                    .collect::<syn::Result<Vec<_>>>()?;
                 if operation == "include" {
-                    names.extend(selected);
+                    names.extend(selected.into_iter().map(|(name, _)| name));
                 } else if operation == "exclude" {
+                    let wholly_excluded = selected
+                        .into_iter()
+                        .filter_map(|(name, whole)| whole.then_some(name))
+                        .collect::<BTreeSet<_>>();
                     names.extend(
                         fields
                             .iter()
-                            .filter(|field| !selected.contains(&field.name))
+                            .filter(|field| !wholly_excluded.contains(&field.name))
                             .map(|field| field.name.clone()),
                     );
                 } else {
