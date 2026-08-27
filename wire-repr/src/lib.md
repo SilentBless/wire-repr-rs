@@ -105,6 +105,20 @@ Primitive schemas support all fixed-width Rust integers and floats. `usize`, `is
 `char` require an explicit physical representation such as `#[wire(as = u32, le)]`; both read and
 write conversions are checked.
 
+## Recursive array views
+
+A closed selector enum may pass itself directly to a generic body containing an unsigned stored
+count followed by a terminal `wire::Array<T>`. Such roots expose `Schema::view::<DEPTH>(backing)`
+for a caller-selected const depth; zero returns `DepthExceeded`. Framing uses an iterative
+`[MaybeUninit<u32>; DEPTH]` continuation stack, so stack cost is `4 * DEPTH` bytes rather than
+hidden allocation or recursive Rust calls. Recursive count values must fit `u32`.
+
+Recursive item getters return the same generated root view family. Fixed and short-period item
+geometry use exact direct formulas; irregular input uses exact prefix replay. A forward iterator
+always retains one physical cursor and remains linear in the represented bytes.
+Schema-specific constant, conversion, validator, and manual-leaf errors crossing recursive
+repetition retain their absolute offset but flatten to finite `RecursiveError::Child` values.
+
 ## Guarantees
 
 - `view()` accepts one exact representation and rejects trailing input.
@@ -129,10 +143,13 @@ write conversions are checked.
 - Syntactically fixed structs/bitfields expose prevalidated `ExactSizeIterator` views; closed enums
   and variable structs frame lazily.
 - Heterogeneous cursors yield coexisting views and never advance on failure.
+- Recursive enum arrays retain no per-item offset index, accept caller-selected depths beyond 64,
+  and fail with `DepthExceeded` before crossing that bound.
 - Fixed writers return `NeedMore`; growable collections use their existing `Extend<u8>` capability.
 - Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
 - Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
 
-Nested selection paths, traversal, and recursive schemas remain future composition work. The core
-does not add negotiated selector maps, hidden indexes, general resource-limit machinery, runtime
-schemas, semantic object materialization, async I/O, or feature-selected renderers.
+Nested selection paths, general traversal, recursive object continuations, and recursive builders
+remain future composition work. The core does not add negotiated selector maps, hidden indexes,
+general resource-limit machinery, runtime schemas, semantic object materialization, async I/O, or
+feature-selected renderers.

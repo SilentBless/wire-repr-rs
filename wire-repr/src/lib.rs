@@ -5,6 +5,7 @@
 extern crate self as wire_repr;
 
 pub mod output;
+mod recursive;
 mod schema;
 
 /// Zero-sized schema marker types for variable physical representations.
@@ -19,6 +20,12 @@ pub mod wire {
 }
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::recursive::{
+        FlattenRecursiveError, RecursiveArrayView, RecursiveBody, RecursiveChildren,
+        RecursiveDepth, RecursiveError, RecursiveFrame, RecursiveGeometry,
+        RecursiveGeometryBuilder, RecursiveSlot, flatten_recursive_array_error,
+        frame_recursive_array_extent,
+    };
     pub use crate::schema::{
         ArrayError, ArrayItem, ArrayView, ConstantMismatch, FieldExpr, Frame, InvalidFrameExtent,
         IsSet, LayoutError, LeadingWire, NeedMore, ScalarBuildConversionError,
@@ -31,6 +38,7 @@ pub mod __private {
 pub use output::{
     ArrayWriter, ChildWriter, GrowthRequest, Output, OutputError, WriteError, Writer, Written,
 };
+pub use recursive::DepthExceeded;
 pub use schema::{
     ArrayError, ArrayItem, ArrayIter, ArrayView, ByteSelection, ConstantMismatch, Cursor,
     ExactWire, FieldPath, FieldUnion, FixedViews, Frame, InvalidFrameExtent, LayoutError, NeedMore,

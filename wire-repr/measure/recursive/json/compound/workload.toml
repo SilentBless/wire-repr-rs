@@ -1,0 +1,134 @@
+name = "recursive/json/compound"
+
+[roles]
+generated = "generated.rs"
+idiomatic = "idiomatic.rs"
+best_latency = "best/latency.rs"
+
+[[cases]]
+name = "direct_batch_200"
+entry = "direct_batch"
+seeds = [0, 1, 127, 199, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "generated_per_lookup"
+expression = "generated_runtime_median_ns / 200"
+unit = "ns"
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+[[cases.rules]]
+name = "amortized lookup attention"
+level = "attention"
+assert = "generated_runtime_median_ns / 200 <= 100"
+message = "generated direct recursive lookup exceeds 100 ns after one retained view"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.25"
+message = "generated direct recursive batch trails the specialized safe formula"
+
+[[cases]]
+name = "direct_lookup_200"
+entry = "direct_lookup"
+seeds = [0, 1, 127, 199, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.10"
+message = "generated direct recursive lookup has optimization headroom"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.10"
+message = "generated direct recursive lookup trails the fused safe implementation"
+
+[[cases]]
+name = "replay_lookup_200"
+entry = "replay_lookup"
+seeds = [0, 1, 127, 199, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.10"
+message = "generated replay lookup has optimization headroom"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.10"
+message = "generated replay lookup trails the fused safe implementation"
+
+[[cases]]
+name = "iterate_200"
+entry = "iterate"
+seeds = [0, 1, 127, 199, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.10"
+message = "generated recursive iterator has optimization headroom"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.10"
+message = "generated recursive iterator trails the fused safe implementation"

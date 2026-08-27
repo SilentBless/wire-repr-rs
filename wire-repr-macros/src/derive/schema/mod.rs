@@ -3,6 +3,7 @@ mod builder;
 mod computed;
 mod enumeration;
 mod model;
+mod recursive;
 mod view;
 mod writer;
 
@@ -22,7 +23,9 @@ pub(super) fn render_view(
         bitfield::render_view(input, runtime)
     } else {
         let schema = model::Schema::parse(input, "WireView")?;
-        view::render(&schema, runtime)
+        let recursive = recursive::render_bodies(&schema, runtime)?;
+        let ordinary = view::render(&schema, runtime)?;
+        Ok(quote!(#ordinary #recursive))
     }
 }
 

@@ -70,6 +70,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
 
     let error_names = error_names(schema);
     let error_declaration = render_error(schema, &error, &error_names, &error_parameters, runtime);
+    let flatten_error = render_flatten_error(schema, &error, &error_names, runtime);
     let validator_calls = schema
         .validators
         .iter()
@@ -589,6 +590,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     #view_marker: ::core::marker::PhantomData,
                 }
             }
+            #flatten_error
         }
 
         impl #impl_generics #runtime::__private::WireSelect for #self_type #where_clause {
@@ -857,6 +859,146 @@ fn unique_variant(used: &mut BTreeSet<String>, base: &str) -> syn::Ident {
     }
     unreachable!("usize suffix space cannot be exhausted by generated variants")
 }
+fn render_flatten_error(
+    schema: &Schema,
+    error: &syn::Ident,
+    names: &ErrorNames,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let mut arms = Vec::new();
+    for (field, names) in schema.fields.iter().zip(&names.fields) {
+        let shortage = &names.shortage;
+        arms.push(quote! {
+            #error::#shortage(source) => {
+                #runtime::__private::RecursiveError::NeedMore(source)
+            }
+        });
+        if let Some(mismatch) = &names.mismatch {
+            arms.push(quote! {
+                #error::#mismatch(source) => {
+                    #runtime::__private::RecursiveError::Child {
+                        offset: source.offset,
+                    }
+                }
+            });
+        }
+        if let Some(conversion) = &names.conversion {
+            arms.push(quote! {
+                #error::#conversion(source) => {
+                    #runtime::__private::RecursiveError::Child {
+                        offset: source.offset,
+                    }
+                }
+            });
+        }
+        if let Some(nested) = &names.nested {
+            match &field.kind {
+                FieldKind::Nested(nested_field) => {
+                    let ty = &nested_field.ty;
+                    arms.push(quote! {
+                        #error::#nested(source) => {
+                            <#ty as #runtime::WireView>::flatten_recursive_error(
+                                source,
+                                fallback_offset,
+                            )
+                        }
+                    });
+                }
+                FieldKind::Array(array) => {
+                    let item = &array.item;
+                    arms.push(quote! {
+                        #error::#nested(source) => {
+                            match source {
+                                #runtime::ArrayError::NeedMore(source) => {
+                                    #runtime::__private::RecursiveError::NeedMore(source)
+                                }
+                                #runtime::ArrayError::Item { source, .. } => {
+                                    <#item as #runtime::WireView>::flatten_recursive_error(
+                                        source,
+                                        fallback_offset,
+                                    )
+                                }
+                                #runtime::ArrayError::InvalidExtent {
+                                    consumed,
+                                    available,
+                                    ..
+                                } => {
+                                    #runtime::__private::RecursiveError::InvalidFrame(
+                                        #runtime::InvalidFrameExtent {
+                                            offset: fallback_offset,
+                                            consumed,
+                                            available,
+                                        },
+                                    )
+                                }
+                                #runtime::ArrayError::NonProgress { offset, .. } => {
+                                    #runtime::__private::RecursiveError::Child { offset }
+                                }
+                                #runtime::ArrayError::Trailing { offset, trailing } => {
+                                    #runtime::__private::RecursiveError::Trailing(
+                                        #runtime::TrailingBytes { offset, trailing },
+                                    )
+                                }
+                            }
+                        }
+                    });
+                }
+                FieldKind::Scalar(_)
+                | FieldKind::Bytes(_)
+                | FieldKind::RawBytes(_)
+                | FieldKind::Flag(_)
+                | FieldKind::BitProjection(_) => unreachable!("nested error owner"),
+            }
+        }
+        if let Some(extent) = &names.extent {
+            arms.push(quote! {
+                #error::#extent(source) => {
+                    #runtime::__private::RecursiveError::InvalidFrame(source)
+                }
+            });
+        }
+    }
+    for variant in &names.validators {
+        arms.push(quote! {
+            #error::#variant(_) => {
+                #runtime::__private::RecursiveError::Child {
+                    offset: fallback_offset,
+                }
+            }
+        });
+    }
+    arms.extend([
+        quote! {
+            #error::PositionBeforeCursor { field, .. }
+            | #error::LayoutUnavailable { field } => {
+                #runtime::__private::RecursiveError::Layout(
+                    #runtime::LayoutError { field },
+                )
+            }
+        },
+        quote! {
+            #error::InvalidFrame(source) => {
+                #runtime::__private::RecursiveError::InvalidFrame(source)
+            }
+        },
+        quote! {
+            #error::Trailing(source) => {
+                #runtime::__private::RecursiveError::Trailing(source)
+            }
+        },
+    ]);
+    quote! {
+        #[inline]
+        fn flatten_recursive_error(
+            error: Self::Error,
+            fallback_offset: usize,
+        ) -> #runtime::__private::RecursiveError {
+            match error {
+                #(#arms),*
+            }
+        }
+    }
+}
 
 fn render_error(
     schema: &Schema,
@@ -866,6 +1008,7 @@ fn render_error(
     runtime: &TokenStream,
 ) -> TokenStream {
     let mut variants = Vec::new();
+    let mut flatten_arms = Vec::new();
     let mut nested_index = 0usize;
     for (field, names) in schema.fields.iter().zip(&names.fields) {
         let field_name = field.name.to_string();
@@ -875,6 +1018,11 @@ fn render_error(
             #[doc = "The field ended before its complete representation."]
             #[error(#shortage_message)]
             #shortage(#[source] #runtime::NeedMore),
+        });
+        flatten_arms.push(quote! {
+            Self::#shortage(source) => {
+                #runtime::__private::RecursiveError::NeedMore(source)
+            }
         });
         if let Some(mismatch) = &names.mismatch {
             let mismatch_message = format!("invalid constant field `{field_name}`: {{0}}");
@@ -901,6 +1049,13 @@ fn render_error(
                 | FieldKind::BitProjection(_)
                 | FieldKind::Nested(_) => unreachable!(),
             }
+            flatten_arms.push(quote! {
+                Self::#mismatch(source) => {
+                    #runtime::__private::RecursiveError::Child {
+                        offset: source.offset,
+                    }
+                }
+            });
         }
         if let Some(conversion) = &names.conversion {
             let message = format!("invalid physical value for field `{field_name}`: {{0}}");
@@ -908,6 +1063,13 @@ fn render_error(
                 #[doc = "The physical scalar cannot be represented by the Rust field type."]
                 #[error(#message)]
                 #conversion(#[source] #runtime::ScalarConversionError),
+            });
+            flatten_arms.push(quote! {
+                Self::#conversion(source) => {
+                    #runtime::__private::RecursiveError::Child {
+                        offset: source.offset,
+                    }
+                }
             });
         }
         if let Some(nested) = &names.nested {
@@ -919,6 +1081,9 @@ fn render_error(
                 #[error(#message)]
                 #nested(#[source] #parameter),
             });
+            flatten_arms.push(quote! {
+                Self::#nested(source) => source.flatten_recursive(fallback_offset)
+            });
         }
         if let Some(extent) = &names.extent {
             let message = format!("invalid extent for nested field `{field_name}`: {{0}}");
@@ -926,6 +1091,11 @@ fn render_error(
                 #[doc = "The nested schema reported an extent outside its assigned span."]
                 #[error(#message)]
                 #extent(#[source] #runtime::InvalidFrameExtent),
+            });
+            flatten_arms.push(quote! {
+                Self::#extent(source) => {
+                    #runtime::__private::RecursiveError::InvalidFrame(source)
+                }
             });
         }
     }
@@ -938,6 +1108,13 @@ fn render_error(
             #[doc = "A schema-level validator rejected the framed view."]
             #[error(#message)]
             #variant(#[source] #validator_error),
+        });
+        flatten_arms.push(quote! {
+            Self::#variant(_) => {
+                #runtime::__private::RecursiveError::Child {
+                    offset: fallback_offset,
+                }
+            }
         });
     }
     variants.push(quote! {
@@ -964,9 +1141,29 @@ fn render_error(
         #[error("exact framing failed: {0}")]
         Trailing(#[source] #runtime::TrailingBytes),
     });
+    flatten_arms.extend([
+        quote! {
+            Self::PositionBeforeCursor { field, .. }
+            | Self::LayoutUnavailable { field } => {
+                #runtime::__private::RecursiveError::Layout(
+                    #runtime::LayoutError { field },
+                )
+            }
+        },
+        quote! {
+            Self::InvalidFrame(source) => {
+                #runtime::__private::RecursiveError::InvalidFrame(source)
+            }
+        },
+        quote! {
+            Self::Trailing(source) => {
+                #runtime::__private::RecursiveError::Trailing(source)
+            }
+        },
+    ]);
 
     let vis = &schema.vis;
-    if error_parameters.is_empty() {
+    let declaration = if error_parameters.is_empty() {
         quote! {
             #[doc = "Typed structural failure generated for this schema."]
             #[derive(Debug, #runtime::__private::ThisError)]
@@ -982,7 +1179,44 @@ fn render_error(
                 #(#variants)*
             }
         }
-    }
+    };
+    let flatten = if error_parameters.is_empty() {
+        quote! {
+            impl #runtime::__private::FlattenRecursiveError for #error {
+                fn flatten_recursive(
+                    self,
+                    fallback_offset: usize,
+                ) -> #runtime::__private::RecursiveError {
+                    match self {
+                        #(#flatten_arms),*
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl<#(#error_parameters),*> #runtime::__private::FlattenRecursiveError
+                for #error<#(#error_parameters),*>
+            where
+                #(
+                    #error_parameters:
+                        ::core::error::Error
+                        + #runtime::__private::FlattenRecursiveError
+                        + 'static,
+                )*
+            {
+                fn flatten_recursive(
+                    self,
+                    fallback_offset: usize,
+                ) -> #runtime::__private::RecursiveError {
+                    match self {
+                        #(#flatten_arms),*
+                    }
+                }
+            }
+        }
+    };
+    quote!(#declaration #flatten)
 }
 
 fn render_frame_steps(

@@ -1,0 +1,18 @@
+//! error: RecursiveSlot<0>` is not implemented
+
+use wire_repr::WireView;
+
+#[derive(WireView)]
+struct Body<T> {
+    count: u8,
+    #[wire(counted_by = count)]
+    items: wire_repr::wire::Array<T>,
+    tail: u8,
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum Root {
+    #[wire(value = 1)]
+    Array(Body<Root>),
+}

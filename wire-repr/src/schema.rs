@@ -62,6 +62,20 @@ pub unsafe trait WireView: Sized {
         input: &'view [u8],
         state: &'view Self::State,
     ) -> Self::View<'view>;
+
+    /// Flattens this schema's error when it appears below a recursive repetition boundary.
+    ///
+    /// Manual capabilities receive a field-site fallback by default. Generated leaf schemas
+    /// override this hook to retain standard shortage and extent kinds.
+    #[doc(hidden)]
+    fn flatten_recursive_error(
+        _error: Self::Error,
+        fallback_offset: usize,
+    ) -> crate::recursive::RecursiveError {
+        crate::recursive::RecursiveError::Child {
+            offset: fallback_offset,
+        }
+    }
 }
 
 /// Associates a manual or derived schema with its initial builder state.

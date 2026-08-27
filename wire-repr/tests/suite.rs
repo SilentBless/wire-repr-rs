@@ -22,6 +22,8 @@ mod hygiene;
 mod layout;
 #[path = "behavior/ownership.rs"]
 mod ownership;
+#[path = "behavior/recursive.rs"]
+mod recursive;
 #[path = "behavior/scalar.rs"]
 mod scalar;
 #[path = "behavior/selection.rs"]

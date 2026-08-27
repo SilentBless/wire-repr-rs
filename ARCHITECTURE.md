@@ -5,9 +5,10 @@ This document defines the target production architecture and clean-cutover contr
 constants, explicit logical conversions, validators, nested children, demand geometry, controller
 dependencies, conditional choice groups, counted runtime arrays, static enums, nominal and inline
 bitfields, root-relative physical selections, computed fields, homogeneous views, heterogeneous
-cursors, and exact View forwarding. Nested selection paths remain future composition work alongside
-the separately deferred traversal and recursive-layout design. New layout classes extend this one
-model rather than restoring the removed legacy renderer or introducing parallel modes.
+cursors, exact View forwarding, and depth-bounded recursive enum arrays. Nested selection paths,
+general traversal, recursive object bodies, and recursive builders remain future composition work.
+New layout classes extend this one model rather than restoring the removed legacy renderer or
+introducing parallel modes.
 
 ## 1. Product boundary
 
@@ -97,9 +98,17 @@ Generated descriptors and getters specialize by geometry:
 - a dependent getter may replay earlier variable geometry instead of caching an index;
 - controller values are retained only when later geometry needs them.
 
-General recursive schemas and a public traversal capability are deferred beyond this roadmap. They
-are not prerequisites for demand-framed fields, runtime collections, enums, selections, `views`, or
-cursors, and will be designed independently after those representation classes are complete.
+The shipped recursive read capability covers a closed static enum whose recursive variants pass
+the root directly to a generic `count` plus terminal `wire::Array<T>` body. The generated entry
+point is `Schema::view::<DEPTH>(backing)` for any caller-selected const depth, including zero as a
+typed `DepthExceeded` boundary. It uses one iterative `[MaybeUninit<u32>; DEPTH]` pending-count
+stack, hidden static callbacks, and the same backing-generic generated root `ViewImpl`; it has no
+registry, dynamic dispatch, allocation, recursive Rust calls, or per-item offset index. Stack
+storage grows by four bytes per permitted recursive level, so a caller choosing `128` reserves
+512 bytes for continuations. Recursive count values are represented internally as `u32`; a wider
+physical controller is accepted only while its stored value fits that range. Recursive object
+bodies, pair-style continuations, public traversal, and recursive builders remain independent
+future composition work.
 
 The current fixed-layout vertical cannot inspect a generic child's associated fixed-size capability
 during macro expansion. Instantiating a nonterminal child whose `FIXED_SIZE` is `None` therefore
@@ -243,7 +252,10 @@ Views yielded by a cursor borrow the original backing, not the cursor, and may c
 
 A runtime array getter returns a facade retaining only the collection range and authoritative
 count. Its iterator frames one exact item per `next`; a repeated traversal replays item geometry.
-The core does not retain or allocate a per-item range index.
+Recursive arrays additionally retain compact exact geometry: fixed and short-period representations
+use direct ordinal formulas, while irregular inputs replay the prefix. `get(n)` is therefore exact
+but has schema- and data-dependent complexity; `iter()` always keeps one forward cursor and remains
+linear in the represented bytes. The core does not retain or allocate a per-item range index.
 
 ## 8. Progressive writers
 
@@ -374,8 +386,9 @@ runtime budget.
 ## 11. Implementation order
 
 The fixed, demand-geometry, dependency, collection, enum, bitfield, root-selection, computed,
-sequence, cursor, fuzz, protocol-fixture, example, and release-verification verticals are complete.
-Nested selection paths, traversal, and recursive schemas are separate future composition work.
+sequence, cursor, bounded-recursive-array, fuzz, protocol-fixture, example, and release-verification
+verticals are complete. Nested selection paths, general traversal, recursive object bodies, and
+recursive builders are separate future composition work.
 
 Each shipped vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads,
 behavioral tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not
@@ -387,15 +400,15 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fourteen discovered zones and thirty-five cases: fixed scalars and
+The current mandatory corpus has fifteen discovered zones and thirty-nine cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, controller and
 conditional dependencies, runtime collection decode/build/copy, static enum decode/build/copy,
 nominal and inline bitfields, fragmented physical selections, fixed and dynamic computed fields,
-fixed and variable homogeneous views, heterogeneous cursors, and fixed, automatic, and
-callback-driven output growth. Each covers read and write paths where applicable. The measurement
-tool inspects final linked consumer symbols for code shape, call topology, stack, allocation, and
-dispatch evidence.
+fixed and variable homogeneous views, heterogeneous cursors, fixed/periodic/replay recursive
+ordinal geometry, and fixed, automatic, and callback-driven output growth. Each covers read and
+write paths where applicable. The measurement tool inspects final linked consumer symbols for code
+shape, call topology, stack, allocation, and dispatch evidence.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
 IR may explain an optimization result but is not treated as a latency oracle. State and
 artifact-size probes remain isolated from measured hot-path implementations.
@@ -404,7 +417,10 @@ Nested selections become mandatory corpus coverage when that composition class s
 Behavioral tests cover success, truncation at every accessed field boundary, constant mismatch,
 declared outer-extent mismatch, nested error propagation, absolute offsets, retained backing
 identity, typestate failures, manual capability composition, partial-output failure semantics,
-growth adapters, and generated/handwritten equivalence. Fuzzing extends the same invariants to
+growth adapters, and generated/handwritten equivalence. Across a recursive repetition boundary,
+generated structural kinds and absolute offsets remain finite, but schema-specific constant,
+conversion, validator, or manual-leaf sources flatten to `RecursiveError::Child { offset }` rather
+than retaining an infinitely recursive concrete source type. Fuzzing extends the same invariants to
 controller overflow, count bombs, non-progress items, dependency cycles, malformed deferred
 ranges, and iteration termination.
 

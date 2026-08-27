@@ -256,6 +256,42 @@ declared wire width produce nominal field-site errors rather than truncating.
 - Writers and views do not allocate or dispatch dynamically inside wire-repr.
 - The public read API is identical for borrowed and retained-owned backing.
 
+## Recursive array views
+
+A closed selector enum may recurse through a generic body containing a stored count followed by a
+terminal `wire::Array<T>`. The caller selects a compile-time depth; zero returns `DepthExceeded`,
+while positive values reserve one `[MaybeUninit<u32>; DEPTH]` pending-count stack, or
+`4 * DEPTH` bytes. Generated code never uses recursive Rust calls, allocation, or a per-item offset
+index. Recursive stored counts must fit `u32` even when their physical controller is wider.
+
+```rust
+#[derive(WireView)]
+struct Values<T> {
+    #[wire(le)]
+    count: u16,
+    #[wire(counted_by = count)]
+    items: wire_repr::wire::Array<T>,
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum Value {
+    #[wire(value = 1)]
+    Array(Values<Value>),
+}
+
+let root = Value::view::<128>(input)?;
+let ValueVariant::Array(array) = root.variant();
+let fifth = array.items().get(5)?;
+```
+
+Fixed and short-period item geometry receives a direct ordinal formula. Irregular geometry falls
+back to exact prefix replay: `get(n)` may therefore be linear in the preceding represented bytes.
+`iter()` always keeps one forward cursor and is linear in the complete represented range.
+Schema-specific errors crossing recursive repetition retain their absolute offset but flatten to a
+finite `RecursiveError::Child`. The current capability is read-side; recursive object
+continuations and recursive builders remain separate work.
+
 ## Examples
 
 - `cargo run -p wire-repr --example mtproto` demonstrates generic nested TL constructors.
@@ -289,9 +325,10 @@ The implemented surface currently covers fixed scalars and byte arrays, constant
 logical conversions, validators, nested children, demand geometry, controller dependencies,
 conditional groups, runtime arrays, static enums with exact unknown forwarding, nominal and inline
 bitfields, root-relative physical selections, computed fields, homogeneous `views`, heterogeneous
-cursors, exact View forwarding, and progressive typestate writers.
+cursors, exact View forwarding, depth-bounded recursive enum arrays, and progressive typestate
+writers.
 
-General recursive schemas, traversal, and nested physical selection paths remain separate future
-composition work. Negotiated selector maps, hidden indexes, eager full-collection validation, and
-a general limits framework are not part of the target core. Every shipped class extends the
-progressive writer model and adds behavioral plus generated/idiomatic/best-safe workload evidence.
+General traversal, recursive object continuations, recursive builders, and nested physical
+selection paths remain separate future composition work. Negotiated selector maps, hidden indexes,
+eager semantic-tree validation, and a general limits framework are not part of the target core.
+Every shipped class adds behavioral plus generated/idiomatic/best-safe workload evidence.
