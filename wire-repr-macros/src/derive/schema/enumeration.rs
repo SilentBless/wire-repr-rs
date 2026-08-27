@@ -1134,10 +1134,16 @@ fn render_recursive_view(
                             }
                             other => #view_error::Recursive(other),
                         })?;
+                        if !shape_active {
+                            shape = 0xcbf2_9ce4_8422_2325u64;
+                            shape_active = true;
+                        }
+                        shape ^= selector as u64;
+                        shape = shape.rotate_left(13).wrapping_add(0x9e37_79b9_7f4a_7c15);
                         shape ^= 0xa11a_0000_0000_0000u64
                             ^ u64::from(children.count)
                             ^ (children.prefix as u64).rotate_left(17);
-                        shape = shape.wrapping_mul(0x0000_0100_0000_01b3);
+                        shape = shape.rotate_left(13).wrapping_add(0x9e37_79b9_7f4a_7c15);
                         nested_depth = nested_depth.max((stack_depth + 1) as u32);
                         cursor = cursor
                             .checked_add(#selector_width)
@@ -1177,9 +1183,13 @@ fn render_recursive_view(
                         )
                         .map_err(#view_error::#error_variant)?;
                         let (_, consumed) = frame.into_parts();
-                        shape ^= 0x1eaf_0000_0000_0000u64
-                            ^ (consumed as u64).rotate_left(23);
-                        shape = shape.wrapping_mul(0x0000_0100_0000_01b3);
+                        if shape_active {
+                            shape ^= selector as u64;
+                            shape = shape.rotate_left(13).wrapping_add(0x9e37_79b9_7f4a_7c15);
+                            shape ^= 0x1eaf_0000_0000_0000u64
+                                ^ (consumed as u64).rotate_left(23);
+                            shape = shape.rotate_left(13).wrapping_add(0x9e37_79b9_7f4a_7c15);
+                        }
                         cursor = body_start.checked_add(consumed).ok_or(
                             #view_error::Layout(#runtime::LayoutError {
                                 field: stringify!(#variant_name),
@@ -1206,7 +1216,8 @@ fn render_recursive_view(
         ];
         let mut stack_depth = 0usize;
         let mut cursor = 0usize;
-        let mut shape = 0xcbf2_9ce4_8422_2325u64;
+        let mut shape = 0u64;
+        let mut shape_active = false;
         let mut nested_depth = 0u32;
         loop {
             if stack_depth >= depth.remaining() || stack_depth >= #depth {
@@ -1226,8 +1237,6 @@ fn render_recursive_view(
                     .try_into()
                     .expect("selector width checked"),
             );
-            shape ^= selector as u64;
-            shape = shape.wrapping_mul(0x0000_0100_0000_01b3);
             match selector {
                 #(#skip_arms)*
                 value => {

@@ -31,6 +31,13 @@ pub struct RecursiveGeometryBuilder {
     factor_valid: bool,
     factor_high_component: bool,
     factor_base: u32,
+    last_palette_width: u16,
+    last_palette_class: u8,
+    has_last_palette: bool,
+    shape_period: u8,
+    shape_classes: u8,
+    shape_attempted: bool,
+    shape_candidate: bool,
 }
 
 impl RecursiveGeometryBuilder {
@@ -62,6 +69,13 @@ impl RecursiveGeometryBuilder {
             factor_valid: false,
             factor_high_component: false,
             factor_base: 0,
+            last_palette_width: 0,
+            last_palette_class: 0,
+            has_last_palette: false,
+            shape_period: 0,
+            shape_classes: 0,
+            shape_attempted: false,
+            shape_candidate: false,
         }
     }
 
@@ -113,16 +127,25 @@ impl RecursiveGeometryBuilder {
         let mut palette_class = None;
         if !self.palette_failed {
             if let Ok(width16) = u16::try_from(width) {
-                palette_class = self.palette[..self.palette_len]
-                    .iter()
-                    .position(|candidate| *candidate == width16);
-                if palette_class.is_none() {
-                    if self.palette_len == PALETTE_CAPACITY {
-                        self.palette_failed = true;
-                    } else {
-                        palette_class = Some(self.palette_len);
-                        self.palette[self.palette_len] = width16;
-                        self.palette_len += 1;
+                if self.has_last_palette && self.last_palette_width == width16 {
+                    palette_class = Some(usize::from(self.last_palette_class));
+                } else {
+                    palette_class = self.palette[..self.palette_len]
+                        .iter()
+                        .position(|candidate| *candidate == width16);
+                    if palette_class.is_none() {
+                        if self.palette_len == PALETTE_CAPACITY {
+                            self.palette_failed = true;
+                        } else {
+                            palette_class = Some(self.palette_len);
+                            self.palette[self.palette_len] = width16;
+                            self.palette_len += 1;
+                        }
+                    }
+                    if let Some(class) = palette_class {
+                        self.last_palette_width = width16;
+                        self.last_palette_class = class as u8;
+                        self.has_last_palette = true;
                     }
                 }
                 if self.ranked_candidate
@@ -148,6 +171,19 @@ impl RecursiveGeometryBuilder {
         }
         self.ranked_candidate &= !self.palette_failed && palette_class.is_some();
 
+        if self.shape_candidate
+            || (index == 0 && measure.nested_depth != 0 && self.factor_candidate)
+        {
+            if !self.shape_attempted {
+                geometry.reset(GEOMETRY_RECURSIVE_SHAPE);
+                self.shape_attempted = true;
+                self.shape_candidate = true;
+                self.factor_candidate = false;
+                self.periodic_failed = true;
+                self.factor_valid = false;
+            }
+            self.push_shape(index, width, measure.shape, geometry);
+        }
         if self.factor_candidate && self.factor_valid {
             self.push_factor(index, width32, geometry);
         }
@@ -198,6 +234,68 @@ impl RecursiveGeometryBuilder {
         self.factor_valid &= predicted == i64::from(width);
     }
 
+    fn push_shape(
+        &mut self,
+        index: usize,
+        width: usize,
+        shape: u64,
+        geometry: &mut RecursiveGeometry,
+    ) {
+        if !self.shape_candidate {
+            return;
+        }
+        let (Ok(width), shape) = (u16::try_from(width), shape as u16) else {
+            self.shape_candidate = false;
+            return;
+        };
+        let mut class = None;
+        for candidate in 0..usize::from(self.shape_classes) {
+            if get_u16(&geometry.storage, SHAPE_HASHES + candidate * 2) == shape {
+                if get_u16(&geometry.storage, SHAPE_WIDTHS + candidate * 2) != width {
+                    self.shape_candidate = false;
+                }
+                class = Some(candidate);
+                break;
+            }
+        }
+        let class = match class {
+            Some(class) => class,
+            None if usize::from(self.shape_classes) < PALETTE_CAPACITY => {
+                let class = usize::from(self.shape_classes);
+                put_u16(&mut geometry.storage, SHAPE_HASHES + class * 2, shape);
+                put_u16(&mut geometry.storage, SHAPE_WIDTHS + class * 2, width);
+                self.shape_classes += 1;
+                class
+            }
+            None => {
+                self.shape_candidate = false;
+                return;
+            }
+        };
+        let code = class as u8;
+        if index < PERIOD_CAPACITY {
+            geometry.storage[SHAPE_CODES + index] = code;
+            let mut prefix = if index == 0 {
+                0
+            } else {
+                usize::from(self.period_widths[index - 1])
+            };
+            while prefix != 0 && code != geometry.storage[SHAPE_CODES + prefix] {
+                prefix = usize::from(self.period_widths[prefix - 1]);
+            }
+            if index != 0 && code == geometry.storage[SHAPE_CODES + prefix] {
+                prefix += 1;
+            }
+            self.period_widths[index] = prefix as u16;
+            if index + 1 == PERIOD_CAPACITY {
+                self.shape_period = (PERIOD_CAPACITY - prefix) as u8;
+            }
+        } else {
+            let period = usize::from(self.shape_period);
+            self.shape_candidate = code == geometry.storage[SHAPE_CODES + index % period];
+        }
+    }
+
     fn complete(&mut self) {
         if self.started {
             self.finish_run(true);
@@ -221,15 +319,17 @@ impl RecursiveGeometryBuilder {
             self.common_runs_failed = true;
         }
         let index = self.run_count;
-        if index < PERIOD_CAPACITY {
+        if !self.shape_attempted && index < PERIOD_CAPACITY {
             self.period_widths[index] = width;
         }
-        for period in 1..=PERIOD_CAPACITY {
-            if index >= period && width != self.period_widths[index % period] {
-                self.candidates &= !(1u64 << (period - 1));
+        if !self.periodic_failed {
+            for period in 1..=index.min(PERIOD_CAPACITY) {
+                if width != self.period_widths[index % period] {
+                    self.candidates &= !(1u64 << (period - 1));
+                }
             }
+            self.periodic_failed = self.candidates == 0;
         }
-        self.periodic_failed |= self.candidates == 0;
         self.run_count += 1;
     }
 }
@@ -305,11 +405,32 @@ where
         geometry.meta[1] = builder.affine_slope as u32;
         return Ok(());
     }
+    if builder.shape_candidate && builder.shape_period != 0 {
+        let period = usize::from(builder.shape_period);
+        let mut cycle = 0u32;
+        for index in 0..period {
+            let class = usize::from(geometry.storage[SHAPE_CODES + index]);
+            cycle = cycle
+                .checked_add(u32::from(get_u16(
+                    &geometry.storage,
+                    SHAPE_WIDTHS + class * 2,
+                )))
+                .ok_or(ArrayError::InvalidExtent {
+                    index,
+                    consumed: usize::MAX,
+                    available: input.len(),
+                })?;
+        }
+        geometry.meta[0] = period as u32;
+        geometry.meta[1] = cycle;
+        geometry.meta[2] = u32::from(builder.shape_classes);
+        return Ok(());
+    }
     if builder.factor_candidate && builder.factor_valid && builder.factor_high_component {
         geometry.meta[0] = builder.factor_base;
         return Ok(());
     }
-    if builder.saw_nested && count > RANKED_CAPACITY {
+    if builder.saw_nested && count > RANKED_CAPACITY && !builder.shape_attempted {
         geometry.reset(GEOMETRY_RECURSIVE_SHAPE);
         if build_recursive_shape::<C, Slot, DEPTH>(input, count, offset, depth, geometry)? {
             return Ok(());
