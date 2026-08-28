@@ -28,7 +28,12 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "amortized lookup attention"
 level = "attention"
@@ -131,7 +136,12 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
@@ -154,7 +164,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -172,7 +187,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -190,7 +210,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -208,7 +233,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -226,7 +256,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -244,7 +279,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -262,7 +302,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -280,7 +325,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -298,7 +348,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -316,7 +371,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "geometry latency attention"
 level = "attention"
@@ -342,7 +402,12 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
@@ -373,7 +438,12 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
@@ -404,7 +474,12 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
@@ -435,7 +510,12 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
@@ -466,7 +546,12 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 1024"
+message = "generated recursive path has stack optimization headroom"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
