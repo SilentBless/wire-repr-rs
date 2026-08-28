@@ -283,11 +283,15 @@ The base constructor is type-directed:
 Packet::builder(&mut fixed_slice) // fixed, returns NeedMore
 Packet::builder(&mut vec)         // growable through Extend<u8>
 Packet::builder(&mut bytes_mut)   // the same capability bounds
+Packet::builder(output::owned(vec)) // owned growable target, movable across `'static` workers
 ```
 
 wire-repr remains `no_std` and `no_alloc`: a growable output allocates only through the
-caller-selected output type. `output::bounded` constrains a pooled collection to a size class;
-`output::grow_with` delegates fallible or custom growth to a caller callback.
+caller-selected output type. `output::owned` stores any
+`AsRef<[u8]> + AsMut<[u8]> + Extend<u8>` target by value without naming `Vec` or `BytesMut` in the
+core; its unfinished writer is `Send + 'static` exactly when the target is. `output::bounded`
+constrains a pooled collection to a size class, while `output::grow_with` delegates fallible or
+custom growth to a caller callback.
 
 Nested derived schemas use closures:
 
@@ -451,15 +455,16 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fifteen discovered zones and fifty-six cases: fixed scalars and
+The current mandatory corpus has fifteen discovered zones and fifty-seven cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, conditional
 controllers, runtime collection decode/build/copy, static enum decode/build/copy, nominal and
 inline bitfields, fragmented and nested physical selections, fixed and dynamic computed fields,
 fixed and variable homogeneous views, heterogeneous cursors, all eight compact recursive geometry
 forms plus replay, recursive pair and demand continuations, progressive recursive object/array/
-demand builds, and fixed, automatic, and callback-driven output growth. Each covers read and
-write paths where applicable. The measurement tool inspects final linked consumer symbols for code
+demand builds, and fixed, borrowed-growable, owned-growable, and callback-driven output. Each
+covers read and write paths where applicable. The measurement tool inspects final linked consumer
+symbols for code
 shape, call topology, stack, allocation, and dispatch evidence.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
 IR may explain an optimization result but is not treated as a latency oracle. State and

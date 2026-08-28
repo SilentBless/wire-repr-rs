@@ -13,6 +13,10 @@ pub fn growable(seed: u64) -> u64 {
     encoded(seed)
 }
 
+pub fn owned(seed: u64) -> u64 {
+    encoded(seed)
+}
+
 pub fn callback(seed: u64) -> u64 {
     encoded(seed)
 }

@@ -133,6 +133,46 @@ mod derived {
     }
 
     #[test]
+    fn owned_output_moves_an_unfinished_writer_through_a_channel() -> TestResult {
+        let writer = FooBar::builder(output::owned(Vec::new())).foo(0xaa)?;
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel(1);
+        writer_tx.send(writer).expect("worker stopped");
+        let worker = std::thread::spawn(move || {
+            let writer = writer_rx.recv().expect("writer channel closed");
+            writer
+                .bar(0x1234)
+                .expect("bar write failed")
+                .baz(|bar| bar)
+                .expect("nested write failed")
+        });
+        let complete = worker.join().expect("writer worker panicked");
+        let written = complete.finish()?;
+        assert_eq!(written.range(), 0..7);
+        let (owned, range) = written.into_parts();
+        assert_eq!(range, 0..7);
+        assert_eq!(
+            &owned.as_ref()[range],
+            &[0xaa, 0x12, 0x34, 0x11, 0x22, 0x33, 0x44]
+        );
+        let vec = owned.into_inner();
+        assert!(vec.len() >= 7);
+
+        let written = FooBar::builder(output::owned(BytesMut::new()))
+            .foo(0xaa)?
+            .bar(0x1234)?
+            .baz(|bar| bar)?
+            .finish()?;
+        let (owned, range) = written.into_parts();
+        assert_eq!(
+            &owned.as_ref()[range],
+            &[0xaa, 0x12, 0x34, 0x11, 0x22, 0x33, 0x44]
+        );
+        let bytes = owned.into_inner();
+        assert!(bytes.len() >= 7);
+        Ok(())
+    }
+
+    #[test]
     fn bounded_output_uses_existing_collection_storage_without_exceeding_limit() -> TestResult {
         let mut vec = Vec::with_capacity(16);
         let capacity = vec.capacity();

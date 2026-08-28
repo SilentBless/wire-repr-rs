@@ -50,6 +50,26 @@ fn try_growable(seed: u64) -> Result<u64, WriteFailure> {
     Ok(u64::from_le_bytes(bytes))
 }
 
+pub fn owned(seed: u64) -> u64 {
+    match try_owned(seed) {
+        Ok(value) => value,
+        Err(_) => u64::MAX,
+    }
+}
+
+#[inline(always)]
+fn try_owned(seed: u64) -> Result<u64, WriteFailure> {
+    let written = Foo::builder(output::owned(Vec::new()))
+        .foo(seed as u32)?
+        .bar((seed >> 32) as u32)?
+        .finish()?;
+    let (output, range) = written.into_parts();
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&output.as_ref()[range]);
+    let _output = output.into_inner();
+    Ok(u64::from_le_bytes(bytes))
+}
+
 pub fn callback(seed: u64) -> u64 {
     match try_callback(seed) {
         Ok(value) => value,

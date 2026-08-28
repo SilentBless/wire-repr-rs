@@ -228,6 +228,81 @@ where
     }
 }
 
+/// Output adapter that owns a contiguous growable target.
+#[must_use = "the owned target remains inside this adapter until `into_inner` is called"]
+pub struct Owned<T> {
+    target: T,
+}
+
+/// Owns a contiguous growable target so its writer may be moved independently of a caller borrow.
+///
+/// The adapter itself never allocates. Growth is delegated to `T: Extend<u8>`, using the same
+/// infallible allocation policy as the borrowed growable output implementation.
+pub const fn owned<T>(target: T) -> Owned<T>
+where
+    T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>,
+{
+    Owned { target }
+}
+
+impl<T> Owned<T> {
+    /// Returns the wrapped target.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.target
+    }
+
+    /// Borrows the wrapped target.
+    #[must_use]
+    pub const fn get_ref(&self) -> &T {
+        &self.target
+    }
+
+    /// Mutably borrows the wrapped target.
+    #[must_use]
+    pub const fn get_mut(&mut self) -> &mut T {
+        &mut self.target
+    }
+}
+
+impl<T: AsRef<[u8]>> AsRef<[u8]> for Owned<T> {
+    fn as_ref(&self) -> &[u8] {
+        self.target.as_ref()
+    }
+}
+
+impl<T: AsMut<[u8]>> AsMut<[u8]> for Owned<T> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.target.as_mut()
+    }
+}
+
+impl<T> Output for Owned<T>
+where
+    T: AsRef<[u8]> + AsMut<[u8]> + Extend<u8>,
+{
+    type GrowError = Infallible;
+
+    fn bytes(&self) -> &[u8] {
+        self.target.as_ref()
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        self.target.as_mut()
+    }
+
+    fn ensure(&mut self, request: GrowthRequest) -> Result<(), OutputError<Self::GrowError>> {
+        let current = self.target.as_ref().len();
+        if current >= request.minimum_len {
+            return Ok(());
+        }
+        let target = growth_target(current, request);
+        self.target
+            .extend(core::iter::repeat_n(0, target.saturating_sub(current)));
+        verify_growth(self.target.as_ref().len(), request)
+    }
+}
+
 /// Fixed view over an `AsRef<[u8]> + AsMut<[u8]>` owner.
 pub struct Fixed<'a, T: ?Sized> {
     target: &'a mut T,

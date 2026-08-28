@@ -105,6 +105,16 @@ Primitive schemas support all fixed-width Rust integers and floats. `usize`, `is
 `char` require an explicit physical representation such as `#[wire(as = u32, le)]`; both read and
 write conversions are checked.
 
+## Output ownership
+
+Fixed slices and borrowed growable collections remain the shortest writer inputs. The generic
+`output::owned(target)` adapter instead stores any contiguous
+`AsRef<[u8]> + AsMut<[u8]> + Extend<u8>` target by value. It adds no allocator dependency and
+allocates only through the target's `Extend` implementation. Unfinished writer states inherit the
+target's `Send` and `'static` properties, so an owned `Vec`, `BytesMut`, or compatible collection
+may cross an ordinary worker channel. `Written::into_parts()` returns the adapter and exact range;
+`Owned::into_inner()` recovers the target.
+
 ## Recursive array/object views and writers
 
 A closed selector enum may pass itself directly to a generic body containing either an unsigned

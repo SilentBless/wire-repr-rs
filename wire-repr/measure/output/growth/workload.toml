@@ -46,6 +46,24 @@ assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.25"
 message = "auto-growing writer latency is materially behind idiomatic Vec encoding"
 
 [[cases]]
+name = "owned"
+entry = "owned"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "idiomatic runtime attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.25"
+message = "owned growable writer latency is materially behind idiomatic Vec encoding"
+
+[[cases]]
 name = "callback"
 entry = "callback"
 seeds = [0, 1, 81985529216486895, -1]

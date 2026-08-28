@@ -258,6 +258,10 @@ declared wire width produce nominal field-site errors rather than truncating.
 - `builder(&mut [u8])` writes into fixed output and returns `OutputError::NeedMore` when it ends.
 - `builder(&mut Vec<u8>)` and `builder(&mut bytes::BytesMut)` grow automatically through
   `AsRef<[u8]> + AsMut<[u8]> + Extend<u8>`.
+- `builder(output::owned(target))` transfers a growable target into the writer. Unfinished writer
+  stages are therefore `Send + 'static` whenever the target is, and `finish().into_parts()` returns
+  the adapter and exact range; `Owned::into_inner()` recovers the original `Vec`, `BytesMut`, or
+  other contiguous collection.
 - `output::bounded` and `output::grow_with` opt into bounded or caller-controlled growth.
 - On write failure, output may contain a partial unpublished representation. `finish()` returns a
   `Written` token with the exact represented range.
