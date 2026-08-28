@@ -125,7 +125,7 @@ impl Analyzer {
         }
         self.run("aa")?;
         let symbols: Vec<SymbolInfo> = self.json("isj")?;
-        let address = symbols
+        let root_symbol = symbols
             .iter()
             .find(|entry| entry.name == symbol)
             .or_else(|| {
@@ -133,11 +133,17 @@ impl Analyzer {
                     .iter()
                     .find(|entry| entry.name.strip_prefix('_') == Some(symbol))
             })
-            .and_then(|entry| entry.vaddr)
             .ok_or_else(|| ArtifactError::MissingSymbol {
                 path: self.path.clone(),
                 symbol: symbol.to_owned(),
             })?;
+        let address = root_symbol
+            .vaddr
+            .ok_or_else(|| ArtifactError::MissingSymbol {
+                path: self.path.clone(),
+                symbol: symbol.to_owned(),
+            })?;
+        let root_size = root_symbol.size.filter(|size| *size != 0);
         let imports: Vec<ImportInfo> = self.json("iij")?;
         let import_addresses = imports
             .iter()
@@ -145,8 +151,8 @@ impl Analyzer {
             .collect::<BTreeSet<_>>();
 
         let mut functions = BTreeMap::new();
-        let mut pending = VecDeque::from([address]);
-        while let Some(current) = pending.pop_front() {
+        let mut pending = VecDeque::from([(address, root_size)]);
+        while let Some((current, exact_size)) = pending.pop_front() {
             if functions.contains_key(&current) {
                 continue;
             }
@@ -156,10 +162,10 @@ impl Analyzer {
                     limit: MAX_REACHABLE_FUNCTIONS,
                 });
             }
-            let local = self.analyze_function(current, &import_addresses)?;
+            let local = self.analyze_function(current, exact_size, &import_addresses)?;
             for &callee in &local.callees {
                 if !functions.contains_key(&callee) {
-                    pending.push_back(callee);
+                    pending.push_back((callee, None));
                 }
             }
             functions.insert(current, local);
@@ -199,28 +205,49 @@ impl Analyzer {
     fn analyze_function(
         &self,
         address: u64,
+        exact_size: Option<u64>,
         imports: &BTreeSet<u64>,
     ) -> Result<LocalMetrics, ArtifactError> {
         let seek = format!("0x{address:x}");
         self.run(&format!("afr @ {seek}"))?;
-        let information: Vec<FunctionInfo> = self.json(&format!("afij @ {seek}"))?;
+        if let Some(size) = exact_size {
+            let end = address.saturating_add(size);
+            self.run(&format!("afu 0x{end:x} @ {seek}"))?;
+        }
+        let mut information: Vec<FunctionInfo> = self.json(&format!("afij @ {seek}"))?;
         let information = information
-            .into_iter()
-            .find(|function| function.offset == address)
+            .iter()
+            .position(|function| function.offset == address)
+            .map(|index| information.swap_remove(index))
+            .or_else(|| information.into_iter().next())
             .ok_or_else(|| ArtifactError::MissingSymbol {
                 path: self.path.clone(),
                 symbol: seek.clone(),
             })?;
         let body: FunctionBody = self.json(&format!("pdfj @ {seek}"))?;
-        let start = information.offset;
-        let end = start.saturating_add(information.size);
+        let start = exact_size.map_or(information.offset, |_| address);
+        let end = exact_size.map_or_else(
+            || {
+                information
+                    .maxbound
+                    .filter(|bound| *bound >= start)
+                    .unwrap_or_else(|| start.saturating_add(information.size))
+            },
+            |size| start.saturating_add(size),
+        );
         let mut metrics = LocalMetrics {
-            text_bytes: information.size,
+            text_bytes: end.saturating_sub(start),
             stack_bytes: information.stackframe,
             ..LocalMetrics::default()
         };
 
         for operation in body.ops {
+            let Some(offset) = operation.offset else {
+                continue;
+            };
+            if !(start..end).contains(&offset) {
+                continue;
+            }
             metrics.instructions += 1;
             if branch(&operation.kind) {
                 metrics.branches += 1;
@@ -250,7 +277,7 @@ impl Analyzer {
                 }
             }
 
-            if unconditional_jump(&operation.kind) {
+            if unconditional_jump(&operation.kind) && !switch(&operation) {
                 let leaves_function = operation
                     .jump
                     .is_none_or(|target| !(start..end).contains(&target));
@@ -316,6 +343,8 @@ struct LocalMetrics {
 struct SymbolInfo {
     name: String,
     vaddr: Option<u64>,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -329,6 +358,8 @@ struct FunctionInfo {
     offset: u64,
     size: u64,
     #[serde(default)]
+    maxbound: Option<u64>,
+    #[serde(default)]
     stackframe: u64,
 }
 
@@ -339,14 +370,18 @@ struct FunctionBody {
 
 #[derive(Deserialize)]
 struct Operation {
+    #[serde(default, deserialize_with = "nonnegative_u64")]
+    offset: Option<u64>,
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
     disasm: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nonnegative_u64")]
     jump: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nonnegative_u64")]
     ptr: Option<u64>,
+    #[serde(default)]
+    flags: Vec<String>,
 }
 
 fn command(pipe: &mut RzPipe, command_text: &str) -> Result<String, ArtifactError> {
@@ -415,6 +450,31 @@ fn unconditional_jump(kind: &str) -> bool {
     matches!(kind, "jmp" | "rjmp" | "ijmp" | "ujmp")
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JsonInteger {
+    Unsigned(u64),
+    Signed(i64),
+}
+
+fn nonnegative_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<JsonInteger>::deserialize(deserializer)? {
+        Some(JsonInteger::Unsigned(value)) => Some(value),
+        Some(JsonInteger::Signed(value)) => u64::try_from(value).ok(),
+        None => None,
+    })
+}
+
+fn switch(operation: &Operation) -> bool {
+    operation
+        .flags
+        .iter()
+        .any(|flag| flag.starts_with("switch."))
+}
+
 fn linkage(operation: &Operation, imports: &BTreeSet<u64>) -> bool {
     operation.disasm.contains("reloc.")
         || operation.disasm.contains("sym.imp.")
@@ -431,25 +491,45 @@ fn marker(value: &str, markers: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Operation, linkage};
+    use super::{Operation, linkage, switch};
     use std::collections::BTreeSet;
 
     #[test]
     fn distinguishes_linker_relocations_from_dynamic_dispatch() {
         let linker_call = Operation {
+            offset: Some(0x1000),
             kind: "ircall".to_owned(),
             disasm: "call qword [reloc.memcpy]".to_owned(),
             jump: None,
             ptr: Some(0x2000),
+            flags: Vec::new(),
         };
         let dynamic_call = Operation {
+            offset: Some(0x1008),
             kind: "rcall".to_owned(),
             disasm: "call rax".to_owned(),
             jump: None,
             ptr: None,
+            flags: Vec::new(),
         };
 
         assert!(linkage(&linker_call, &BTreeSet::new()));
         assert!(!linkage(&dynamic_call, &BTreeSet::new()));
+        let jump_table = Operation {
+            offset: Some(0x1010),
+            kind: "rjmp".to_owned(),
+            disasm: "jmp rsi".to_owned(),
+            jump: None,
+            ptr: None,
+            flags: vec!["switch.0x1000".to_owned()],
+        };
+        assert!(switch(&jump_table));
+    }
+
+    #[test]
+    fn ignores_negative_rizin_pointer_sentinels() {
+        let operation: Operation =
+            serde_json::from_str(r#"{"type":"ircall","jump":-2063541689}"#).unwrap();
+        assert_eq!(operation.jump, None);
     }
 }
