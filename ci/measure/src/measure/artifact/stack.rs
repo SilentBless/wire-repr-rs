@@ -104,21 +104,40 @@ fn finish(
 
 fn stack_delta(line: &str, symbol: &str) -> Result<Option<i64>, StackError> {
     let compact = line.replace([' ', '\t'], "");
+    let x86_instruction = x86_instruction(&compact).filter(|instruction| {
+        instruction.starts_with("sub")
+            || instruction.starts_with("add")
+            || instruction.starts_with("and")
+    });
+    let x86_stack_destination = if let Some(instruction) = x86_instruction {
+        Some(
+            parse_x86_stack_destination(instruction).ok_or_else(|| StackError::InvalidStack {
+                symbol: symbol.to_owned(),
+                instruction: line.to_owned(),
+            })?,
+        )
+    } else {
+        None
+    };
     let adjustment = if compact.starts_with("push") {
         Some(8)
     } else if compact.starts_with("pop") {
         Some(-8)
-    } else if compact.starts_with("sub") && compact.contains("%rsp") {
-        number_after(&compact, '$').map(|value| value as i64)
-    } else if compact.starts_with("add") && compact.contains("%rsp") {
-        number_after(&compact, '$').map(|value| -(value as i64))
+    } else if compact.starts_with("sub") && x86_stack_destination == Some(true) {
+        x86_instruction
+            .and_then(|instruction| number_after(instruction, '$'))
+            .map(|value| value as i64)
+    } else if compact.starts_with("add") && x86_stack_destination == Some(true) {
+        x86_instruction
+            .and_then(|instruction| number_after(instruction, '$'))
+            .map(|value| -(value as i64))
     } else if compact.starts_with("subsp,sp,#") {
         Some(aarch64_immediate(&compact, line, symbol)? as i64)
     } else if compact.starts_with("addsp,sp,#") {
         Some(-(aarch64_immediate(&compact, line, symbol)? as i64))
     } else if compact.starts_with("subsp,sp,")
         || compact.starts_with("addsp,sp,")
-        || (compact.starts_with("and") && compact.contains("%rsp"))
+        || (compact.starts_with("and") && x86_stack_destination == Some(true))
     {
         return Err(StackError::InvalidStack {
             symbol: symbol.to_owned(),
@@ -142,6 +161,49 @@ fn stack_delta(line: &str, symbol: &str) -> Result<Option<i64>, StackError> {
             symbol: symbol.to_owned(),
             instruction: line.to_owned(),
         })
+}
+
+fn x86_instruction(instruction: &str) -> Option<&str> {
+    let instruction = instruction
+        .split_once("//")
+        .map_or(instruction, |(instruction, _)| instruction);
+    let instruction = instruction
+        .split_once(';')
+        .map_or(instruction, |(instruction, _)| instruction);
+    let stack_pointer = instruction.find("%rsp")?;
+    if instruction
+        .find('#')
+        .is_some_and(|comment| stack_pointer > comment)
+    {
+        return None;
+    }
+    Some(
+        instruction
+            .split_once('#')
+            .map_or(instruction, |(instruction, _)| instruction),
+    )
+}
+
+fn parse_x86_stack_destination(instruction: &str) -> Option<bool> {
+    let mut depth = 0usize;
+    let mut separator = None;
+    for (index, character) in instruction.char_indices() {
+        match character {
+            '(' => depth = depth.checked_add(1)?,
+            ')' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                if separator.replace(index).is_some() {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    let destination = &instruction[separator? + 1..];
+    Some(destination == "%rsp")
 }
 
 fn aarch64_immediate(compact: &str, instruction: &str, symbol: &str) -> Result<u64, StackError> {
