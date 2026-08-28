@@ -744,6 +744,15 @@ impl<O: Output> ChildWriter<'_, O> {
     pub fn as_bytes(&self) -> &[u8] {
         &self.writer.output.bytes()[self.start..self.cursor]
     }
+    /// Bytes emitted within this child from an absolute schema start.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bytes_from(&self, start: usize) -> Option<&[u8]> {
+        if start < self.start || start > self.cursor {
+            return None;
+        }
+        Some(&self.writer.output.bytes()[start..self.cursor])
+    }
     /// Writes bytes sequentially and advances this child cursor.
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), OutputError<O::GrowError>> {
         let end = self

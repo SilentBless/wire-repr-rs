@@ -4,6 +4,10 @@ use syn::{Expr, ExprCall, ExprPath, Ident, Member};
 
 use super::model::Computed;
 
+pub(super) fn requires_view(computed: &Computed) -> bool {
+    !matches!(&computed.expression, Expr::Call(call) if call.args.is_empty())
+}
+
 pub(super) fn render_call(
     computed: &Computed,
     view: &Ident,

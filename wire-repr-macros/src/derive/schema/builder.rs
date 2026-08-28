@@ -16,10 +16,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let name = &schema.name;
     let builder = format_ident!("{}Builder", name.unraw());
     let error = format_ident!("{}WriteError", name.unraw());
-    let validator_references = schema
-        .validators
-        .iter()
-        .map(|validator| quote!(let _ = #validator;));
     let original_arguments = generic_arguments(&schema.generics);
     let slots = slots(schema);
     let marker = fresh_field_ident(schema, "schema");
@@ -88,9 +84,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     };
     Ok(quote! {
         #choice_groups
-        const _: () = {
-            #(#validator_references)*
-        };
 
         #[doc(hidden)]
         #vis struct #builder #builder_declaration_generics #builder_declaration_where {
@@ -605,11 +598,12 @@ fn render_complete(
     let write_output = fresh_type_ident(&impl_generics, "Output");
     let (_, schema_types, _) = schema.generics.split_for_impl();
     let self_type = quote!(#name #schema_types);
-    if schema
-        .fields
-        .iter()
-        .any(|field| field.kind.computed().is_some())
-    {
+    if schema.fields.iter().any(|field| {
+        field
+            .kind
+            .computed()
+            .is_some_and(super::computed::requires_view)
+    }) {
         impl_generics
             .make_where_clause()
             .predicates
@@ -1213,6 +1207,21 @@ fn render_complete(
             } else {
                 call
             };
+            let view_binding = if !super::computed::requires_view(computed) {
+                quote!()
+            } else {
+                quote! {
+                    let bytes = writer.bytes_from(#schema_start).ok_or_else(|| {
+                        #runtime::WriteError::Schema(
+                            #error::Layout(#runtime::LayoutError { field: #field_name }),
+                        )
+                    })?;
+                    let #view = <#self_type as #runtime::__private::WireSelect>::select_view(bytes)
+                        .map_err(|_| #runtime::WriteError::Schema(
+                            #error::Layout(#runtime::LayoutError { field: #field_name }),
+                        ))?;
+                }
+            };
             let encoded = if scalar.value_type.is_converted() {
                 let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
                 quote!(#conversion.ok_or_else(|| #runtime::WriteError::Schema(
@@ -1223,12 +1232,7 @@ fn render_complete(
             };
             Some(quote! {
                 let #semantic: #value_ty = {
-                    let #view = <#self_type as #runtime::__private::WireSelect>::select_view(
-                        writer.as_bytes(),
-                    )
-                    .map_err(|_| #runtime::WriteError::Schema(
-                        #error::Layout(#runtime::LayoutError { field: #field_name }),
-                    ))?;
+                    #view_binding
                     #calculate
                 };
                 let encoded: #wire_ty = #encoded;

@@ -708,17 +708,19 @@ fn render_finish(
     let (_, schema_types, _) = schema.generics.split_for_impl();
     let schema_name = &schema.name;
     let self_type = quote!(#schema_name #schema_types);
-    let has_computed = schema
-        .fields
-        .iter()
-        .any(|field| field.kind.computed().is_some());
+    let computed_requires_view = schema.fields.iter().any(|field| {
+        field
+            .kind
+            .computed()
+            .is_some_and(super::computed::requires_view)
+    });
     let mut impl_generics = schema.generics.clone();
     let mut output_parameter = TypeParam::from(output.clone());
     output_parameter.bounds.push(parse_quote!(#runtime::Output));
     impl_generics
         .params
         .push(GenericParam::Type(output_parameter));
-    if has_computed {
+    if computed_requires_view {
         impl_generics
             .make_where_clause()
             .predicates
@@ -909,6 +911,18 @@ fn render_finish(
             } else {
                 call
             };
+            let view_binding = if !super::computed::requires_view(computed) {
+                quote!()
+            } else {
+                quote! {
+                    let #view = <#self_type as #runtime::__private::WireSelect>::select_view(
+                        self.writer.as_bytes(),
+                    )
+                    .map_err(|_| #runtime::WriteError::Schema(
+                        #error_name::Layout(#runtime::LayoutError { field: #field_name }),
+                    ))?;
+                }
+            };
             let encoded = if scalar.value_type.is_converted() {
                 let conversion = super::builder::convert_to_wire(scalar, &semantic, &wire_ty);
                 quote!(#conversion.ok_or_else(|| #runtime::WriteError::Schema(
@@ -919,12 +933,7 @@ fn render_finish(
             };
             Some(quote! {
                 let #semantic: #value_ty = {
-                    let #view = <#self_type as #runtime::__private::WireSelect>::select_view(
-                        self.writer.as_bytes(),
-                    )
-                    .map_err(|_| #runtime::WriteError::Schema(
-                        #error_name::Layout(#runtime::LayoutError { field: #field_name }),
-                    ))?;
+                    #view_binding
                     #calculate
                 };
                 let encoded: #wire_ty = #encoded;
