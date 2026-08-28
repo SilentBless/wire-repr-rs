@@ -1,31 +1,43 @@
 <h1 align="center">wire-repr</h1>
 
-<p align="center"><strong>Compile Rust wire schemas into exact-source views and progressive writers.</strong></p>
+<p align="center">
+  <strong>Exact-source wire views and progressive writers from ordinary Rust schemas.</strong>
+</p>
 
 <p align="center"><code>no_std</code> · no allocation · safe generated API · Rust 1.91</p>
 
-`wire-repr` is for binary formats whose bytes remain the source of truth: network packets, file
-records, storage pages, firmware messages, and IPC frames. A Rust schema describes physical layout.
-The derives generate:
+`wire-repr` is for binary formats whose bytes remain the source of truth: network packets,
+file records, storage pages, firmware messages, and IPC frames. Describe the physical layout once;
+the derives generate an immutable view and an output-owning typestate writer.
 
-- a retained immutable view over borrowed or owned bytes;
-- an output-owning typestate writer that emits the representation progressively.
+> [!IMPORTANT]
+> A schema is a description of physical bytes, not a decoded semantic object. `wire-repr` owns
+> widths, byte order, framing, selectors, controllers, and exact ranges. Your application keeps
+> ownership of protocol meaning.
 
-The library owns widths, byte order, geometry, framing, controllers, selectors, and exact byte
-ranges. Your application keeps ownership of protocol meaning and semantic objects.
+---
 
-## Install
+## ✨ Why wire-repr
+
+- **Exact-source views.** Read fields without materializing a second object graph or losing the
+  represented bytes.
+- **Progressive writers.** Emit directly into caller-owned fixed, growable, bounded, or custom
+  output.
+- **Static composition.** Generic children, enums, arrays, and computed fields remain monomorphized
+  Rust.
+- **No hidden storage.** The core does not allocate, build collection indexes, or dispatch through
+  runtime schemas.
+- **Fail-closed layouts.** Ambiguous or unsupported declarations fail during derive expansion
+  instead of selecting a plausible runtime interpretation.
+
+## 🚀 Quick start
 
 ```toml
 [dependencies]
 wire-repr = "1"
 ```
 
-The crate has no Cargo features. Slices, arrays, `Vec<u8>`, `bytes::Bytes`, and custom
-`AsRef<[u8]>` backings all use the same view API. Growable outputs are selected by their ordinary
-Rust capabilities rather than by a wire-repr feature.
-
-## Quick start
+The crate has no Cargo features.
 
 ```rust
 use wire_repr::{WireBuilder, WireView, wire};
@@ -61,46 +73,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`payload_len` remains a real physical field. Reading trusts its stored value. Writing derives and
-patches it from `payload`, so no length setter is generated. Constants behave the same way: they are
-validated and exposed on views, then written automatically.
+`payload_len` remains a real physical field. Reading trusts it; writing derives and patches it from
+`payload`, so no length setter exists. Constants follow the same rule: validate on read, emit
+automatically on write.
 
-## Live network examples
-
-The examples include actual network round trips rather than only embedded byte fixtures:
-
-```text
-cargo run -p wire-repr --example dns -- example.com
-cargo run -p wire-repr --example ntp
-cargo run -p wire-repr --example telegram
-```
-
-[`dns.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/dns.rs)
-builds a DNS query, sends it through `UdpSocket`, frames the returned datagram, and prints its
-flags and section counts.
-[`ntp.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ntp.rs)
-builds an NTPv4 client packet, validates the server response, and calculates the observed clock
-offset.
-
-DNS transaction IDs and echoed NTP origin timestamps correlate replies but do not authenticate
-plaintext UDP. Their output is informational; consumers requiring trusted naming or time need the
-appropriate authenticated protocol.
-
-The advanced
-[`telegram.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/telegram.rs)
-example opens a real intermediate-transport TCP connection to Telegram DC2. Its schema writes the
-transport marker as a constant, derives both framing lengths, computes a fresh MTProto message ID,
-and obtains the `int128` nonce through a fallible computed callback. The response is represented by
-typed `resPQ`, short TL bytes, and fingerprint-vector views with schema validators—no hand-written
-wire parser. It stops before factorization and Diffie-Hellman because receiving `resPQ` alone does
-not authenticate the server.
-
-These binaries use only `std` networking plus the dev-only `getrandom` dependency. Neither enters
-the normal `wire-repr` target dependency graph. Every network read has a timeout and a declared
-maximum frame size; command-line arguments can override the default resolver, time server, or
-Telegram endpoint.
-
-## Views retain your backing
+## 🧭 Views and ownership
 
 `Schema::view<T: AsRef<[u8]>>(input: T)` stores `T` directly:
 
@@ -112,63 +89,84 @@ let shared = Packet::view(bytes::Bytes::copy_from_slice(bytes))?;
 
 Passing a reference borrows. Passing a collection or shared handle moves it into the opaque view.
 Nested getters borrow their parent and reconstruct only ranges already proved by framing. There is
-no separate owned renderer, lifetime parameter on the schema, hidden allocation, or semantic object
-materialization.
+no separate owned renderer or schema lifetime.
 
-The retained backing must keep projecting the same immutable byte span while the view exists.
-Slices, arrays, `Vec`, `bytes::Bytes`, and ordinary wrappers satisfy that contract; intentionally
-stateful `AsRef` implementations do not.
+> [!NOTE]
+> Retained backing must keep projecting the same immutable byte span while the view exists. Slices,
+> arrays, `Vec`, `bytes::Bytes`, and ordinary wrappers satisfy this. Intentionally stateful
+> `AsRef<[u8]>` implementations do not.
 
-## Writers own one progressive cursor
+## ✍️ Progressive output
 
-`Schema::builder(output)` writes fields as they become available. Setters consume and return
-successive typestate stages, so `?` is the normal control flow and `finish()` exists only after every
-required field has been supplied.
-
-Output behavior follows the output type:
+`Schema::builder(output)` owns one cursor. Every setter consumes one typestate stage and returns the
+next, so `?` is the normal control flow and `finish()` exists only after all required fields are
+present.
 
 ```rust
-Packet::builder(&mut fixed_slice[..]);     // fixed; returns NeedMore
-Packet::builder(&mut vec);                 // grows through Extend<u8>
+Packet::builder(&mut fixed_slice[..]);      // fixed; returns NeedMore
+Packet::builder(&mut vec);                  // grows through Extend<u8>
 Packet::builder(output::bounded(&mut vec, limit));
 Packet::builder(output::grow_with(&mut arena, grow));
-Packet::builder(output::owned(vec));       // movable through a 'static worker
+Packet::builder(output::owned(vec));        // movable through a 'static worker
 ```
 
 Generated code keeps offsets rather than pointers, so growable storage may relocate safely.
 `finish()` returns `Written<O>` with the exact represented range. `output::owned` returns the
-caller-selected collection with that range and adds no allocator dependency to wire-repr.
+caller-selected collection without adding an allocator dependency to the core.
 
-Writing is deliberately progressive, not transactional. An error may leave partial unpublished
-bytes. Applications needing atomic publication should build in an unpublished slot, staging buffer,
-or double buffer and publish only after `finish()` succeeds.
+> [!WARNING]
+> Writing is progressive, not transactional. An error may leave partial unpublished bytes. Publish
+> only the `Written` result, or use an unpublished slot/double buffer when the surrounding system
+> requires atomic visibility.
 
-## Layout capabilities
+## 🌐 Real network examples
 
-The `1.0` schema model includes:
+These examples send real packets and parse the returned bytes:
 
-| Capability | Schema surface |
-| --- | --- |
-| Scalars | fixed integers and floats, explicit endian, constants, fixed primitive arrays |
-| Logical types | `as = Physical` with checked bidirectional `TryFrom`, including `NonZero*` and newtypes |
-| Nested layouts | derived or manual children, generics, lifetimes, const generics, and `where` clauses |
-| Dynamic geometry | bounded `wire::Bytes`, terminal `rest`, padding, alignment, and forward placement |
-| Dependencies | shared length controllers, conditional groups, zero-width flags, and counted arrays |
-| Collections | lazy `ArrayView`, `IntoIterator`, streaming `try_extend`, and exact range forwarding |
-| Enums | selector-only unit variants, body variants, and exact bounded or terminal unknown bodies |
-| Bitfields | reusable nominal bitfields and inline projections from earlier physical scalars |
-| Physical selections | allocation-free root and nested byte ranges for copying and checksums |
-| Computed fields | infallible or fallible callbacks ordered by a generated dependency DAG |
-| Sequences | homogeneous `views()` and failure-atomic heterogeneous `Cursor` consumption |
-| Recursion | depth-bounded enum arrays and object continuations with progressive recursive writers |
+```text
+cargo run -p wire-repr --example dns -- example.com
+cargo run -p wire-repr --example ntp
+cargo run -p wire-repr --example telegram
+cargo run -p wire-repr --example expression_vm
+```
 
-Unsupported or ambiguous layouts fail during derive expansion instead of selecting a heuristic
-runtime interpretation. Runtime selector registries, mutable views, async I/O, semantic object
-mapping, hidden collection indexes, and general traversal are outside the `1.0` core.
+- **[DNS over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/dns.rs).**
+  Builds a query, uses the system resolver, frames the response, and prints flags and section
+  counts.
+- **[NTPv4 over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ntp.rs).**
+  Builds a client packet, validates server timestamps and synchronization state, unfolds NTP eras,
+  and calculates the observed clock offset.
+- **[Telegram MTProto over TCP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/telegram.rs).**
+  Connects to DC2 and performs `req_pq_multi → resPQ`. The transport marker is a constant, both
+  lengths are derived, `message_id` and `nonce:int128` are computed, and the response uses typed TL
+  views plus schema validators and a runtime fingerprint array.
+- **[Recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs).**
+  Compiles `(20 + 22) * -2`, wraps the recursive bytecode in a computed FNV-1a digest, validates it,
+  and evaluates retained child views.
 
-## Collections and exact forwarding
+> [!NOTE]
+> DNS and NTP are plaintext demonstrations. Correlation fields do not authenticate a responder,
+> and the Telegram bootstrap stops before the key exchange proves server identity.
 
-A runtime collection keeps its controller visible in the schema:
+The network binaries use `std` plus the dev-only `getrandom` dependency. Neither enters the normal
+`wire-repr` target graph. Reads have explicit deadlines or datagram limits, and each endpoint can be
+overridden from the command line.
+
+## 🧩 Layout toolbox
+
+- **Scalars and arrays:** fixed integers and floats, explicit endian, constants, `[u8; N]`, and
+  fixed primitive arrays.
+- **Logical types:** `as = Physical` with checked bidirectional `TryFrom`, including `NonZero*` and
+  user newtypes.
+- **Geometry:** bounded `wire::Bytes`, terminal `rest`, padding, alignment, and forward placement.
+- **Dependencies:** shared length controllers, conditional groups, flags, inline bit projections,
+  and counted runtime arrays.
+- **Static enums:** selector-only unit variants, body variants, and exact unknown-body forwarding.
+- **Physical selections:** ordered root/nested byte ranges for copying, hashes, and checksums.
+- **Computed fields:** infallible or fallible callbacks scheduled by a generated dependency DAG.
+- **Sequences:** homogeneous `views()` and failure-atomic heterogeneous cursors.
+
+A runtime array keeps its count as an ordinary physical field:
 
 ```rust
 #[derive(WireView, WireBuilder)]
@@ -180,66 +178,53 @@ struct Items<T> {
 }
 ```
 
-`ArrayView` retains the collection range and authoritative count, not item offsets. Iteration keeps
-one forward cursor. `get(n)` replays only as much geometry as the selected representation requires.
-Writers stream arbitrary Rust iterators:
-
-```rust
-packet.values(|values| {
-    values.try_extend(source, |item, value| item.value(value))
-})?;
-```
-
-When the source is already a validated wire array, the writer can forward it as one exact range:
+`ArrayView` retains a range and authoritative count—not item offsets. Iteration advances one cursor;
+writers accept arbitrary `IntoIterator` sources through `try_extend`. A validated source array can
+be forwarded as one exact range:
 
 ```rust
 packet.values(|values| values.copy_from(source.values()))?;
 ```
 
-## Enums, bitfields, and computed bytes
-
-Static enums expose an ordinary borrowed Rust variant enum. Unit variants write only their selector;
-body variants use closure setters. An explicit `#[wire(unknown)]` variant preserves the raw selector
-and exact body for lossless forwarding.
-
-Nominal bitfields declare their physical integer on the type and logical ranges on fields. Fresh
-writers zero undeclared bits; copying an exact view preserves every source bit.
-
-Computed fields can consume logical getters and physical selections without flattening bytes:
+Computed callbacks may consume logical getters and fragmented physical selections:
 
 ```rust
 #[wire(be, computed = checksum(exclude(self)))]
 checksum: u16,
 ```
 
-`select(&view)` also exposes ordered, merged `chunks()` and byte iteration through nested typed
-field paths. The
-[expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
-wraps recursive bytecode in a dynamic representation whose FNV-1a digest is generated from exact
-physical ranges and checked again by a schema validator.
+Callbacks with arguments use the generated view to resolve exact fields. Zero-argument callbacks
+specialize to direct calls and remain available to `WireBuilder`-only schemas.
 
-## Recursive layouts
+## 🌀 Recursive layouts
 
 Closed selector enums may recurse through counted arrays or object fields marked with
-`wire::Recursive<T>`. The caller chooses a const depth bound:
+`wire::Recursive<T>`:
 
 ```rust
 let value = Value::view::<64>(input)?;
 ```
 
-Generated framing uses an iterative typed continuation stack. Recursive arrays retain bounded exact
-geometry rather than item offsets; unsupported compression modes fall back to exact replay.
-Progressive recursive writers stream children through the same output cursor and retain no semantic
-tree or encoded plan.
+The const parameter bounds one iterative continuation stack. Recursive arrays retain compact exact
+geometry rather than item offsets; unsupported shapes fall back to exact replay. Progressive
+writers stream children through one output cursor without retaining a semantic tree or encoded
+plan.
 
-The runnable
-[recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
-compiles `(20 + 22) * -2` through the progressive writer, wraps it with a computed and validated
-digest, then evaluates the retained recursive child views.
-[`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/ARCHITECTURE.md)
-documents the compact geometry and continuation invariants for maintainers.
+## 🔬 What reaches the CPU
 
-## Errors and incomplete input
+The repository compares every shipped layout class against independent idiomatic handwritten and
+best-safe implementations. The measurement project inspects final linked symbols, call topology,
+stack, allocation and dispatch evidence, then runs calibrated interleaved runtime samples.
+
+> [!NOTE]
+> LLVM instruction counts are diagnostic evidence, not a latency oracle. Workload-local formulas
+> own hard failures and optimization attention.
+
+The core remains featureless and allocation-free; optional application storage appears only through
+caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/ARCHITECTURE.md)
+for the generated-state, recursion, and measurement invariants.
+
+## ⚠️ Errors and incomplete input
 
 Generated errors are nominal field-site enums. Nested failures keep their concrete source type and
 read errors carry absolute root-input offsets. Incomplete contiguous input returns:
@@ -251,35 +236,23 @@ NeedMore {
 }
 ```
 
-The caller owns buffering and retries. `wire-repr` does not retain resumable parser state or own
-`Read`/`AsyncRead`.
+The caller owns buffering and retries. `wire-repr` does not own `Read`, `AsyncRead`, segmented
+input, or resumable transport state.
 
-## Examples
+## 🎯 Deliberate limits
 
-From a repository checkout, all examples are executable with the pinned Rust 1.91 toolchain:
+> [!NOTE]
+> `wire-repr` is a physical-representation compiler, not a serialization framework or protocol
+> runtime.
 
-```text
-cargo run -p wire-repr --example dns -- example.com
-cargo run -p wire-repr --example ntp
-cargo run -p wire-repr --example telegram
-cargo run -p wire-repr --example expression_vm
-```
+The `1.0` core does not provide mutable views, semantic object materialization, runtime schema
+reflection, negotiated selector registries, hidden collection indexes, async transport I/O, general
+resource-limit machinery, or general traversal.
 
-- [`dns.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/dns.rs)
-  — live DNS query and response framing over UDP.
-- [`ntp.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ntp.rs)
-  — live NTPv4 request, timestamp validation, and clock-offset calculation.
-- [`telegram.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/telegram.rs)
-  — real MTProto auth bootstrap against Telegram DC2.
-- [`expression_vm.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
-  — recursive binary compiler, computed digest, validator, and evaluator.
+For the full API, manual capability contracts, and schema reference, see the
+[crate documentation](https://docs.rs/wire-repr).
 
-The full API guide is on [docs.rs](https://docs.rs/wire-repr). The detailed internal contract is
-in [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/ARCHITECTURE.md).
-
-## Verification
-
-The repository verifies behavior and generated code independently:
+## 🛠️ Verification
 
 ```text
 cargo +1.91.0 test --workspace --all-targets
@@ -289,11 +262,7 @@ python3 ci/check-fail-fast.py
 cargo +1.91.0 run -p wire-repr-measure --release -- run
 ```
 
-The product-owned measurement corpus compares generated, idiomatic handwritten, and best-safe
-implementations using final linked artifacts and calibrated runtime samples. LLVM instruction counts
-remain diagnostic evidence rather than a latency oracle.
+## 📄 License
 
-## License
-
-Licensed under the
-[MIT License](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/LICENSE).
+MIT © 2026 SilentBless. See the
+[license](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/LICENSE).
