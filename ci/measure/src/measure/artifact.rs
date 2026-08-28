@@ -14,7 +14,10 @@ use capstone::arch::ArchOperand;
 use capstone::arch::arm64::Arm64OperandType;
 use capstone::arch::x86::{X86OperandType, X86Reg};
 use capstone::prelude::*;
-use object::{Object, ObjectSection, ObjectSymbol, SectionKind, SymbolKind};
+use object::{
+    Object, ObjectSection, ObjectSymbol, Relocation, RelocationFlags, RelocationKind,
+    RelocationTarget, SectionKind, SymbolKind,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 const ALLOCATION_MARKERS: &[&str] = &[
@@ -115,7 +118,8 @@ impl Analyzer {
             source,
         })?;
         let symbols = symbols(&file);
-        let vtables = vtable_candidates(&file, &symbols);
+        let relocated_pointers = relocation_values(&file);
+        let vtables = vtable_candidates(&file, &symbols, &relocated_pointers);
         let root = find_symbol(&symbols, symbol).ok_or_else(|| ArtifactError::MissingSymbol {
             path: self.path.clone(),
             symbol: symbol.to_owned(),
@@ -133,8 +137,15 @@ impl Analyzer {
                 continue;
             };
             let bytes = symbol_bytes(&file, function)?;
-            let local = analyze_bytes(&disassembler, bytes, function.address, &symbols, &vtables)
-                .map_err(|source| ArtifactError::Disassemble {
+            let local = analyze_bytes(
+                &disassembler,
+                bytes,
+                function.address,
+                &symbols,
+                &vtables,
+                &relocated_pointers,
+            )
+            .map_err(|source| ArtifactError::Disassemble {
                 symbol: function.name.clone(),
                 source,
             })?;
@@ -246,6 +257,7 @@ fn find_symbol<'a>(symbols: &'a BTreeMap<u64, Symbol>, name: &str) -> Option<&'a
 fn vtable_candidates(
     file: &object::File<'_>,
     text_symbols: &BTreeMap<u64, Symbol>,
+    relocated_pointers: &BTreeMap<u64, u64>,
 ) -> BTreeSet<u64> {
     let little_endian = file.is_little_endian();
     let mut candidates = BTreeSet::new();
@@ -261,10 +273,34 @@ fn vtable_candidates(
         };
         for offset in (0..data.len().saturating_sub(31)).step_by(8) {
             let words = [
-                word(&data[offset..offset + 8], little_endian),
-                word(&data[offset + 8..offset + 16], little_endian),
-                word(&data[offset + 16..offset + 24], little_endian),
-                word(&data[offset + 24..offset + 32], little_endian),
+                relocated_word(
+                    data,
+                    offset,
+                    section.address(),
+                    little_endian,
+                    relocated_pointers,
+                ),
+                relocated_word(
+                    data,
+                    offset + 8,
+                    section.address(),
+                    little_endian,
+                    relocated_pointers,
+                ),
+                relocated_word(
+                    data,
+                    offset + 16,
+                    section.address(),
+                    little_endian,
+                    relocated_pointers,
+                ),
+                relocated_word(
+                    data,
+                    offset + 24,
+                    section.address(),
+                    little_endian,
+                    relocated_pointers,
+                ),
             ];
             let drop_is_valid = words[0] == 0 || text_contains(text_symbols, words[0]);
             let size_is_valid = words[1] <= (1u64 << 40);
@@ -280,6 +316,133 @@ fn vtable_candidates(
         }
     }
     candidates
+}
+
+fn relocation_values(file: &object::File<'_>) -> BTreeMap<u64, u64> {
+    let little_endian = file.is_little_endian();
+    let mut values = BTreeMap::new();
+
+    for section in file.sections() {
+        if !pointer_section(section.kind()) {
+            continue;
+        }
+        let Ok(data) = section.data() else {
+            continue;
+        };
+        for (offset, relocation) in section.relocations() {
+            let Ok(offset) = usize::try_from(offset) else {
+                continue;
+            };
+            let Some(raw) = data
+                .get(offset..offset.saturating_add(8))
+                .map(|bytes| word(bytes, little_endian))
+            else {
+                continue;
+            };
+            if let Some(value) = section_relocation_value(file, &relocation, raw) {
+                values.insert(section.address() + offset as u64, value);
+            }
+        }
+    }
+
+    if let Some(relocations) = file.dynamic_relocations() {
+        for (address, relocation) in relocations {
+            let raw = raw_word_at(file, address, little_endian);
+            if relocation.has_implicit_addend() && raw.is_none() {
+                continue;
+            }
+            if let Some(value) = dynamic_relative_value(&relocation, raw.unwrap_or(0)) {
+                values.insert(address, value);
+            }
+        }
+    }
+
+    values
+}
+
+fn section_relocation_value(
+    file: &object::File<'_>,
+    relocation: &Relocation,
+    raw: u64,
+) -> Option<u64> {
+    if relocation.size() != 64 || relocation.kind() != RelocationKind::Absolute {
+        return None;
+    }
+    let target = match relocation.target() {
+        RelocationTarget::Symbol(index) => file.symbol_by_index(index).ok()?.address(),
+        RelocationTarget::Section(index) => file.section_by_index(index).ok()?.address(),
+        _ => return None,
+    };
+    let value = target.wrapping_add(relocation.addend() as u64);
+    Some(if relocation.has_implicit_addend() {
+        raw.wrapping_add(value)
+    } else {
+        value
+    })
+}
+
+fn dynamic_relative_value(relocation: &Relocation, raw: u64) -> Option<u64> {
+    let relative = matches!(
+        relocation.flags(),
+        RelocationFlags::Elf { r_type }
+            if matches!(
+                r_type,
+                object::elf::R_X86_64_RELATIVE | object::elf::R_AARCH64_RELATIVE
+            )
+    );
+    if !relative || relocation.target() != RelocationTarget::Absolute {
+        return None;
+    }
+    let addend = relocation.addend() as u64;
+    Some(if relocation.has_implicit_addend() {
+        raw.wrapping_add(addend)
+    } else {
+        addend
+    })
+}
+
+fn raw_word_at(file: &object::File<'_>, address: u64, little_endian: bool) -> Option<u64> {
+    for section in file.sections() {
+        if !pointer_section(section.kind()) {
+            continue;
+        }
+        let Some(offset) = address.checked_sub(section.address()) else {
+            continue;
+        };
+        let Ok(offset) = usize::try_from(offset) else {
+            continue;
+        };
+        let Ok(data) = section.data() else {
+            continue;
+        };
+        let Some(end) = offset.checked_add(8) else {
+            continue;
+        };
+        if let Some(bytes) = data.get(offset..end) {
+            return Some(word(bytes, little_endian));
+        }
+    }
+    None
+}
+
+fn relocated_word(
+    data: &[u8],
+    offset: usize,
+    section_address: u64,
+    little_endian: bool,
+    relocated_pointers: &BTreeMap<u64, u64>,
+) -> u64 {
+    relocated_pointers
+        .get(&(section_address + offset as u64))
+        .copied()
+        .unwrap_or_else(|| word(&data[offset..offset + 8], little_endian))
+}
+
+fn pointer_section(kind: SectionKind) -> bool {
+    matches!(
+        kind,
+        SectionKind::ReadOnlyData | SectionKind::Data | SectionKind::Unknown
+    )
 }
 
 fn text_contains(symbols: &BTreeMap<u64, Symbol>, address: u64) -> bool {
@@ -352,6 +515,7 @@ fn analyze_bytes(
     address: u64,
     symbols: &BTreeMap<u64, Symbol>,
     vtables: &BTreeSet<u64>,
+    relocated_pointers: &BTreeMap<u64, u64>,
 ) -> Result<LocalMetrics, capstone::Error> {
     let instructions = disassembler.disasm_all(bytes, address)?;
     let mut metrics = LocalMetrics::default();
@@ -378,6 +542,7 @@ fn analyze_bytes(
             instruction,
             &operands,
             vtables,
+            relocated_pointers,
             &mut register_values,
             &mut referenced_vtables,
         );
@@ -458,6 +623,7 @@ fn track_vtables(
     instruction: &capstone::Insn<'_>,
     operands: &[ArchOperand],
     candidates: &BTreeSet<u64>,
+    relocated_pointers: &BTreeMap<u64, u64>,
     registers: &mut BTreeMap<u16, u64>,
     references: &mut BTreeSet<u64>,
 ) {
@@ -468,7 +634,9 @@ fn track_vtables(
             operands.get(1).and_then(arm_immediate),
         ) {
             registers.insert(register, address);
-            record_vtable(address, candidates, references);
+            if mnemonic == "adr" {
+                record_vtable(address, candidates, relocated_pointers, references);
+            }
         }
     } else if mnemonic == "add"
         && let (Some(destination), Some(source), Some(offset)) = (
@@ -480,7 +648,7 @@ fn track_vtables(
     {
         let address = base.wrapping_add(offset);
         registers.insert(destination, address);
-        record_vtable(address, candidates, references);
+        record_vtable(address, candidates, relocated_pointers, references);
     } else if mnemonic == "mov"
         && let (Some(destination), Some(source)) = (
             operands.first().and_then(arm_register),
@@ -501,6 +669,7 @@ fn track_vtables(
                     record_vtable(
                         next.wrapping_add_signed(memory.disp()),
                         candidates,
+                        relocated_pointers,
                         references,
                     );
                 }
@@ -512,6 +681,7 @@ fn track_vtables(
                     record_vtable(
                         base.wrapping_add_signed(i64::from(memory.disp())),
                         candidates,
+                        relocated_pointers,
                         references,
                     );
                 }
@@ -540,8 +710,24 @@ fn arm_immediate(operand: &ArchOperand) -> Option<u64> {
     }
 }
 
-fn record_vtable(address: u64, candidates: &BTreeSet<u64>, references: &mut BTreeSet<u64>) {
-    if candidates.contains(&address) {
-        references.insert(address);
+fn record_vtable(
+    address: u64,
+    candidates: &BTreeSet<u64>,
+    relocated_pointers: &BTreeMap<u64, u64>,
+    references: &mut BTreeSet<u64>,
+) {
+    let mut address = address;
+    for _ in 0..=2 {
+        if candidates.contains(&address) {
+            references.insert(address);
+            return;
+        }
+        let Some(next) = relocated_pointers.get(&address).copied() else {
+            return;
+        };
+        if next == address {
+            return;
+        }
+        address = next;
     }
 }

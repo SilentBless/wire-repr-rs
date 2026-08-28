@@ -15,6 +15,7 @@ fn x86_direct_jump_is_a_tail_edge() {
         0x1000,
         &symbols,
         &BTreeSet::new(),
+        &BTreeMap::new(),
     )
     .unwrap();
 
@@ -33,6 +34,7 @@ fn aarch64_direct_branch_is_a_tail_edge() {
         0x2000,
         &symbols,
         &BTreeSet::new(),
+        &BTreeMap::new(),
     )
     .unwrap();
 
@@ -49,6 +51,7 @@ fn x86_indirect_jump_is_gateable_dispatch() {
         0x3000,
         &BTreeMap::new(),
         &BTreeSet::new(),
+        &BTreeMap::new(),
     )
     .unwrap();
 
@@ -65,6 +68,7 @@ fn aarch64_indirect_branch_is_gateable_dispatch() {
         0x4000,
         &BTreeMap::new(),
         &BTreeSet::new(),
+        &BTreeMap::new(),
     )
     .unwrap();
 

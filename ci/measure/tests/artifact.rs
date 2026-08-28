@@ -6,9 +6,8 @@ fn triple(value: u64) -> u64 {
     value.wrapping_mul(3)
 }
 
-#[unsafe(no_mangle)]
 #[inline(never)]
-pub fn wire_measure_helper(callback: fn(u64) -> u64, value: u64) -> u64 {
+fn wire_measure_helper(callback: fn(u64) -> u64, value: u64) -> u64 {
     let value = std::hint::black_box(Box::new(value));
     callback(*value)
 }

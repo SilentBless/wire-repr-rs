@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{analyze_bytes, disassembler};
+use super::{analyze_bytes, disassembler, record_vtable};
 
 #[test]
 fn x86_rip_relative_vtable_reference_is_detected() {
@@ -13,6 +13,7 @@ fn x86_rip_relative_vtable_reference_is_detected() {
         address,
         &BTreeMap::new(),
         &BTreeSet::from([candidate]),
+        &BTreeMap::new(),
     )
     .unwrap();
 
@@ -30,8 +31,41 @@ fn aarch64_adrp_add_vtable_reference_is_detected() {
         address,
         &BTreeMap::new(),
         &BTreeSet::from([candidate]),
+        &BTreeMap::new(),
     )
     .unwrap();
 
     assert_eq!(metrics.vtable_references, 1);
+}
+
+#[test]
+fn aarch64_adrp_page_base_is_not_an_exact_vtable_reference() {
+    let address = 0x1_0000_18b0;
+    let page_base = 0x1_0049_c000;
+    let analyzer = disassembler(object::Architecture::Aarch64).unwrap();
+    let metrics = analyze_bytes(
+        &analyzer,
+        &[0xc1, 0x24, 0x00, 0xf0, 0x21, 0x60, 0x11, 0x91],
+        address,
+        &BTreeMap::new(),
+        &BTreeSet::from([page_base]),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    assert_eq!(metrics.vtable_references, 0);
+}
+
+#[test]
+fn relocated_pointer_to_vtable_is_detected() {
+    let candidate = 0x3000;
+    let mut references = BTreeSet::new();
+    record_vtable(
+        0x2000,
+        &BTreeSet::from([candidate]),
+        &BTreeMap::from([(0x2000, candidate)]),
+        &mut references,
+    );
+
+    assert_eq!(references, BTreeSet::from([candidate]));
 }
