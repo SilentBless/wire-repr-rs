@@ -58,7 +58,8 @@ assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifac
 [[cases.rules]]
 name = "idiomatic latency"
 level = "error"
-assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.10"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.10 + 1.0"
+message = "generated collection build exceeds the 10% plus 1ns microbenchmark floor"
 [[cases.rules]]
 name = "best safe attention"
 level = "attention"

@@ -123,7 +123,6 @@ impl Analyzer {
         if !identifier(symbol) {
             return Err(ArtifactError::InvalidSymbol(symbol.to_owned()));
         }
-        self.run("aa")?;
         let symbols: Vec<SymbolInfo> = self.json("isj")?;
         let root_symbol = symbols
             .iter()
@@ -143,7 +142,14 @@ impl Analyzer {
                 path: self.path.clone(),
                 symbol: symbol.to_owned(),
             })?;
-        let root_size = root_symbol.size.filter(|size| *size != 0);
+        let root_size = root_symbol.size.filter(|size| *size != 0).or_else(|| {
+            symbols
+                .iter()
+                .filter_map(|entry| entry.vaddr)
+                .filter(|candidate| *candidate > address)
+                .min()
+                .map(|next| next - address)
+        });
         let imports: Vec<ImportInfo> = self.json("iij")?;
         let import_addresses = imports
             .iter()
@@ -210,10 +216,6 @@ impl Analyzer {
     ) -> Result<LocalMetrics, ArtifactError> {
         let seek = format!("0x{address:x}");
         self.run(&format!("afr @ {seek}"))?;
-        if let Some(size) = exact_size {
-            let end = address.saturating_add(size);
-            self.run(&format!("afu 0x{end:x} @ {seek}"))?;
-        }
         let mut information: Vec<FunctionInfo> = self.json(&format!("afij @ {seek}"))?;
         let information = information
             .iter()

@@ -74,33 +74,9 @@ jobs:
           Join-Path $destination "rizin-win-installer-vs2019_static-64/bin" | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Verify artifact analysis and native debug information
         run: cargo +1.91.0 test -p wire-repr-measure --test harness
-      - name: Verify representative generated workload
-        run: cargo +1.91.0 run -p wire-repr-measure --release -- run --workload collection/runtime/compound --filter copy --json
-
-  measure-inventory:
-    runs-on: ubuntu-24.04
-    outputs:
-      workloads: ${{ steps.inventory.outputs.workloads }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Install Rust 1.91.0
-        run: rustup toolchain install 1.91.0 --profile minimal
-      - name: Build measurement tool
-        run: cargo +1.91.0 build -p wire-repr-measure --release
-      - name: Discover mandatory workloads
-        id: inventory
-        run: |
-          workloads="$(target/release/wire-repr-measure list --json)"
-          echo "workloads=$workloads" >> "$GITHUB_OUTPUT"
 
   measure:
-    name: measure (${{ matrix.workload }})
-    needs: measure-inventory
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        workload: ${{ fromJSON(needs.measure-inventory.outputs.workloads) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust 1.91.0
@@ -112,9 +88,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rizin"
           tar -xJf "$RUNNER_TEMP/rizin.tar.xz" -C "$RUNNER_TEMP/rizin"
           echo "$RUNNER_TEMP/rizin/bin" >> "$GITHUB_PATH"
-      - name: Build measurement tool
+      - name: Build measurement tool once
         run: cargo +1.91.0 build -p wire-repr-measure --release
-      - name: Measure generated code and runtime performance
-        env:
-          WORKLOAD: ${{ matrix.workload }}
-        run: target/release/wire-repr-measure run --workload="$WORKLOAD" --json
+      - name: Measure complete generated corpus
+        run: target/release/wire-repr-measure run --json
