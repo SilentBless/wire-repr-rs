@@ -2,6 +2,12 @@
 
 use wire_repr_measure::measure::artifact::Analyzer;
 
+fn artifact_path() -> std::path::PathBuf {
+    std::env::var_os("WIRE_REPR_MEASURE_TEST_ARTIFACT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_exe().unwrap())
+}
+
 fn triple(value: u64) -> u64 {
     value.wrapping_mul(3)
 }
@@ -46,7 +52,7 @@ pub extern "C" fn wire_measure_vtable_probe(value: u64) -> u64 {
 #[test]
 fn measures_a_symbol_from_the_linked_host_artifact() {
     assert_eq!(wire_measure_probe(2), 6);
-    let analyzer = Analyzer::open(&std::env::current_exe().unwrap()).unwrap();
+    let analyzer = Analyzer::open(&artifact_path()).unwrap();
     let metrics = analyzer.analyze("wire_measure_probe").unwrap();
 
     assert!(metrics.text_bytes > 0);
@@ -61,7 +67,7 @@ fn measures_a_symbol_from_the_linked_host_artifact() {
 #[test]
 fn detects_trait_object_vtable_evidence_in_the_host_artifact() {
     assert_eq!(wire_measure_vtable_probe(2), 3);
-    let analyzer = Analyzer::open(&std::env::current_exe().unwrap()).unwrap();
+    let analyzer = Analyzer::open(&artifact_path()).unwrap();
     let metrics = analyzer.analyze("wire_measure_vtable_probe").unwrap();
 
     assert!(metrics.indirect_calls > 0);

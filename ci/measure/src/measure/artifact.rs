@@ -518,10 +518,15 @@ fn analyze_bytes(
     relocated_pointers: &BTreeMap<u64, u64>,
 ) -> Result<LocalMetrics, capstone::Error> {
     let instructions = disassembler.disasm_all(bytes, address)?;
+    let reachable = reachable_instruction_addresses(disassembler, instructions.as_ref())?;
     let mut metrics = LocalMetrics::default();
     let mut register_values = BTreeMap::new();
     let mut referenced_vtables = BTreeSet::new();
-    for instruction in instructions.as_ref() {
+    for instruction in instructions
+        .as_ref()
+        .iter()
+        .filter(|instruction| reachable.contains(&instruction.address()))
+    {
         metrics.instructions += 1;
         let detail = disassembler.insn_detail(instruction)?;
         let call = detail
@@ -532,7 +537,7 @@ fn analyze_bytes(
             .groups()
             .iter()
             .any(|group| group.0 == capstone::InsnGroupType::CS_GRP_JUMP as u8);
-        let tail = matches!(instruction.mnemonic(), Some("jmp" | "b" | "br"));
+        let tail = terminal_branch(instruction.mnemonic());
         if branch || tail {
             metrics.branches += 1;
         }
@@ -546,11 +551,7 @@ fn analyze_bytes(
             &mut register_values,
             &mut referenced_vtables,
         );
-        let direct_target = if call || tail {
-            operands.iter().find_map(immediate)
-        } else {
-            None
-        };
+        let direct_target = (call || tail).then(|| branch_target(&operands)).flatten();
         if call {
             if let Some(target) = direct_target {
                 metrics.direct_calls += 1;
@@ -593,6 +594,66 @@ fn analyze_bytes(
     }
     metrics.vtable_references = referenced_vtables.len() as u64;
     Ok(metrics)
+}
+
+fn reachable_instruction_addresses(
+    disassembler: &Capstone,
+    instructions: &[capstone::Insn<'_>],
+) -> Result<BTreeSet<u64>, capstone::Error> {
+    let by_address = instructions
+        .iter()
+        .enumerate()
+        .map(|(index, instruction)| (instruction.address(), index))
+        .collect::<BTreeMap<_, _>>();
+    let Some(first) = instructions.first() else {
+        return Ok(BTreeSet::new());
+    };
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec![first.address()];
+    while let Some(address) = pending.pop() {
+        if !reachable.insert(address) {
+            continue;
+        }
+        let Some(&index) = by_address.get(&address) else {
+            continue;
+        };
+        let instruction = &instructions[index];
+        let detail = disassembler.insn_detail(instruction)?;
+        let groups = detail.groups();
+        let branch = groups
+            .iter()
+            .any(|group| group.0 == capstone::InsnGroupType::CS_GRP_JUMP as u8);
+        let returns = groups
+            .iter()
+            .any(|group| group.0 == capstone::InsnGroupType::CS_GRP_RET as u8);
+        let tail = terminal_branch(instruction.mnemonic());
+        if branch {
+            let operands = detail.arch_detail().operands();
+            if let Some(target) = branch_target(&operands)
+                && by_address.contains_key(&target)
+            {
+                pending.push(target);
+            }
+        }
+        if !returns
+            && !tail
+            && let Some(next) = instructions.get(index + 1)
+        {
+            pending.push(next.address());
+        }
+    }
+    Ok(reachable)
+}
+
+fn terminal_branch(mnemonic: Option<&str>) -> bool {
+    matches!(
+        mnemonic,
+        Some("jmp" | "ljmp" | "b" | "br" | "braa" | "braaz" | "brab" | "brabz")
+    )
+}
+
+fn branch_target(operands: &[ArchOperand]) -> Option<u64> {
+    operands.iter().rev().find_map(immediate)
 }
 
 fn immediate(operand: &ArchOperand) -> Option<u64> {
