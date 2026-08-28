@@ -49,6 +49,18 @@ pub extern "C" fn wire_measure_vtable_probe(value: u64) -> u64 {
     dispatch.dispatch(value)
 }
 
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn wire_measure_linkage_target(value: u64) -> u64 {
+    value.wrapping_add(1)
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn wire_measure_linkage_probe(value: u64) -> u64 {
+    wire_measure_linkage_target(std::hint::black_box(value))
+}
+
 #[test]
 fn measures_a_symbol_from_the_linked_host_artifact() {
     assert_eq!(wire_measure_probe(2), 6);
@@ -72,4 +84,15 @@ fn detects_trait_object_vtable_evidence_in_the_host_artifact() {
 
     assert!(metrics.indirect_calls > 0);
     assert!(metrics.vtable_references > 0);
+}
+
+#[test]
+fn resolves_static_linkage_without_reporting_dynamic_dispatch() {
+    assert_eq!(wire_measure_linkage_probe(2), 3);
+    let analyzer = Analyzer::open(&artifact_path()).unwrap();
+    let metrics = analyzer.analyze("wire_measure_linkage_probe").unwrap();
+
+    assert!(metrics.direct_calls > 0);
+    assert_eq!(metrics.indirect_calls, 0);
+    assert!(metrics.reachable_functions >= 2);
 }

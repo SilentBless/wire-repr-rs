@@ -6,7 +6,7 @@ mod tail;
 #[cfg(test)]
 mod vtable;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -118,8 +118,8 @@ impl Analyzer {
             source,
         })?;
         let symbols = symbols(&file);
-        let relocated_pointers = relocation_values(&file);
-        let vtables = vtable_candidates(&file, &symbols, &relocated_pointers);
+        let relocations = relocation_values(&file, &symbols);
+        let vtables = vtable_candidates(&file, &symbols, &relocations.pointers);
         let root = find_symbol(&symbols, symbol).ok_or_else(|| ArtifactError::MissingSymbol {
             path: self.path.clone(),
             symbol: symbol.to_owned(),
@@ -143,7 +143,8 @@ impl Analyzer {
                 function.address,
                 &symbols,
                 &vtables,
-                &relocated_pointers,
+                &relocations.pointers,
+                &relocations.linkage,
             )
             .map_err(|source| ArtifactError::Disassemble {
                 symbol: function.name.clone(),
@@ -318,9 +319,29 @@ fn vtable_candidates(
     candidates
 }
 
-fn relocation_values(file: &object::File<'_>) -> BTreeMap<u64, u64> {
+#[derive(Default)]
+struct RelocationValues {
+    pointers: BTreeMap<u64, u64>,
+    linkage: BTreeMap<u64, u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResolvedRelocation {
+    Pointer(u64),
+    Linkage(u64),
+}
+
+fn relocation_values(
+    file: &object::File<'_>,
+    text_symbols: &BTreeMap<u64, Symbol>,
+) -> RelocationValues {
     let little_endian = file.is_little_endian();
-    let mut values = BTreeMap::new();
+    let mut values = RelocationValues::default();
+    let dynamic_symbols = file
+        .dynamic_symbols()
+        .filter(|symbol| !symbol.is_undefined() && symbol.address() != 0)
+        .map(|symbol| (symbol.index(), symbol.address()))
+        .collect::<HashMap<_, _>>();
 
     for section in file.sections() {
         if !pointer_section(section.kind()) {
@@ -340,7 +361,9 @@ fn relocation_values(file: &object::File<'_>) -> BTreeMap<u64, u64> {
                 continue;
             };
             if let Some(value) = section_relocation_value(file, &relocation, raw) {
-                values.insert(section.address() + offset as u64, value);
+                values
+                    .pointers
+                    .insert(section.address() + offset as u64, value);
             }
         }
     }
@@ -351,8 +374,16 @@ fn relocation_values(file: &object::File<'_>) -> BTreeMap<u64, u64> {
             if relocation.has_implicit_addend() && raw.is_none() {
                 continue;
             }
-            if let Some(value) = dynamic_relative_value(&relocation, raw.unwrap_or(0)) {
-                values.insert(address, value);
+            match dynamic_relocation_value(&relocation, raw.unwrap_or(0), &dynamic_symbols) {
+                Some(ResolvedRelocation::Pointer(value)) => {
+                    values.pointers.insert(address, value);
+                }
+                Some(ResolvedRelocation::Linkage(target))
+                    if text_contains(text_symbols, target) =>
+                {
+                    values.linkage.insert(address, target);
+                }
+                Some(ResolvedRelocation::Linkage(_)) | None => {}
             }
         }
     }
@@ -381,24 +412,50 @@ fn section_relocation_value(
     })
 }
 
-fn dynamic_relative_value(relocation: &Relocation, raw: u64) -> Option<u64> {
-    let relative = matches!(
-        relocation.flags(),
-        RelocationFlags::Elf { r_type }
-            if matches!(
-                r_type,
-                object::elf::R_X86_64_RELATIVE | object::elf::R_AARCH64_RELATIVE
-            )
-    );
-    if !relative || relocation.target() != RelocationTarget::Absolute {
+fn dynamic_relocation_value(
+    relocation: &Relocation,
+    raw: u64,
+    dynamic_symbols: &HashMap<object::SymbolIndex, u64>,
+) -> Option<ResolvedRelocation> {
+    let RelocationFlags::Elf { r_type } = relocation.flags() else {
+        return None;
+    };
+    let addend = if relocation.has_implicit_addend() {
+        raw
+    } else {
+        relocation.addend() as u64
+    };
+    if matches!(
+        r_type,
+        object::elf::R_X86_64_RELATIVE | object::elf::R_AARCH64_RELATIVE
+    ) && relocation.target() != RelocationTarget::Absolute
+    {
         return None;
     }
-    let addend = relocation.addend() as u64;
-    Some(if relocation.has_implicit_addend() {
-        raw.wrapping_add(addend)
-    } else {
-        addend
-    })
+    let defined_target = match relocation.target() {
+        RelocationTarget::Symbol(index) => dynamic_symbols.get(&index).copied(),
+        _ => None,
+    };
+    elf_dynamic_value(r_type, defined_target, addend)
+}
+
+fn elf_dynamic_value(
+    r_type: object::elf::RelocationType,
+    defined_target: Option<u64>,
+    addend: u64,
+) -> Option<ResolvedRelocation> {
+    match r_type {
+        object::elf::R_X86_64_RELATIVE | object::elf::R_AARCH64_RELATIVE => {
+            Some(ResolvedRelocation::Pointer(addend))
+        }
+        object::elf::R_X86_64_64 => Some(ResolvedRelocation::Pointer(
+            defined_target?.wrapping_add(addend),
+        )),
+        object::elf::R_X86_64_GLOB_DAT | object::elf::R_X86_64_JUMP_SLOT => {
+            Some(ResolvedRelocation::Linkage(defined_target?))
+        }
+        _ => None,
+    }
 }
 
 fn raw_word_at(file: &object::File<'_>, address: u64, little_endian: bool) -> Option<u64> {
@@ -516,6 +573,7 @@ fn analyze_bytes(
     symbols: &BTreeMap<u64, Symbol>,
     vtables: &BTreeSet<u64>,
     relocated_pointers: &BTreeMap<u64, u64>,
+    linkage_targets: &BTreeMap<u64, u64>,
 ) -> Result<LocalMetrics, capstone::Error> {
     let instructions = disassembler.disasm_all(bytes, address)?;
     let reachable = reachable_instruction_addresses(disassembler, instructions.as_ref())?;
@@ -551,9 +609,14 @@ fn analyze_bytes(
             &mut register_values,
             &mut referenced_vtables,
         );
-        let direct_target = (call || tail).then(|| branch_target(&operands)).flatten();
+        let target = if call || tail {
+            branch_target(&operands)
+                .or_else(|| relocated_indirect_target(instruction, &operands, linkage_targets))
+        } else {
+            None
+        };
         if call {
-            if let Some(target) = direct_target {
+            if let Some(target) = target {
                 metrics.direct_calls += 1;
                 if let Some(target_symbol) = symbols.get(&target) {
                     if PANIC_MARKERS
@@ -576,7 +639,7 @@ fn analyze_bytes(
         }
         if tail {
             metrics.tail_calls += 1;
-            match direct_target {
+            match target {
                 Some(target) if target != address && symbols.contains_key(&target) => {
                     metrics.internal_calls.push(target);
                 }
@@ -667,6 +730,29 @@ fn immediate(operand: &ArchOperand) -> Option<u64> {
             _ => None,
         },
     }
+}
+
+fn relocated_indirect_target(
+    instruction: &capstone::Insn<'_>,
+    operands: &[ArchOperand],
+    linkage_targets: &BTreeMap<u64, u64>,
+) -> Option<u64> {
+    operands.iter().find_map(|operand| {
+        let ArchOperand::X86Operand(operand) = operand else {
+            return None;
+        };
+        let X86OperandType::Mem(memory) = operand.op_type else {
+            return None;
+        };
+        if memory.base().0 != X86Reg::X86_REG_RIP as u16 {
+            return None;
+        }
+        let next = instruction.address() + instruction.bytes().len() as u64;
+        linkage_targets
+            .get(&next.wrapping_add_signed(memory.disp()))
+            .copied()
+            .filter(|target| *target != 0)
+    })
 }
 
 fn memory_access(operand: &ArchOperand) -> Option<capstone::AccessType> {
