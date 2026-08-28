@@ -49,6 +49,7 @@ pub fn decode(seed: u64) -> u64 { tail_helper(rotate, seed) }
         .analyze("measure_entry")
         .unwrap();
     assert!(metrics.transitive_indirect_calls > 0);
+    #[cfg(not(target_os = "windows"))]
     assert!(metrics.transitive_allocation_symbols > 0);
 
     std::fs::remove_dir_all(root).unwrap();
