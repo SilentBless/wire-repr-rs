@@ -135,9 +135,10 @@ impl Workload {
             message,
         };
 
-        if self.name.is_empty() || self.name.starts_with('/') || self.name.ends_with('/') {
+        if !zone_name(&self.name) {
             return Err(invalid(
-                "name must be a non-empty relative zone path".to_owned(),
+                "name must contain only slash-separated ASCII letters, digits, `_`, or `-`"
+                    .to_owned(),
             ));
         }
         if !self.roles.contains_key("generated") || !self.roles.contains_key("idiomatic") {
@@ -232,6 +233,16 @@ impl Workload {
         }
         Ok(())
     }
+}
+fn zone_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.split('/').all(|component| {
+            let mut bytes = component.bytes();
+            matches!(
+                bytes.next(),
+                Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+            ) && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
 }
 
 fn unique_names<'a>(

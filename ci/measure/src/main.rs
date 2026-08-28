@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -17,7 +19,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Run(Run),
-    List(Common),
+    List(List),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -26,6 +28,14 @@ struct Common {
     root: PathBuf,
     #[arg(long, default_value = "wire-repr/measure")]
     workloads: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct List {
+    #[command(flatten)]
+    common: Common,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -38,6 +48,8 @@ struct Run {
     toolchain: String,
     #[arg(long)]
     filter: Option<String>,
+    #[arg(long)]
+    workload: Option<String>,
     #[arg(long)]
     no_runtime: bool,
     #[arg(long)]
@@ -58,10 +70,28 @@ fn main() -> ExitCode {
 
 fn execute(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match cli.command {
-        Command::List(common) => {
-            let root = common.root.canonicalize()?;
-            for workload in discover(&root.join(common.workloads))? {
-                println!("{}", workload.config.name);
+        Command::List(arguments) => {
+            let root = arguments.common.root.canonicalize()?;
+            let workloads = discover(&root.join(arguments.common.workloads))?;
+            let names = workloads
+                .iter()
+                .map(|workload| workload.config.name.as_str())
+                .collect::<Vec<_>>();
+            if names.is_empty()
+                || names.iter().copied().collect::<BTreeSet<_>>().len() != names.len()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "workload inventory must be non-empty and unique",
+                )
+                .into());
+            }
+            if arguments.json {
+                println!("{}", serde_json::to_string(&names)?);
+            } else {
+                for name in names {
+                    println!("{name}");
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -73,6 +103,7 @@ fn execute(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 target: root.join(arguments.target),
                 toolchain: arguments.toolchain,
                 filter: arguments.filter,
+                workload: arguments.workload,
                 runtime: !arguments.no_runtime,
             })?;
             if arguments.json {

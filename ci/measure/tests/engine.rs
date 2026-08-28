@@ -69,6 +69,7 @@ pub fn decode(seed: u64) -> u64 { seed.rotate_left(7) }
         workloads: root.join("workloads"),
         target: root.join("target"),
         toolchain: "1.91.0".to_owned(),
+        workload: Some("fixed/foo".to_owned()),
         filter: None,
         runtime: true,
     })

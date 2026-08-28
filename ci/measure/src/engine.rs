@@ -20,6 +20,7 @@ pub struct Options {
     pub workloads: PathBuf,
     pub target: PathBuf,
     pub toolchain: String,
+    pub workload: Option<String>,
     pub filter: Option<String>,
     pub runtime: bool,
 }
@@ -68,6 +69,13 @@ pub fn run(options: &Options) -> Result<Report, EngineError> {
     let mut workload_reports = Vec::new();
 
     for workload in discovered {
+        if options
+            .workload
+            .as_ref()
+            .is_some_and(|selected| workload.config.name != *selected)
+        {
+            continue;
+        }
         let mut probe_metrics: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
         for probe in &workload.probes {
             let harness = builder.build(&probe.source, &probe.config.entry)?;

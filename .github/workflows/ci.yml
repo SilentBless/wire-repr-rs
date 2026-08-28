@@ -31,8 +31,30 @@ jobs:
       - name: Documentation
         run: RUSTDOCFLAGS='-D warnings' cargo +1.91.0 doc --workspace --no-deps
 
-  measure:
+  measure-inventory:
     runs-on: ubuntu-24.04
+    outputs:
+      workloads: ${{ steps.inventory.outputs.workloads }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install Rust 1.91.0
+        run: rustup toolchain install 1.91.0 --profile minimal
+      - name: Build measurement tool
+        run: cargo +1.91.0 build -p wire-repr-measure --release
+      - name: Discover mandatory workloads
+        id: inventory
+        run: |
+          workloads="$(target/release/wire-repr-measure list --json)"
+          echo "workloads=$workloads" >> "$GITHUB_OUTPUT"
+
+  measure:
+    name: measure (${{ matrix.workload }})
+    needs: measure-inventory
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        workload: ${{ fromJSON(needs.measure-inventory.outputs.workloads) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust 1.91.0
@@ -40,4 +62,6 @@ jobs:
       - name: Build measurement tool
         run: cargo +1.91.0 build -p wire-repr-measure --release
       - name: Measure generated code and runtime performance
-        run: target/release/wire-repr-measure run --json
+        env:
+          WORKLOAD: ${{ matrix.workload }}
+        run: target/release/wire-repr-measure run --workload="$WORKLOAD" --json

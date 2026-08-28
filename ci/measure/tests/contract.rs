@@ -58,6 +58,17 @@ fn parses_directory_scoped_workload_contract() {
 }
 
 #[test]
+fn rejects_zone_names_that_cannot_round_trip_through_ci() {
+    for name in ["-foo", "foo bar", "foo/$(command)", "foo\nbar", "foo/\"bar"] {
+        let source = SOURCE.replacen("fixed/scalars", name, 1);
+        assert!(
+            Workload::parse(Path::new("workload.toml"), &source).is_err(),
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
 fn evaluates_workload_formulas_with_named_metrics() {
     let engine = FormulaEngine::new().unwrap();
     let metrics = BTreeMap::from([
