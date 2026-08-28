@@ -69,3 +69,47 @@ name = "exact forwarding attention"
 level = "attention"
 assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.50"
 message = "validated exact unknown forwarding has measurable facade overhead"
+
+[[cases]]
+name = "unit_decode"
+entry = "unit_decode"
+seeds = [0, 1, 2, 81985529216486895]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "direct dispatch"
+level = "error"
+assert = "generated_artifact_indirect_calls == 0"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.35"
+message = "unit enum decode has measurable static-dispatch overhead"
+
+[[cases]]
+name = "unit_build"
+entry = "unit_build"
+seeds = [0, 1, 2, 81985529216486895]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_vtable_references == 0"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.50"
+message = "unit enum writer has safe optimization headroom"

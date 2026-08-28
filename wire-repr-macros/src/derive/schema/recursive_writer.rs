@@ -120,7 +120,7 @@ fn render_object(
                     }
                 }
                 FieldKind::Scalar(scalar) => {
-                    let value_ty = super::value_type_tokens(scalar.value_type);
+                    let value_ty = super::value_type_tokens(&scalar.value_type);
                     let wire_ty = super::scalar_type_tokens(scalar.wire_type);
                     let encode = super::to_bytes_method(scalar.endian);
                     quote! {

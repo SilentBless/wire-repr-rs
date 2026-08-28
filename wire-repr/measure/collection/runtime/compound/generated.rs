@@ -29,7 +29,7 @@ fn try_decode(seed: u64) -> Result<u64, ()> {
 fn decode_input(input: &[u8]) -> Result<u64, ()> {
     let view = Foo::<Bar>::view(input).map_err(|_| ())?;
     let mut value = u64::from(view.tail()).rotate_left(53);
-    for item in view.items().iter() {
+    for item in view.items() {
         let item = item.map_err(|_| ())?;
         for byte in item.view().body() {
             value = value.rotate_left(7) ^ u64::from(*byte);
@@ -51,10 +51,9 @@ fn try_build(seed: u64) -> Result<u64, ()> {
     let third = [(seed >> 24) as u8];
     let mut output = [0u8; 9];
     let writer = discard(Foo::<Bar>::builder(&mut output[..]).items(|items| {
-        let items = items.item(|bar| bar.body(&first[..]))?;
-        let items = items.item(|bar| bar.body(&second[..]))?;
-        let items = items.item(|bar| bar.body(&third[..]))?;
-        Ok(items)
+        items.try_extend([&first[..], &second[..], &third[..]], |bar, body| {
+            bar.body(body)
+        })
     }))?;
     let written = discard(discard(writer.tail((seed >> 32) as u8))?.finish())?;
     Ok(hash(written.as_bytes()))

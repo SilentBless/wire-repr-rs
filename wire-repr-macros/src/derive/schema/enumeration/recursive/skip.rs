@@ -99,6 +99,24 @@ pub(super) fn render(context: Context<'_>) -> syn::Result<TokenStream> {
             let variant_name = &variant.name;
             let value = variant.value.as_ref().expect("known selector");
             let body = &variant.body;
+            if variant.unit {
+                return quote! {
+                    value if value == { let selector: #selector_ty = #value; selector } => {
+                        let body_start = cursor
+                            .checked_add(#selector_width)
+                            .ok_or(#view_error::Layout(#runtime::LayoutError {
+                                field: stringify!(#variant_name),
+                            }))?;
+                        if shape_active {
+                            shape ^= selector as u64;
+                            shape = shape.rotate_left(13).wrapping_add(0x9e37_79b9_7f4a_7c15);
+                            shape ^= 0x1eaf_0000_0000_0000u64;
+                            shape = shape.rotate_left(13).wrapping_add(0x9e37_79b9_7f4a_7c15);
+                        }
+                        cursor = body_start;
+                    }
+                };
+            }
             if let Some(slot) = slot {
                 let kind = recursive_kinds[index].expect("recursive variant kind");
                 let stored_continuation = if recursive_kind_count == 1 {

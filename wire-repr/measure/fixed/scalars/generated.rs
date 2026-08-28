@@ -18,6 +18,35 @@ struct Bar {
     foo: u32,
 }
 
+#[derive(WireView, WireBuilder)]
+struct Arrays {
+    #[wire(le)]
+    values: [u16; 4],
+}
+
+pub fn array_decode(seed: u64) -> u64 {
+    let Ok(view) = Arrays::view(seed.to_le_bytes()) else {
+        return u64::MAX;
+    };
+    view.values()
+        .into_iter()
+        .fold(0u64, |hash, value| hash.rotate_left(11) ^ u64::from(value))
+}
+
+pub fn array_build(seed: u64) -> u64 {
+    let bytes = seed.to_le_bytes();
+    let values =
+        core::array::from_fn(|index| u16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]]));
+    let mut output = [0u8; 8];
+    let Ok(complete) = Arrays::builder(&mut output[..]).values(values) else {
+        return u64::MAX;
+    };
+    if complete.finish().is_err() {
+        return u64::MAX;
+    }
+    u64::from_le_bytes(output)
+}
+
 type WriteFailure = wire_repr::WriteError<Infallible, Infallible>;
 
 pub fn decode(seed: u64) -> u64 {

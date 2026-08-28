@@ -47,14 +47,32 @@ fn fixed_items_replay_exact_views_without_an_index() -> TestResult {
 }
 
 #[test]
+fn array_views_follow_into_iterator_and_fused_iterator_conventions() -> TestResult {
+    let view = Foo::<Bar>::view([2, 0x11, 0x22, 0x33, 0x44, 9])?;
+    let items = view.items();
+    let mut borrowed = (&items).into_iter();
+    fn assert_fused<I: core::iter::FusedIterator>(_iter: &I) {}
+    assert_fused(&borrowed);
+    assert_eq!(
+        borrowed.next().transpose()?.expect("first").view().value(),
+        0x1122
+    );
+
+    let values = view
+        .items()
+        .into_iter()
+        .map(|item| item.map(|item| item.view().value()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(values, [0x1122, 0x3344]);
+    Ok(())
+}
+
+#[test]
 fn streaming_writer_patches_count_and_writes_each_item_progressively() -> TestResult {
     let mut output = [0u8; 6];
+    let source = vec![0x1122, 0x3344];
     Foo::<Bar>::builder(&mut output[..])
-        .items(|items| {
-            let items = items.item(|bar| bar.value(0x1122))?;
-            let items = items.item(|bar| bar.value(0x3344))?;
-            Ok(items)
-        })?
+        .items(|items| items.try_extend(source, |bar, value| bar.value(value)))?
         .tail(9)?
         .finish()?;
     assert_eq!(output, [2, 0x11, 0x22, 0x33, 0x44, 9]);

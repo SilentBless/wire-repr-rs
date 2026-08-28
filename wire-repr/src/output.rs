@@ -623,6 +623,23 @@ where
         Ok(self)
     }
 
+    /// Builds and emits every value from an iterator without retaining an item plan.
+    pub fn try_extend<Values, Build, Value>(
+        mut self,
+        values: Values,
+        mut build: Build,
+    ) -> Result<Self, WriteError<<T as crate::schema::WireWrite<Value>>::Error, O::GrowError>>
+    where
+        T: crate::schema::WireBuilder + crate::schema::WireWrite<Value>,
+        Values: IntoIterator,
+        Build: FnMut(<T as crate::schema::WireBuilder>::Builder, Values::Item) -> Value,
+    {
+        for value in values {
+            self = self.item(|item| build(item, value))?;
+        }
+        Ok(self)
+    }
+
     /// Copies one exact item view without semantic reconstruction.
     pub fn item_view<Value>(
         mut self,

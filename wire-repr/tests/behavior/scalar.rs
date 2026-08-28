@@ -211,7 +211,147 @@ mod conversion {
     }
 }
 
+mod rust_conversion {
+    use core::fmt;
+    use core::num::NonZeroU16;
+
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct UserId(u32);
+
+    #[derive(Debug)]
+    struct InvalidUserId;
+
+    impl fmt::Display for InvalidUserId {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("user id must be nonzero")
+        }
+    }
+
+    impl std::error::Error for InvalidUserId {}
+
+    impl TryFrom<u32> for UserId {
+        type Error = InvalidUserId;
+
+        fn try_from(value: u32) -> Result<Self, Self::Error> {
+            (value != 0).then_some(Self(value)).ok_or(InvalidUserId)
+        }
+    }
+
+    impl From<UserId> for u32 {
+        fn from(value: UserId) -> Self {
+            value.0
+        }
+    }
+
+    #[derive(WireView, WireBuilder)]
+    struct RustTypes {
+        #[wire(as = u32, le)]
+        id: UserId,
+        #[wire(as = u16, be)]
+        count: NonZeroU16,
+    }
+
+    #[derive(WireView, WireBuilder)]
+    struct Generic<T>
+    where
+        T: Copy + TryFrom<u32>,
+        u32: TryFrom<T>,
+    {
+        #[wire(as = u32, le)]
+        value: T,
+    }
+    #[test]
+    fn standard_try_from_supports_nonzero_and_transparent_newtypes() -> TestResult {
+        let view = RustTypes::view([0x44, 0x33, 0x22, 0x11, 0, 7])?;
+        assert_eq!(view.id(), UserId(0x1122_3344));
+        assert_eq!(view.count(), NonZeroU16::new(7).expect("nonzero fixture"));
+
+        let mut output = [0u8; 6];
+        RustTypes::builder(&mut output[..])
+            .id(UserId(0x1122_3344))?
+            .count(NonZeroU16::new(7).expect("nonzero fixture"))?
+            .finish()?;
+        assert_eq!(output, [0x44, 0x33, 0x22, 0x11, 0, 7]);
+
+        assert!(matches!(
+            RustTypes::view([0, 0, 0, 0, 0, 7]),
+            Err(RustTypesViewError::IdValue(_))
+        ));
+        assert!(matches!(
+            RustTypes::view([1, 0, 0, 0, 0, 0]),
+            Err(RustTypesViewError::CountValue(_))
+        ));
+        let view = Generic::<UserId>::view([7, 0, 0, 0])?;
+        assert_eq!(view.value(), UserId(7));
+        let mut output = [0u8; 4];
+        Generic::<UserId>::builder(&mut output[..])
+            .value(UserId(7))?
+            .finish()?;
+        assert_eq!(output, [7, 0, 0, 0]);
+        Ok(())
+    }
+}
+
+mod fixed_arrays {
+    use super::*;
+
+    #[derive(WireView, WireBuilder)]
+    struct Arrays<const N: usize> {
+        #[wire(le)]
+        words: [u16; N],
+        signed: [i8; 3],
+    }
+
+    #[derive(WireView, WireBuilder)]
+    struct Aligned {
+        head: u8,
+        #[wire(be, align_before = 4)]
+        values: [u32; 2],
+        tail: u8,
+    }
+
+    #[test]
+    fn primitive_fixed_arrays_round_trip_without_allocation() -> TestResult {
+        let view = Arrays::<3>::view([0x22, 0x11, 0x44, 0x33, 0x66, 0x55, 1, 0xfe, 3])?;
+        assert_eq!(view.words(), [0x1122, 0x3344, 0x5566]);
+        assert_eq!(view.signed(), [1, -2, 3]);
+
+        let mut output = [0u8; 9];
+        Arrays::<3>::builder(&mut output[..])
+            .words([0x1122, 0x3344, 0x5566])?
+            .signed([1, -2, 3])?
+            .finish()?;
+        assert_eq!(output, [0x22, 0x11, 0x44, 0x33, 0x66, 0x55, 1, 0xfe, 3]);
+
+        assert!(matches!(
+            Arrays::<3>::view([0; 8]),
+            Err(ArraysViewError::Signed(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn aligned_fixed_arrays_use_child_relative_geometry() -> TestResult {
+        let expected = [
+            1, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 9,
+        ];
+        let view = Aligned::view(expected)?;
+        assert_eq!(view.values(), [0x1122_3344, 0x5566_7788]);
+
+        let mut output = [0xff; 13];
+        Aligned::builder(&mut output[..])
+            .head(1)?
+            .values([0x1122_3344, 0x5566_7788])?
+            .tail(9)?
+            .finish()?;
+        assert_eq!(output, expected);
+        Ok(())
+    }
+}
 mod constant {
+
     use super::*;
 
     #[derive(WireView, WireBuilder)]

@@ -427,7 +427,7 @@ fn render_getters(
                 },
                 FieldKind::Scalar(scalar) => {
                     let width = scalar.width();
-                    let ty = super::value_type_tokens(scalar.value_type);
+                    let ty = super::value_type_tokens(&scalar.value_type);
                     let wire_ty = super::scalar_type_tokens(scalar.wire_type);
                     let decode = super::from_bytes_method(scalar.endian);
                     quote! {

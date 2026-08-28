@@ -22,3 +22,22 @@ pub fn build(seed: u64) -> u64 {
     let baz = u32::from('λ').to_be_bytes();
     u64::from(foo) | (u64::from(bar) << 16) | (u64::from(u32::from_le_bytes(baz)) << 24)
 }
+
+pub fn rust_decode(seed: u64) -> u64 {
+    let id = seed as u32;
+    let bytes = seed.to_le_bytes();
+    let count = u16::from_be_bytes([bytes[4], bytes[5]]);
+    if id == 0 || count == 0 {
+        return u64::MAX;
+    }
+    u64::from(id) ^ u64::from(count).rotate_left(17)
+}
+
+pub fn rust_build(seed: u64) -> u64 {
+    let id = seed as u32;
+    let count = (seed >> 32) as u16;
+    if id == 0 || count == 0 {
+        return u64::MAX;
+    }
+    u64::from(id) | (u64::from(count.swap_bytes()) << 32)
+}

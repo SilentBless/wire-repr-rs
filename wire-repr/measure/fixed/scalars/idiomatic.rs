@@ -19,3 +19,22 @@ pub fn constant_decode(seed: u64) -> u64 {
 pub fn constant_build(_seed: u64) -> u64 {
     u64::from(0x4433_2211u32)
 }
+
+pub fn array_decode(seed: u64) -> u64 {
+    let bytes = seed.to_le_bytes();
+    (0..4).fold(0u64, |hash, index| {
+        let value = u16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]]);
+        hash.rotate_left(11) ^ u64::from(value)
+    })
+}
+
+pub fn array_build(seed: u64) -> u64 {
+    let bytes = seed.to_le_bytes();
+    let values: [u16; 4] =
+        core::array::from_fn(|index| u16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]]));
+    let mut output = [0u8; 8];
+    for (index, value) in values.into_iter().enumerate() {
+        output[index * 2..index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    u64::from_le_bytes(output)
+}

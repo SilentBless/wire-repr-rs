@@ -39,6 +39,7 @@ pub(super) fn schema_slots(schema: &Schema) -> Vec<RecursiveSlot> {
                     }
                     FieldKind::Scalar(_)
                     | FieldKind::Bytes(_)
+                    | FieldKind::ScalarArray(_)
                     | FieldKind::RawBytes(_)
                     | FieldKind::Array(_)
                     | FieldKind::Recursive(_)
@@ -307,7 +308,7 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
         let body_view = format_ident!("{}View", marker);
         let width = controller_scalar.width();
         let wire_type = super::scalar_type_tokens(controller_scalar.wire_type);
-        let value_type = super::value_type_tokens(controller_scalar.value_type);
+        let value_type = super::value_type_tokens(&controller_scalar.value_type);
         let decode = super::from_bytes_method(controller_scalar.endian);
         let callback = super::fresh_type_ident(&schema.generics, "RecursiveCallback");
         let count_name = &controller.name;

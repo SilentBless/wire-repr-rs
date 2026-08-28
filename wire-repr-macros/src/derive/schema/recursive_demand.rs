@@ -37,7 +37,7 @@ pub(super) fn render(
     let controller_decode = super::from_bytes_method(controller.endian);
     let controller_width = controller.width();
     let scalar = demand.scalar_field;
-    let scalar_ty = super::value_type_tokens(scalar.value_type);
+    let scalar_ty = super::value_type_tokens(&scalar.value_type);
     let scalar_wire = super::scalar_type_tokens(scalar.wire_type);
     let scalar_decode = super::from_bytes_method(scalar.endian);
     let scalar_width = scalar.width();

@@ -269,3 +269,75 @@ fn exact_unknown_view_forwards_without_reconstruction() -> TestResult {
     assert_eq!(output, [1, 0x55, 0x66, 1, 2, 3, 4]);
     Ok(())
 }
+
+mod unit_variants {
+    use super::*;
+
+    #[derive(WireView, WireBuilder)]
+    struct Body {
+        value: u8,
+    }
+
+    #[derive(WireView, WireBuilder)]
+    #[wire(selector = u8)]
+    enum Command {
+        #[wire(value = 0)]
+        Ping,
+        #[wire(value = 1)]
+        Write(Body),
+    }
+
+    #[derive(WireView, WireBuilder)]
+    #[wire(selector = u8)]
+    enum AllUnit {
+        #[wire(value = 0)]
+        Off,
+        #[wire(value = 1)]
+        On,
+    }
+
+    #[derive(WireView)]
+    #[wire(selector = u8)]
+    enum AllUnitUnknown {
+        #[wire(value = 0)]
+        Off,
+        #[wire(unknown)]
+        Unknown(wire_repr::wire::Bytes),
+    }
+    #[test]
+    fn unit_variants_have_selector_only_views_and_writers() -> TestResult {
+        let ping = Command::view([0])?;
+        assert!(matches!(ping.variant(), CommandVariant::Ping));
+
+        let write = Command::view([1, 7])?;
+        assert!(matches!(
+            write.variant(),
+            CommandVariant::Write(body) if body.value() == 7
+        ));
+
+        let mut output = [0xff; 1];
+        Command::builder(&mut output[..]).ping()?.finish()?;
+        assert_eq!(output, [0]);
+
+        let mut output = [0xff; 2];
+        Command::builder(&mut output[..])
+            .write(|body| body.value(7))?
+            .finish()?;
+        assert_eq!(output, [1, 7]);
+        let on = AllUnit::view([1])?;
+        assert!(matches!(on.variant(), AllUnitVariant::On));
+        let mut output = [0xff; 1];
+        AllUnit::builder(&mut output[..]).off()?.finish()?;
+        assert_eq!(output, [0]);
+
+        let unknown = AllUnitUnknown::view([7, 1, 2])?;
+        assert!(matches!(
+            unknown.variant(),
+            AllUnitUnknownVariant::Unknown {
+                selector: 7,
+                body: [1, 2],
+            }
+        ));
+        Ok(())
+    }
+}

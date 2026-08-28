@@ -1,8 +1,9 @@
-//! error: fixed wire arrays currently require `u8` elements
+//! error: fixed wire arrays require primitive scalar elements
 
 use wire_repr::WireView;
+struct Item;
 
 #[derive(WireView)]
 struct Foo {
-    foo: [u16; 2],
+    foo: [Item; 2],
 }

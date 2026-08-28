@@ -76,10 +76,10 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
     let state_parameters = (0..known.len())
         .map(|index| format_ident!("__WireReprState{index}"))
         .collect::<Vec<_>>();
-    let error_parameters = (0..known.len())
+    let error_parameters = (0..known.iter().filter(|variant| !variant.unit).count())
         .map(|index| format_ident!("__WireReprError{index}"))
         .collect::<Vec<_>>();
-    let view_parameters = (0..known.len())
+    let view_parameters = (0..known.iter().filter(|variant| !variant.unit).count())
         .map(|index| format_ident!("__WireReprView{index}"))
         .collect::<Vec<_>>();
 
@@ -98,13 +98,16 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
         let body = &variant.body;
         quote!(<#body as #runtime::WireView>::State)
     });
-    let error_types = known.iter().map(|variant| {
+    let error_types = known.iter().filter(|variant| !variant.unit).map(|variant| {
         let body = &variant.body;
         quote!(<#body as #runtime::WireView>::Error)
     });
     let state_type = quote!(#state<#(#state_types),*>);
-    let error_type = quote!(#view_error<#(#error_types),*>);
-
+    let error_type = if error_parameters.is_empty() {
+        quote!(#view_error)
+    } else {
+        quote!(#view_error<#(#error_types),*>)
+    };
     let state_variants = known
         .iter()
         .zip(&state_parameters)
@@ -112,18 +115,22 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             let variant_name = &variant.name;
             quote!(#variant_name(#parameter),)
         });
-    let view_variants = known
-        .iter()
-        .zip(&view_parameters)
-        .map(|(variant, parameter)| {
-            let variant_name = &variant.name;
+    let mut body_view_parameters = view_parameters.iter();
+    let view_variants = known.iter().map(|variant| {
+        let variant_name = &variant.name;
+        if variant.unit {
+            quote!(#variant_name,)
+        } else {
+            let parameter = body_view_parameters.next().expect("body view parameter");
             quote!(#variant_name(#parameter),)
-        });
+        }
+    });
     let error_variants = known
         .iter()
-        .zip(&error_parameters)
         .zip(&error_variant_names)
-        .map(|((variant, parameter), error_variant)| {
+        .filter(|(variant, _)| !variant.unit)
+        .zip(&error_parameters)
+        .map(|((variant, error_variant), parameter)| {
             let message = format!("enum variant `{}` failed", variant.name.unraw());
             quote! {
                 #[error(#message)]
@@ -148,11 +155,13 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             #unknown_state
         }
     };
-    let variant_declaration_generics = if schema.unknown().is_some() {
-        quote!(<#variant_lifetime, #(#view_parameters),*>)
-    } else {
-        quote!(<#(#view_parameters),*>)
-    };
+    let variant_declaration_generics =
+        match (schema.unknown().is_some(), view_parameters.is_empty()) {
+            (true, true) => quote!(<#variant_lifetime>),
+            (true, false) => quote!(<#variant_lifetime, #(#view_parameters),*>),
+            (false, true) => TokenStream::new(),
+            (false, false) => quote!(<#(#view_parameters),*>),
+        };
     let variant_declaration = quote! {
         #[doc = "Borrowed static enum variant generated for this schema."]
         #[allow(non_camel_case_types)]
@@ -161,17 +170,47 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             #unknown_view
         }
     };
-    let recursive_error_arms = error_variant_names
+    let recursive_error_arms = known
         .iter()
-        .map(|variant| {
+        .zip(&error_variant_names)
+        .filter(|(variant, _)| !variant.unit)
+        .map(|(_, variant)| {
             quote!(Self::#variant(source) => {
                 source.flatten_recursive(fallback_offset)
             },)
         })
         .collect::<Vec<_>>();
+    let error_declaration_generics = if error_parameters.is_empty() {
+        TokenStream::new()
+    } else {
+        quote!(<#(#error_parameters: ::core::error::Error + 'static),*>)
+    };
+    let flatten_impl_generics = if error_parameters.is_empty() {
+        TokenStream::new()
+    } else {
+        quote!(<#(#error_parameters),*>)
+    };
+    let flatten_error_type = if error_parameters.is_empty() {
+        quote!(#view_error)
+    } else {
+        quote!(#view_error<#(#error_parameters),*>)
+    };
+    let flatten_where = if error_parameters.is_empty() {
+        TokenStream::new()
+    } else {
+        quote! {
+            where
+                #(
+                    #error_parameters:
+                        ::core::error::Error
+                        + #runtime::__private::FlattenRecursiveError
+                        + 'static,
+                )*
+        }
+    };
     let error_declaration = quote! {
         #[derive(Debug, #runtime::__private::ThisError)]
-        #vis enum #view_error<#(#error_parameters: ::core::error::Error + 'static),*> {
+        #vis enum #view_error #error_declaration_generics {
             #[error(transparent)]
             NeedMore(#[from] #runtime::NeedMore),
             #[error(transparent)]
@@ -187,15 +226,9 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             DuplicateSelector,
         }
 
-        impl<#(#error_parameters),*> #runtime::__private::FlattenRecursiveError
-            for #view_error<#(#error_parameters),*>
-        where
-            #(
-                #error_parameters:
-                    ::core::error::Error
-                    + #runtime::__private::FlattenRecursiveError
-                    + 'static,
-            )*
+        impl #flatten_impl_generics #runtime::__private::FlattenRecursiveError
+            for #flatten_error_type
+            #flatten_where
         {
             fn flatten_recursive(
                 self,
@@ -230,6 +263,7 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
     let wireview_flatten_arms = known
         .iter()
         .zip(&error_variant_names)
+        .filter(|(variant, _)| !variant.unit)
         .map(|(variant, error_variant)| {
             let body = &variant.body;
             quote!(#view_error::#error_variant(source) => {
@@ -248,33 +282,41 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
         .map(|(variant, error_variant)| {
             let variant_name = &variant.name;
             let value = variant.value.as_ref().expect("known variant has value");
-            let body = &variant.body;
-            quote! {
-                value if value == { let selector: #selector_ty = #value; selector } => {
-                    let body_offset = #frame_offset
-                        .checked_add(#selector_width)
-                        .ok_or(#runtime::LayoutError {
-                            field: stringify!(#variant_name),
-                        })?;
-                    let frame = <#body as #runtime::WireView>::frame(
-                        &input[#selector_width..],
-                        body_offset,
-                    )
-                    .map_err(#view_error::#error_variant)?;
-                    let (state, body_consumed) = frame.into_parts();
-                    if body_consumed > input.len() - #selector_width {
-                        return Err(#view_error::InvalidFrame(#runtime::InvalidFrameExtent {
-                            offset: body_offset,
-                            consumed: body_consumed,
-                            available: input.len() - #selector_width,
-                        }));
+            if variant.unit {
+                quote! {
+                    value if value == { let selector: #selector_ty = #value; selector } => {
+                        #runtime::Frame::new(#state::#variant_name(()), #selector_width)
                     }
-                    let consumed = #selector_width
-                        .checked_add(body_consumed)
-                        .ok_or(#runtime::LayoutError {
-                            field: stringify!(#variant_name),
-                        })?;
-                    #runtime::Frame::new(#state::#variant_name(state), consumed)
+                }
+            } else {
+                let body = &variant.body;
+                quote! {
+                    value if value == { let selector: #selector_ty = #value; selector } => {
+                        let body_offset = #frame_offset
+                            .checked_add(#selector_width)
+                            .ok_or(#runtime::LayoutError {
+                                field: stringify!(#variant_name),
+                            })?;
+                        let frame = <#body as #runtime::WireView>::frame(
+                            &input[#selector_width..],
+                            body_offset,
+                        )
+                        .map_err(#view_error::#error_variant)?;
+                        let (state, body_consumed) = frame.into_parts();
+                        if body_consumed > input.len() - #selector_width {
+                            return Err(#view_error::InvalidFrame(#runtime::InvalidFrameExtent {
+                                offset: body_offset,
+                                consumed: body_consumed,
+                                available: input.len() - #selector_width,
+                            }));
+                        }
+                        let consumed = #selector_width
+                            .checked_add(body_consumed)
+                            .ok_or(#runtime::LayoutError {
+                                field: stringify!(#variant_name),
+                            })?;
+                        #runtime::Frame::new(#state::#variant_name(state), consumed)
+                    }
                 }
             }
         });
@@ -306,17 +348,21 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
         .iter()
         .map(|variant| {
             let variant_name = &variant.name;
-            let body = &variant.body;
-            quote! {
-                #state::#variant_name(state) => {
-                    // SAFETY: enum framing produced this state for the exact bytes after the selector.
-                    let body = unsafe {
-                        <#body as #runtime::WireView>::from_validated_parts(
-                            &self.as_bytes()[#selector_width..],
-                            state,
-                        )
-                    };
-                    #variant_view::#variant_name(body)
+            if variant.unit {
+                quote!(#state::#variant_name(_) => #variant_view::#variant_name,)
+            } else {
+                let body = &variant.body;
+                quote! {
+                    #state::#variant_name(state) => {
+                        // SAFETY: enum framing produced this state for the exact bytes after the selector.
+                        let body = unsafe {
+                            <#body as #runtime::WireView>::from_validated_parts(
+                                &self.as_bytes()[#selector_width..],
+                                state,
+                            )
+                        };
+                        #variant_view::#variant_name(body)
+                    }
                 }
             }
         })
@@ -329,14 +375,15 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             },
         }
     });
-    let method_body_views = known.iter().map(|variant| {
+    let method_body_views = known.iter().filter(|variant| !variant.unit).map(|variant| {
         let body = &variant.body;
         quote!(<#body as #runtime::WireView>::View<#method_lifetime>)
     });
-    let method_variant_type = if schema.unknown().is_some() {
-        quote!(#variant_view<#method_lifetime, #(#method_body_views),*>)
-    } else {
-        quote!(#variant_view<#(#method_body_views),*>)
+    let method_variant_type = match (schema.unknown().is_some(), view_parameters.is_empty()) {
+        (true, true) => quote!(#variant_view<#method_lifetime>),
+        (true, false) => quote!(#variant_view<#method_lifetime, #(#method_body_views),*>),
+        (false, true) => quote!(#variant_view),
+        (false, false) => quote!(#variant_view<#(#method_body_views),*>),
     };
     let render_view_methods = |state_ref: TokenStream| {
         quote! {
@@ -363,14 +410,15 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
     let retained_view_methods = render_view_methods(quote!(&self.state));
     let projected_view_methods = render_view_methods(quote!(self.state));
 
-    let trait_body_views = known.iter().map(|variant| {
+    let trait_body_views = known.iter().filter(|variant| !variant.unit).map(|variant| {
         let body = &variant.body;
         quote!(<#body as #runtime::WireView>::View<#method_lifetime>)
     });
-    let trait_variant_type = if schema.unknown().is_some() {
-        quote!(#variant_view<#method_lifetime, #(#trait_body_views),*>)
-    } else {
-        quote!(#variant_view<#(#trait_body_views),*>)
+    let trait_variant_type = match (schema.unknown().is_some(), view_parameters.is_empty()) {
+        (true, true) => quote!(#variant_view<#method_lifetime>),
+        (true, false) => quote!(#variant_view<#method_lifetime, #(#trait_body_views),*>),
+        (false, true) => quote!(#variant_view),
+        (false, false) => quote!(#variant_view<#(#trait_body_views),*>),
     };
     let schema_arguments = generic_arguments(&bounded);
     let field_prefix = fresh_type_ident(&bounded, "FieldPrefix");
@@ -957,19 +1005,31 @@ pub(super) fn render_builder(
     let detached_methods = known.iter().zip(&detached_types).zip(&method_names).map(
         |((variant, detached), method)| {
             let body = &variant.body;
-            quote! {
-                #[inline(always)]
-                #vis fn #method<#build, #child_builder>(
-                    self,
-                    build: #build,
-                ) -> #detached<#child_builder, #marker>
-                where
-                    #body: #runtime::WireBuilder,
-                    #build: FnOnce(<#body as #runtime::WireBuilder>::Builder) -> #child_builder,
-                {
-                    #detached {
-                        child: build(<#body as #runtime::WireBuilder>::builder()),
-                        marker: ::core::marker::PhantomData,
+            if variant.unit {
+                quote! {
+                    #[inline(always)]
+                    #vis fn #method(self) -> #detached<(), #marker> {
+                        #detached {
+                            child: (),
+                            marker: ::core::marker::PhantomData,
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    #[inline(always)]
+                    #vis fn #method<#build, #child_builder>(
+                        self,
+                        build: #build,
+                    ) -> #detached<#child_builder, #marker>
+                    where
+                        #body: #runtime::WireBuilder,
+                        #build: FnOnce(<#body as #runtime::WireBuilder>::Builder) -> #child_builder,
+                    {
+                        #detached {
+                            child: build(<#body as #runtime::WireBuilder>::builder()),
+                            marker: ::core::marker::PhantomData,
+                        }
                     }
                 }
             }
@@ -1023,51 +1083,71 @@ pub(super) fn render_builder(
         .predicates
         .push(parse_quote!(#output: #runtime::Output));
     let (writer_impl, writer_types, writer_where) = writer_generics.split_for_impl();
-    let progressive_methods = known
-        .iter()
-        .zip(&write_errors)
-        .zip(&method_names)
-        .map(|((variant, error), method)| {
-        let body = &variant.body;
-        let value = variant.value.as_ref().expect("known variant has value");
-        quote! {
-            #[inline]
-            #vis fn #method<#build, #child_builder>(
-                mut self,
-                build: #build,
-            ) -> Result<
-                #done #writer_types,
-                #runtime::WriteError<
-                    #error<<#body as #runtime::WireWrite<#child_builder>>::Error>,
-                    <#output as #runtime::Output>::GrowError,
-                >,
-            >
-            where
-                #body: #runtime::WireBuilder + #runtime::WireWrite<#child_builder>,
-                #build: FnOnce(<#body as #runtime::WireBuilder>::Builder) -> #child_builder,
-            {
-                let selector: #selector_ty = #value;
-                self.writer.write(&selector.#encode())?;
-                let body_start = self.writer.position();
-                let child_value = build(<#body as #runtime::WireBuilder>::builder());
-                let mut child = self.writer.child_at(body_start)?;
-                match <#body as #runtime::WireWrite<#child_builder>>::write(child_value, &mut child) {
-                    Ok(()) => {}
-                    Err(#runtime::WriteError::Schema(error)) => {
-                        return Err(#runtime::WriteError::Schema(#error::Body(error)));
-                    }
-                    Err(#runtime::WriteError::Output(error)) => {
-                        return Err(#runtime::WriteError::Output(error));
+    let progressive_methods = known.iter().zip(&write_errors).zip(&method_names).map(
+        |((variant, error), method)| {
+            let body = &variant.body;
+            let value = variant.value.as_ref().expect("known variant has value");
+            if variant.unit {
+                quote! {
+                    #[inline]
+                    #vis fn #method(
+                        mut self,
+                    ) -> Result<
+                        #done #writer_types,
+                        #runtime::OutputError<<#output as #runtime::Output>::GrowError>,
+                    > {
+                        let selector: #selector_ty = #value;
+                        self.writer.write(&selector.#encode())?;
+                        Ok(#done {
+                            writer: self.writer,
+                            marker: ::core::marker::PhantomData,
+                        })
                     }
                 }
-                child.finish()?;
-                Ok(#done {
-                    writer: self.writer,
-                    marker: ::core::marker::PhantomData,
-                })
+            } else {
+                quote! {
+                    #[inline]
+                    #vis fn #method<#build, #child_builder>(
+                        mut self,
+                        build: #build,
+                    ) -> Result<
+                        #done #writer_types,
+                        #runtime::WriteError<
+                            #error<<#body as #runtime::WireWrite<#child_builder>>::Error>,
+                            <#output as #runtime::Output>::GrowError,
+                        >,
+                    >
+                    where
+                        #body: #runtime::WireBuilder + #runtime::WireWrite<#child_builder>,
+                        #build: FnOnce(<#body as #runtime::WireBuilder>::Builder) -> #child_builder,
+                    {
+                        let selector: #selector_ty = #value;
+                        self.writer.write(&selector.#encode())?;
+                        let body_start = self.writer.position();
+                        let child_value = build(<#body as #runtime::WireBuilder>::builder());
+                        let mut child = self.writer.child_at(body_start)?;
+                        match <#body as #runtime::WireWrite<#child_builder>>::write(
+                            child_value,
+                            &mut child,
+                        ) {
+                            Ok(()) => {}
+                            Err(#runtime::WriteError::Schema(error)) => {
+                                return Err(#runtime::WriteError::Schema(#error::Body(error)));
+                            }
+                            Err(#runtime::WriteError::Output(error)) => {
+                                return Err(#runtime::WriteError::Output(error));
+                            }
+                        }
+                        child.finish()?;
+                        Ok(#done {
+                            writer: self.writer,
+                            marker: ::core::marker::PhantomData,
+                        })
+                    }
+                }
             }
-        }
-    });
+        },
+    );
 
     let unknown_error = format_ident!("{}UnknownWriteError", name.unraw());
     let unknown_builder = format_ident!("{}UnknownBuilder", name.unraw());
@@ -1261,6 +1341,7 @@ struct Variant {
     body: Type,
     value: Option<Expr>,
     unknown: bool,
+    unit: bool,
 }
 
 impl EnumSchema {
@@ -1294,19 +1375,19 @@ impl EnumSchema {
                 }
                 unknown_seen = true;
             }
-            let Fields::Unnamed(fields) = variant.fields else {
-                return Err(syn::Error::new_spanned(
-                    &variant.ident,
-                    "static enum variants require exactly one unnamed body field",
-                ));
+            let (body, unit) = match variant.fields {
+                Fields::Unit if !unknown => (parse_quote!(()), true),
+                Fields::Unnamed(fields) if fields.unnamed.len() == 1 => (
+                    fields.unnamed.into_iter().next().expect("one field").ty,
+                    false,
+                ),
+                fields => {
+                    return Err(syn::Error::new_spanned(
+                        fields,
+                        "known enum variants require unit syntax or one unnamed body field",
+                    ));
+                }
             };
-            if fields.unnamed.len() != 1 {
-                return Err(syn::Error::new_spanned(
-                    &variant.ident,
-                    "static enum variants require exactly one unnamed body field",
-                ));
-            }
-            let body = fields.unnamed.into_iter().next().expect("one field").ty;
             if unknown {
                 if value.is_some() {
                     return Err(syn::Error::new_spanned(
@@ -1339,6 +1420,7 @@ impl EnumSchema {
                     body,
                     value: Some(value),
                     unknown,
+                    unit,
                 });
                 continue;
             }
@@ -1347,6 +1429,7 @@ impl EnumSchema {
                 body,
                 value,
                 unknown,
+                unit,
             });
         }
         if !variants.iter().any(|variant| !variant.unknown) {

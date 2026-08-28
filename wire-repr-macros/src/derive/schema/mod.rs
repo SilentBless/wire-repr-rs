@@ -205,6 +205,7 @@ fn view_offset(offset: &model::LayoutOffset, runtime: &TokenStream) -> TokenStre
     let parts = offset.terms.iter().map(|term| match term {
         model::SizeTerm::Fixed(width) => quote!(Some(#width)),
         model::SizeTerm::Expr(width) => quote!(Some(#width)),
+        model::SizeTerm::Scaled(len, width) => quote!((#len as usize).checked_mul(#width)),
         model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireView>::FIXED_SIZE),
         model::SizeTerm::Dynamic => quote!(None),
     });
@@ -215,6 +216,7 @@ fn builder_offset(offset: &model::LayoutOffset, runtime: &TokenStream) -> TokenS
         model::SizeTerm::Fixed(width) => quote!(Some(#width)),
         model::SizeTerm::Expr(width) => quote!(Some(#width)),
         model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE),
+        model::SizeTerm::Scaled(len, width) => quote!((#len as usize).checked_mul(#width)),
         model::SizeTerm::Dynamic => quote!(None),
     });
     quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
@@ -225,6 +227,7 @@ fn view_optional_size(schema: &model::Schema, runtime: &TokenStream) -> TokenStr
         model::SizeTerm::Fixed(width) => quote!(Some(#width)),
         model::SizeTerm::Expr(width) => quote!(Some(#width)),
         model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireView>::FIXED_SIZE),
+        model::SizeTerm::Scaled(len, width) => quote!((#len as usize).checked_mul(#width)),
         model::SizeTerm::Dynamic => quote!(None),
     });
     quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
@@ -235,6 +238,7 @@ fn builder_optional_size(schema: &model::Schema, runtime: &TokenStream) -> Token
         model::SizeTerm::Fixed(width) => quote!(Some(#width)),
         model::SizeTerm::Expr(width) => quote!(Some(#width)),
         model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE),
+        model::SizeTerm::Scaled(len, width) => quote!((#len as usize).checked_mul(#width)),
         model::SizeTerm::Dynamic => quote!(None),
     });
     quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
@@ -257,13 +261,14 @@ fn scalar_type_tokens(ty: model::ScalarType) -> TokenStream {
     }
 }
 
-fn value_type_tokens(ty: model::ValueType) -> TokenStream {
+fn value_type_tokens(ty: &model::ValueType) -> TokenStream {
     match ty {
-        model::ValueType::Scalar(ty) => scalar_type_tokens(ty),
+        model::ValueType::Scalar(ty) => scalar_type_tokens(*ty),
         model::ValueType::Usize => quote!(usize),
         model::ValueType::Isize => quote!(isize),
         model::ValueType::Bool => quote!(bool),
         model::ValueType::Char => quote!(char),
+        model::ValueType::Custom(ty) => quote!(#ty),
     }
 }
 

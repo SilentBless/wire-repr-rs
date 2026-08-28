@@ -32,6 +32,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         builder_generics.params.push(GenericParam::Type(parameter));
     }
     let builder_declaration_generics = builder_generics.clone();
+    let builder_declaration_where = &builder_declaration_generics.where_clause;
     let initial_states = slots
         .iter()
         .map(|_| quote!(#runtime::__private::Unset))
@@ -92,7 +93,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         };
 
         #[doc(hidden)]
-        #vis struct #builder #builder_declaration_generics {
+        #vis struct #builder #builder_declaration_generics #builder_declaration_where {
             #(#builder_fields)*
             #marker: ::core::marker::PhantomData<fn() -> #self_type>,
         }
@@ -148,8 +149,12 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
         used.params
             .push(GenericParam::Type(TypeParam::from(state.clone())));
         let kind = match &field.kind {
-            FieldKind::Scalar(scalar) => SlotKind::Value(value_type_tokens(scalar.value_type)),
+            FieldKind::Scalar(scalar) => SlotKind::Value(value_type_tokens(&scalar.value_type)),
             FieldKind::Bytes(_) => {
+                let ty = &field.ty;
+                SlotKind::Value(quote!(#ty))
+            }
+            FieldKind::ScalarArray(_) => {
                 let ty = &field.ty;
                 SlotKind::Value(quote!(#ty))
             }
@@ -234,7 +239,7 @@ fn render_choice_groups(schema: &Schema, runtime: &TokenStream) -> TokenStream {
                 let FieldKind::Scalar(scalar) = &field.kind else {
                     unreachable!("validated conditional field is scalar")
                 };
-                let ty = value_type_tokens(scalar.value_type);
+                let ty = value_type_tokens(&scalar.value_type);
                 quote!(#runtime::__private::Set<#ty>)
             })
             .collect::<Vec<_>>();
@@ -250,7 +255,7 @@ fn render_choice_groups(schema: &Schema, runtime: &TokenStream) -> TokenStream {
             let FieldKind::Scalar(scalar) = &field.kind else {
                 unreachable!("validated conditional field is scalar")
             };
-            let ty = value_type_tokens(scalar.value_type);
+            let ty = value_type_tokens(&scalar.value_type);
             quote!(#field_name: Option<#ty>,)
         });
         let initial_values = dependents.iter().map(|field| {
@@ -270,7 +275,7 @@ fn render_choice_groups(schema: &Schema, runtime: &TokenStream) -> TokenStream {
             let FieldKind::Scalar(scalar) = &target.kind else {
                 unreachable!("validated conditional field is scalar")
             };
-            let ty = value_type_tokens(scalar.value_type);
+            let ty = value_type_tokens(&scalar.value_type);
             let impl_parameters = parameters
                 .iter()
                 .enumerate()
@@ -626,6 +631,7 @@ fn render_complete(
             }
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
+            | FieldKind::ScalarArray(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Recursive(_)
@@ -685,7 +691,7 @@ fn render_complete(
             };
             match &field.kind {
                 FieldKind::Scalar(scalar) => {
-                    let value_ty = value_type_tokens(scalar.value_type);
+                    let value_ty = value_type_tokens(&scalar.value_type);
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
                     let encode = to_bytes_method(scalar.endian);
                     let source = if let Some(constant) = &scalar.constant {
@@ -803,6 +809,20 @@ fn render_complete(
                         let #value: #ty = #source;
                         #geometry
                         writer.write(&#value)?;
+                    }
+                }
+                FieldKind::ScalarArray(array) => {
+                    let ty = &field.ty;
+                    let field = &field.name;
+                    let element = scalar_type_tokens(array.element);
+                    let encode = to_bytes_method(array.endian);
+                    quote! {
+                        let value: #ty = #build_value.#field.0;
+                        #geometry
+                        for element in value {
+                            let element: #element = element;
+                            writer.write(&element.#encode())?;
+                        }
                     }
                 }
                 FieldKind::RawBytes(raw) => {
@@ -1180,7 +1200,7 @@ fn render_complete(
             let relative = super::builder_offset(&field.offset, runtime);
             let view = private_ident(schema, &format!("{}_computed_view", name.unraw()));
             let semantic = private_ident(schema, &format!("{}_computed_value", name.unraw()));
-            let value_ty = value_type_tokens(scalar.value_type);
+            let value_ty = value_type_tokens(&scalar.value_type);
             let wire_ty = scalar_type_tokens(scalar.wire_type);
             let encode = to_bytes_method(scalar.endian);
             let call = super::computed::render_call(computed, &view, name, runtime)
@@ -1385,9 +1405,9 @@ pub(super) fn convert_to_wire(
     value: &syn::Ident,
     wire_type: &TokenStream,
 ) -> TokenStream {
-    match scalar.value_type {
+    match &scalar.value_type {
         ValueType::Scalar(_) => quote!(Some(#value)),
-        ValueType::Usize | ValueType::Isize => {
+        ValueType::Usize | ValueType::Isize | ValueType::Custom(_) => {
             quote!(<#wire_type>::try_from(#value).ok())
         }
         ValueType::Bool => quote!(Some(if #value {

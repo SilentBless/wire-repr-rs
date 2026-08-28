@@ -39,6 +39,10 @@ impl<S> Frame<S> {
 /// return geometry that remains memory-safe for any immutable span of that exact consumed length.
 /// State may retain validated logical values, but it must not make unchecked semantic assumptions
 /// about later input bytes.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not provide the WireView capability",
+    label = "this field requires a derived or manual WireView implementation"
+)]
 #[allow(unsafe_code)]
 pub unsafe trait WireView: Sized {
     /// Typed structural failure.
@@ -112,7 +116,40 @@ pub unsafe trait WireView: Sized {
     }
 }
 
+// SAFETY: unit has one empty representation and retains no input-dependent state.
+#[allow(unsafe_code)]
+unsafe impl WireView for () {
+    type Error = core::convert::Infallible;
+    type State = ();
+    type View<'view> = &'view [u8];
+
+    const FIXED_SIZE: Option<usize> = Some(0);
+    const LEADING_EXTENT: bool = true;
+
+    fn frame(_input: &[u8], _absolute_offset: usize) -> Result<Frame<Self::State>, Self::Error> {
+        Ok(Frame::new((), 0))
+    }
+
+    unsafe fn from_validated_parts<'view>(
+        input: &'view [u8],
+        _state: &'view Self::State,
+    ) -> Self::View<'view> {
+        &input[..0]
+    }
+
+    fn flatten_recursive_error(
+        error: Self::Error,
+        _fallback_offset: usize,
+    ) -> crate::recursive::RecursiveError {
+        match error {}
+    }
+}
+
 /// Associates a manual or derived schema with its initial builder state.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not provide the WireBuilder capability",
+    label = "this field requires a derived or manual WireBuilder implementation"
+)]
 pub trait WireBuilder: Sized {
     /// Exact width when every representation has one compile-time width.
     const FIXED_SIZE: Option<usize> = None;
@@ -125,6 +162,10 @@ pub trait WireBuilder: Sized {
 }
 
 /// Writes one detached manual or derived builder value into a progressive parent writer.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot write builder value `{V}`",
+    label = "this builder value is not accepted by the schema"
+)]
 pub trait WireWrite<V>: Sized {
     /// Schema-specific write failure.
     type Error: core::error::Error + 'static;
@@ -134,6 +175,30 @@ pub trait WireWrite<V>: Sized {
         value: V,
         writer: &mut crate::ChildWriter<'_, O>,
     ) -> Result<(), crate::WriteError<Self::Error, O::GrowError>>;
+}
+
+impl WireBuilder for () {
+    const FIXED_SIZE: Option<usize> = Some(0);
+    type Builder = ();
+
+    fn builder() -> Self::Builder {}
+}
+
+impl WireWrite<()> for () {
+    type Error = core::convert::Infallible;
+
+    fn write<O: crate::Output>(
+        (): (),
+        _writer: &mut crate::ChildWriter<'_, O>,
+    ) -> Result<(), crate::WriteError<Self::Error, O::GrowError>> {
+        Ok(())
+    }
+}
+
+impl ExactWire<()> for () {
+    fn as_wire_bytes(&self) -> &[u8] {
+        &[]
+    }
 }
 
 #[doc(hidden)]
@@ -315,6 +380,10 @@ pub enum ArrayError<E> {
 }
 
 /// Exact represented bytes known to belong to schema `T`.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not an exact view of `{T}`",
+    label = "exact forwarding requires a validated view of the same schema"
+)]
 pub trait ExactWire<T> {
     /// Returns the complete represented byte span.
     fn as_wire_bytes(&self) -> &[u8];
@@ -441,6 +510,24 @@ impl<'input, T: WireView> ArrayView<'input, T> {
     }
 }
 
+impl<'input, T: WireView> IntoIterator for ArrayView<'input, T> {
+    type Item = Result<ArrayItem<'input, T>, ArrayError<T::Error>>;
+    type IntoIter = ArrayIter<'input, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'input, T: WireView> IntoIterator for &ArrayView<'input, T> {
+    type Item = Result<ArrayItem<'input, T>, ArrayError<T::Error>>;
+    type IntoIter = ArrayIter<'input, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// Forward iterator produced by [`ArrayView::iter`].
 pub struct ArrayIter<'input, T: WireView> {
     input: &'input [u8],
@@ -521,6 +608,7 @@ impl<'input, T: WireView> Iterator for ArrayIter<'input, T> {
         }))
     }
 }
+impl<T: WireView> core::iter::FusedIterator for ArrayIter<'_, T> {}
 
 /// Computes the exact extent needed to reach a field after a counted array.
 #[doc(hidden)]

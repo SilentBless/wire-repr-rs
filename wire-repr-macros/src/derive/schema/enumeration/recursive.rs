@@ -124,7 +124,11 @@ pub(super) fn render_view(
     let variant_declaration = {
         let variants = known.iter().zip(&body_view_types).map(|(variant, ty)| {
             let variant_name = &variant.name;
-            quote!(#variant_name(#ty),)
+            if variant.unit {
+                quote!(#variant_name,)
+            } else {
+                quote!(#variant_name(#ty),)
+            }
         });
         quote! {
             #[doc = "Borrowed recursive enum variant generated for this schema."]
@@ -141,7 +145,7 @@ pub(super) fn render_view(
         .iter()
         .zip(&recursive_slots)
         .zip(&error_variant_names)
-        .filter(|((_, slot), _)| slot.is_none())
+        .filter(|((variant, slot), _)| slot.is_none() && !variant.unit)
         .map(|((variant, _), error_variant)| {
             let body = &variant.body;
             let message = format!("enum variant `{}` failed", variant.name.unraw());
@@ -183,6 +187,13 @@ pub(super) fn render_view(
             let variant_name = &variant.name;
             let value = variant.value.as_ref().expect("known selector");
             let body = &variant.body;
+            if variant.unit {
+                return quote! {
+                    value if value == { let selector: #selector_ty = #value; selector } => {
+                        #runtime::Frame::new(#state::#variant_name(()), #selector_width)
+                    }
+                };
+            }
             let frame_body = if let Some(slot) = slot {
                 quote! {
                     let frame = <#body as #runtime::__private::RecursiveBody<
@@ -267,6 +278,9 @@ pub(super) fn render_view(
                     }
                 }
             } else {
+                if variant.unit {
+                    return quote!(#state::#variant_name(_) => #variant_view::#variant_name,);
+                }
                 quote! {
                     #state::#variant_name(state) => {
                         // SAFETY: root framing produced this state for the exact body suffix.
@@ -419,7 +433,7 @@ pub(super) fn render_view(
         .iter()
         .zip(&recursive_slots)
         .zip(&error_variant_names)
-        .filter(|((_, slot), _)| slot.is_none())
+        .filter(|((variant, slot), _)| slot.is_none() && !variant.unit)
         .map(|((variant, _), error_variant)| {
             let body = &variant.body;
             quote!(#view_error::#error_variant(source) => {

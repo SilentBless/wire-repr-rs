@@ -51,6 +51,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
         writer_generics.params.push(GenericParam::Type(parameter));
     }
     let writer_declaration_generics = writer_generics.clone();
+    let writer_declaration_where = &writer_declaration_generics.where_clause;
     let initial_states = slots
         .iter()
         .map(|_| quote!(#runtime::__private::Unset))
@@ -79,7 +80,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
 
     quote! {
         #[doc(hidden)]
-        #vis struct #writer_name #writer_declaration_generics {
+        #vis struct #writer_name #writer_declaration_generics #writer_declaration_where {
             writer: #runtime::Writer<#output>,
             #(#bit_controller_fields)*
             #marker: ::core::marker::PhantomData<
@@ -290,6 +291,46 @@ fn render_setters(
                             #pending_constants
                             #offset_binding
                             self.writer.write_at(#offset_local, &#value)?;
+                            Ok(#assignments)
+                        }
+                    }
+                });
+            }
+            (SlotKind::Value(ty), FieldKind::ScalarArray(array)) => {
+                let schema_error =
+                    writer_error_type(schema, &error_name, has_conversions, None, runtime);
+                let element_ty = scalar_type_tokens(array.element);
+                let width = array.element.width();
+                let encode = to_bytes_method(array.endian);
+                let (impl_params, _, impl_where) = impl_generics.split_for_impl();
+                rendered.push(quote! {
+                    impl #impl_params #current_writer #impl_where {
+                        #[doc = concat!("Writes fixed scalar-array field `", stringify!(#field), "`.")]
+                        #[inline]
+                        #vis fn #field(
+                            mut self,
+                            #value: #ty,
+                        ) -> Result<
+                            #returned_writer,
+                            #runtime::WriteError<
+                                #schema_error,
+                                <#output as #runtime::Output>::GrowError,
+                            >,
+                        > {
+                            #pending_constants
+                            #offset_binding
+                            for (index, element) in #value.into_iter().enumerate() {
+                                let element_offset = index
+                                    .checked_mul(#width)
+                                    .and_then(|delta| #offset_local.checked_add(delta))
+                                    .ok_or_else(|| #runtime::WriteError::Schema(
+                                        #error_name::Layout(#runtime::LayoutError {
+                                            field: stringify!(#field),
+                                        }),
+                                    ))?;
+                                let element: #element_ty = element;
+                                self.writer.write_at(element_offset, &element.#encode())?;
+                            }
                             Ok(#assignments)
                         }
                     }
@@ -772,7 +813,7 @@ fn render_finish(
             };
             Some(match &field.kind {
                 FieldKind::Scalar(scalar) => {
-                    let value_ty = value_type_tokens(scalar.value_type);
+                    let value_ty = value_type_tokens(&scalar.value_type);
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
                     let encode = to_bytes_method(scalar.endian);
                     if let Some(variant) = conversion_variant {
@@ -812,6 +853,7 @@ fn render_finish(
                     }
                 }
                 FieldKind::RawBytes(_)
+                | FieldKind::ScalarArray(_)
                 | FieldKind::Array(_)
                 | FieldKind::Recursive(_)
                 | FieldKind::Flag(_)
@@ -854,7 +896,7 @@ fn render_finish(
             let offset = builder_offset(&field.offset, runtime);
             let view = private_ident(schema, &format!("{}_computed_view", name.unraw()));
             let semantic = private_ident(schema, &format!("{}_computed_value", name.unraw()));
-            let value_ty = value_type_tokens(scalar.value_type);
+            let value_ty = value_type_tokens(&scalar.value_type);
             let wire_ty = scalar_type_tokens(scalar.wire_type);
             let encode = to_bytes_method(scalar.endian);
             let call = super::computed::render_call(computed, &view, name, runtime)
@@ -955,6 +997,7 @@ fn writer_error_names(schema: &Schema) -> (Vec<Option<syn::Ident>>, Vec<Option<s
             ),
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
+            | FieldKind::ScalarArray(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Recursive(_)
@@ -1068,7 +1111,7 @@ fn render_pending_constants(
             let geometry = render_writer_start(schema, field, &offset, error, runtime);
             Some(match &field.kind {
                 FieldKind::Scalar(scalar) => {
-                    let value_ty = value_type_tokens(scalar.value_type);
+                    let value_ty = value_type_tokens(&scalar.value_type);
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
                     let encode = to_bytes_method(scalar.endian);
                     if let Some(variant) = &conversion_names[index] {
@@ -1109,6 +1152,7 @@ fn render_pending_constants(
                     }
                 }
                 FieldKind::RawBytes(_)
+                | FieldKind::ScalarArray(_)
                 | FieldKind::Array(_)
                 | FieldKind::Recursive(_)
                 | FieldKind::Flag(_)

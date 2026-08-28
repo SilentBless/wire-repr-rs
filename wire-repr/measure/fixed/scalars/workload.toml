@@ -129,3 +129,47 @@ name = "best safe attention"
 level = "attention"
 assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.05"
 message = "generated constant build has safe optimization headroom"
+
+[[cases]]
+name = "array_decode"
+entry = "array_decode"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_allocation_symbols == 0 && generated_artifact_transitive_vtable_references == 0"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.25"
+message = "fixed scalar-array decode has safe optimization headroom"
+
+[[cases]]
+name = "array_build"
+entry = "array_build"
+seeds = [0, 1, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_allocation_symbols == 0 && generated_artifact_transitive_vtable_references == 0"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.25"
+message = "fixed scalar-array writer has safe optimization headroom"

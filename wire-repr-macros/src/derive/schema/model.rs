@@ -22,6 +22,7 @@ pub(super) struct Field {
 pub(super) enum FieldKind {
     Scalar(Scalar),
     Bytes(FixedBytes),
+    ScalarArray(FixedScalarArray),
     RawBytes(RawBytes),
     Array(ArrayField),
     Recursive(RecursiveField),
@@ -75,6 +76,12 @@ pub(super) struct BitProjection {
     pub(super) end: u32,
 }
 
+pub(super) struct FixedScalarArray {
+    pub(super) element: ScalarType,
+    pub(super) len: Expr,
+    pub(super) endian: Endian,
+}
+
 pub(super) struct NestedField {
     pub(super) ty: Type,
     pub(super) terminal: bool,
@@ -92,6 +99,7 @@ pub(super) enum SizeTerm {
     Expr(Expr),
     Nested(Type),
     Dynamic,
+    Scaled(Expr, usize),
 }
 
 pub(super) struct Scalar {
@@ -123,13 +131,14 @@ pub(super) enum ScalarType {
     F64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum ValueType {
     Scalar(ScalarType),
     Usize,
     Isize,
     Bool,
     Char,
+    Custom(Box<Type>),
 }
 
 #[derive(Clone, Copy)]
@@ -194,7 +203,7 @@ impl ValueType {
         }
     }
 
-    pub(super) const fn is_converted(self) -> bool {
+    pub(super) const fn is_converted(&self) -> bool {
         !matches!(self, Self::Scalar(_))
     }
 }
@@ -210,7 +219,8 @@ impl FieldKind {
         match self {
             Self::Scalar(scalar) => scalar.constant.as_ref(),
             Self::Bytes(bytes) => bytes.constant.as_ref(),
-            Self::RawBytes(_)
+            Self::ScalarArray(_)
+            | Self::RawBytes(_)
             | Self::Array(_)
             | Self::Recursive(_)
             | Self::Flag(_)
@@ -223,6 +233,7 @@ impl FieldKind {
         match self {
             Self::Scalar(scalar) => SizeTerm::Fixed(scalar.width()),
             Self::Bytes(bytes) => SizeTerm::Expr(bytes.len.clone()),
+            Self::ScalarArray(array) => SizeTerm::Scaled(array.len.clone(), array.element.width()),
             Self::RawBytes(_) | Self::Array(_) | Self::Recursive(_) => SizeTerm::Dynamic,
             Self::Flag(_) | Self::BitProjection(_) => SizeTerm::Fixed(0),
             Self::Nested(nested) => SizeTerm::Nested(nested.ty.clone()),
@@ -233,6 +244,7 @@ impl FieldKind {
         match self {
             Self::Scalar(scalar) => scalar.computed.as_ref(),
             Self::Bytes(_)
+            | Self::ScalarArray(_)
             | Self::RawBytes(_)
             | Self::Array(_)
             | Self::Recursive(_)
@@ -309,7 +321,10 @@ impl Schema {
             Self::validate_field_layout(&name, &layout, &preceding)?;
             let ty = field.ty;
             let primitive = primitive_name(&ty);
-            let value_type = primitive.as_deref().and_then(ValueType::from_name);
+            let value_type = primitive
+                .as_deref()
+                .and_then(ValueType::from_name)
+                .or_else(|| representation.map(|_| ValueType::Custom(Box::new(ty.clone()))));
             let bit_range = match (bit, bits) {
                 (Some(bit), None) => Some((bit, bit)),
                 (None, Some(bits)) => Some(bits),
@@ -348,7 +363,7 @@ impl Schema {
                     &parsed,
                     &name,
                     &ty,
-                    value_type,
+                    value_type.clone(),
                     &controller,
                     start,
                     end,
@@ -396,27 +411,27 @@ impl Schema {
                         "scalar fields do not accept dynamic extent or count attributes",
                     ));
                 }
-                let wire_type = match value_type {
+                let wire_type = match &value_type {
                     ValueType::Scalar(scalar_type) => {
                         if representation.is_some() {
                             return Err(syn::Error::new_spanned(
                                 &ty,
-                                "`as` is only used for Rust primitives without an implicit wire width",
+                                "`as` is only used for Rust types without an implicit wire width",
                             ));
                         }
-                        scalar_type
+                        *scalar_type
                     }
                     ValueType::Usize | ValueType::Bool | ValueType::Char => {
                         let wire_type = representation.ok_or_else(|| {
                             syn::Error::new_spanned(
                                 &ty,
-                                "this Rust primitive requires an explicit unsigned `as` wire type",
+                                "this Rust type requires an explicit unsigned `as` wire type",
                             )
                         })?;
                         if !wire_type.is_unsigned_integer() {
                             return Err(syn::Error::new_spanned(
                                 &ty,
-                                "this Rust primitive requires an unsigned integer wire type",
+                                "this Rust type requires an unsigned integer wire type",
                             ));
                         }
                         wire_type
@@ -436,7 +451,14 @@ impl Schema {
                         }
                         wire_type
                     }
+                    ValueType::Custom(_) => representation.expect("custom scalar has `as`"),
                 };
+                if matches!(&value_type, ValueType::Custom(_)) && constant.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &name,
+                        "custom TryFrom scalar fields do not support stored constants",
+                    ));
+                }
                 let endian = scalar_endian(wire_type, endian, &ty)?;
                 if constant.is_some() && computed.is_some() {
                     return Err(syn::Error::new_spanned(
@@ -451,26 +473,41 @@ impl Schema {
                     constant,
                     computed,
                 })
-            } else if let Some(len) = byte_array_len(&ty)? {
-                if endian.is_some() || representation.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        &ty,
-                        "fixed byte arrays do not accept endian or `as` attributes",
-                    ));
-                }
-                if computed.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        &name,
-                        "computed destinations must be scalar fields",
-                    ));
-                }
+            } else if let Some((element, len)) = fixed_scalar_array(&ty)? {
                 if bytes.is_some() || rest || counted_by.is_some() {
                     return Err(syn::Error::new_spanned(
                         &ty,
-                        "fixed byte arrays do not accept dynamic extent or count attributes",
+                        "fixed arrays do not accept dynamic extent or count attributes",
                     ));
                 }
-                FieldKind::Bytes(FixedBytes { len, constant })
+                if matches!(element, ScalarType::U8) {
+                    if endian.is_some() || representation.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            &ty,
+                            "fixed byte arrays do not accept endian or `as` attributes",
+                        ));
+                    }
+                    if computed.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            &name,
+                            "computed destinations must be scalar fields",
+                        ));
+                    }
+                    FieldKind::Bytes(FixedBytes { len, constant })
+                } else {
+                    if representation.is_some() || constant.is_some() || computed.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            &ty,
+                            "fixed scalar arrays do not accept `as`, constant, or computed attributes",
+                        ));
+                    }
+                    let endian = scalar_endian(element, endian, &ty)?;
+                    FieldKind::ScalarArray(FixedScalarArray {
+                        element,
+                        len,
+                        endian,
+                    })
+                }
             } else if let Some(root) = recursive_item_type(&ty) {
                 if endian.is_some()
                     || representation.is_some()
@@ -719,7 +756,10 @@ impl Schema {
             && self.fields.iter().all(|field| {
                 matches!(
                     field.kind,
-                    FieldKind::Scalar(_) | FieldKind::Bytes(_) | FieldKind::BitProjection(_)
+                    FieldKind::Scalar(_)
+                        | FieldKind::Bytes(_)
+                        | FieldKind::ScalarArray(_)
+                        | FieldKind::BitProjection(_)
                 )
             })
     }
@@ -747,6 +787,7 @@ impl Schema {
             }) => controller == name,
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
+            | FieldKind::ScalarArray(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Recursive(_)
@@ -771,6 +812,7 @@ impl Schema {
             }) => controller == &name,
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
+            | FieldKind::ScalarArray(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Recursive(_)
@@ -860,7 +902,16 @@ fn static_geometry_end(terms: &[SizeTerm]) -> Option<usize> {
                 };
                 width.base10_parse::<usize>().ok()?
             }
-            SizeTerm::Expr(_) | SizeTerm::Nested(_) | SizeTerm::Dynamic => return None,
+            SizeTerm::Scaled(Expr::Lit(expression), scale) => {
+                let syn::Lit::Int(len) = &expression.lit else {
+                    return None;
+                };
+                len.base10_parse::<usize>().ok()?.checked_mul(*scale)?
+            }
+            SizeTerm::Expr(_)
+            | SizeTerm::Scaled(_, _)
+            | SizeTerm::Nested(_)
+            | SizeTerm::Dynamic => return None,
         };
         position = position.checked_add(width)?;
     }
@@ -896,7 +947,7 @@ fn validate_bit_projection(
             scalar.is_unsigned_integer() && width <= (scalar.width() * 8) as u32
         }
         Some(ValueType::Usize) => width <= usize::BITS,
-        Some(ValueType::Isize | ValueType::Char) | None => false,
+        Some(ValueType::Isize | ValueType::Char | ValueType::Custom(_)) | None => false,
     };
     if !valid_logical {
         return Err(syn::Error::new_spanned(
@@ -935,7 +986,7 @@ fn validate_bit_projection(
         unreachable!("validated bit projection controller is scalar")
     };
     if !matches!(
-        scalar.value_type,
+        &scalar.value_type,
         ValueType::Scalar(value) if value.is_unsigned_integer()
     ) {
         return Err(syn::Error::new_spanned(
@@ -982,7 +1033,8 @@ fn validate_computed_controller_roles(fields: &[Field]) -> syn::Result<()> {
             FieldKind::Array(array) => &array.controller == name,
             FieldKind::Flag(flag) => &flag.controller == name,
             FieldKind::BitProjection(projection) => &projection.controller == name,
-            FieldKind::Scalar(_)
+            FieldKind::ScalarArray(_)
+            | FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Recursive(_)
@@ -1169,6 +1221,7 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
             }) => Some((index, controller)),
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
+            | FieldKind::ScalarArray(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Recursive(_)
@@ -1231,6 +1284,7 @@ fn validate_arrays(fields: &[Field]) -> syn::Result<()> {
             FieldKind::BitProjection(projection) => projection.controller == array.controller,
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
+            | FieldKind::ScalarArray(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Array(_)
             | FieldKind::Recursive(_)
@@ -1276,6 +1330,7 @@ fn validate_bit_controller_roles(fields: &[Field]) -> syn::Result<()> {
             FieldKind::Flag(flag) => flag.controller == controller,
             FieldKind::Scalar(_)
             | FieldKind::Bytes(_)
+            | FieldKind::ScalarArray(_)
             | FieldKind::RawBytes(_)
             | FieldKind::Recursive(_)
             | FieldKind::BitProjection(_)
@@ -1330,7 +1385,7 @@ fn validate_conditions(fields: &[Field]) -> syn::Result<()> {
                     "logical flag controller must be a bool scalar",
                 ));
             };
-            if !matches!(scalar.value_type, ValueType::Bool) || scalar.constant.is_some() {
+            if !matches!(&scalar.value_type, ValueType::Bool) || scalar.constant.is_some() {
                 return Err(syn::Error::new_spanned(
                     &flag.controller,
                     "logical flag controller must be a nonconstant bool scalar",
@@ -1470,7 +1525,7 @@ fn validate_unsigned_controller(
     };
     if !scalar.wire_type.is_unsigned_integer()
         || !matches!(
-            scalar.value_type,
+            &scalar.value_type,
             ValueType::Scalar(
                 ScalarType::U8
                     | ScalarType::U16
@@ -1742,18 +1797,20 @@ fn primitive_name(ty: &Type) -> Option<String> {
     Some(path.path.segments[0].ident.to_string())
 }
 
-fn byte_array_len(ty: &Type) -> syn::Result<Option<Expr>> {
+fn fixed_scalar_array(ty: &Type) -> syn::Result<Option<(ScalarType, Expr)>> {
     let Type::Array(array) = ty else {
         return Ok(None);
     };
-
-    if primitive_name(&array.elem).as_deref() != Some("u8") {
+    let Some(element) = primitive_name(&array.elem)
+        .as_deref()
+        .and_then(ScalarType::from_name)
+    else {
         return Err(syn::Error::new_spanned(
             ty,
-            "fixed wire arrays currently require `u8` elements",
+            "fixed wire arrays require primitive scalar elements",
         ));
-    }
-    Ok(Some(array.len.clone()))
+    };
+    Ok(Some((element, array.len.clone())))
 }
 fn parse_bit_range(expression: Expr) -> syn::Result<(u32, u32)> {
     let Expr::Range(range) = expression else {

@@ -94,13 +94,23 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             let FieldKind::Scalar(scalar) = &field.kind else {
                 return None;
             };
-            (matches!(scalar.value_type, ValueType::Char) && scalar.constant.is_none()).then(|| {
-                (
-                    field.name.clone(),
-                    private_ident(schema, &format!("scalar_{index}_value")),
-                )
-            })
+            if scalar.constant.is_some() {
+                return None;
+            }
+            let ty = match &scalar.value_type {
+                ValueType::Char => quote!(char),
+                ValueType::Custom(ty) => quote!(#ty),
+                _ => return None,
+            };
+            Some((
+                field.name.clone(),
+                private_ident(schema, &format!("scalar_{index}_value")),
+                ty,
+            ))
         })
+        .collect::<Vec<_>>();
+    let converted_parameters = (0..retained_char_fields.len())
+        .map(|index| format_ident!("__WireReprValue{index}"))
         .collect::<Vec<_>>();
     let retained_flags = schema
         .flag_fields()
@@ -148,7 +158,8 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         .map(|(field, _)| quote!(#field: usize,));
     let descriptor_char_fields = retained_char_fields
         .iter()
-        .map(|(field, _)| quote!(#field: char,));
+        .zip(&converted_parameters)
+        .map(|((field, _, _), ty)| quote!(#field: #ty,));
     let descriptor_flag_fields = retained_flags
         .iter()
         .map(|(field, _)| quote!(#field: bool,));
@@ -171,30 +182,33 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                     quote!(#field: #state,)
                 }
             });
-    let descriptor_declaration = if descriptor_parameters.is_empty() {
-        quote! {
-            #[doc(hidden)]
-            #vis struct #descriptor {
-                #(#descriptor_char_fields)*
-                #(#descriptor_flag_fields)*
-                #(#descriptor_geometry_fields)*
-                #(#descriptor_array_base_field)*
-                #(#descriptor_array_count_fields)*
+    let descriptor_declaration =
+        if descriptor_parameters.is_empty() && converted_parameters.is_empty() {
+            quote! {
+                #[doc(hidden)]
+                #vis struct #descriptor {
+                    #(#descriptor_flag_fields)*
+                    #(#descriptor_geometry_fields)*
+                    #(#descriptor_array_base_field)*
+                    #(#descriptor_array_count_fields)*
+                }
             }
-        }
-    } else {
-        quote! {
-            #[doc(hidden)]
-            #vis struct #descriptor<#(#descriptor_parameters),*> {
-                #(#descriptor_char_fields)*
-                #(#descriptor_flag_fields)*
-                #(#descriptor_nested_fields)*
-                #(#descriptor_geometry_fields)*
-                #(#descriptor_array_base_field)*
-                #(#descriptor_array_count_fields)*
+        } else {
+            quote! {
+                #[doc(hidden)]
+                #vis struct #descriptor<
+                    #(#descriptor_parameters,)*
+                    #(#converted_parameters),*
+                > {
+                    #(#descriptor_char_fields)*
+                    #(#descriptor_flag_fields)*
+                    #(#descriptor_nested_fields)*
+                    #(#descriptor_geometry_fields)*
+                    #(#descriptor_array_base_field)*
+                    #(#descriptor_array_count_fields)*
+                }
             }
-        }
-    };
+        };
     let descriptor_states = nested_fields.iter().map(|field| {
         let FieldKind::Nested(nested) = &field.kind else {
             unreachable!()
@@ -202,15 +216,16 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         let ty = &nested.ty;
         quote!(<#ty as #runtime::WireView>::State)
     });
-    let descriptor_type = if nested_fields.is_empty() {
+    let descriptor_value_types = retained_char_fields.iter().map(|(_, _, ty)| ty);
+    let descriptor_type = if descriptor_parameters.is_empty() && converted_parameters.is_empty() {
         quote!(#descriptor)
     } else {
-        quote!(#descriptor<#(#descriptor_states),*>)
+        quote!(#descriptor<#(#descriptor_states,)* #(#descriptor_value_types),*>)
     };
 
     let descriptor_char_values = retained_char_fields
         .iter()
-        .map(|(field, value)| quote!(#field: #value,));
+        .map(|(field, value, _)| quote!(#field: #value,));
     let descriptor_flag_values = retained_flags
         .iter()
         .map(|(field, value)| quote!(#field: #value,));
@@ -274,7 +289,10 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 let total = private_ident(schema, &format!("{}_total", last.name.unraw()));
                 quote!(#total)
             }
-            FieldKind::Scalar(_) | FieldKind::Bytes(_) | FieldKind::BitProjection(_) => {
+            FieldKind::Scalar(_)
+            | FieldKind::Bytes(_)
+            | FieldKind::ScalarArray(_)
+            | FieldKind::BitProjection(_) => {
                 let total = view_offset_for_end(schema, last, runtime);
                 quote!(#total.expect("framed fixed schema width"))
             }
@@ -916,6 +934,19 @@ fn bounded_generics(schema: &Schema, runtime: &TokenStream) -> Generics {
             .predicates
             .push(parse_quote!(#item: #runtime::WireView));
     }
+    for field in &schema.fields {
+        let FieldKind::Scalar(scalar) = &field.kind else {
+            continue;
+        };
+        let ValueType::Custom(ty) = &scalar.value_type else {
+            continue;
+        };
+        let wire = scalar_type_tokens(scalar.wire_type);
+        generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#ty: Copy + TryFrom<#wire> + 'static));
+    }
     generics
 }
 
@@ -954,6 +985,7 @@ fn error_names(schema: &Schema) -> ErrorNames {
                 }
                 FieldKind::Scalar(_)
                 | FieldKind::Bytes(_)
+                | FieldKind::ScalarArray(_)
                 | FieldKind::RawBytes(_)
                 | FieldKind::Array(_)
                 | FieldKind::Recursive(_)
@@ -1090,6 +1122,7 @@ fn render_flatten_error(
                 }
                 FieldKind::Scalar(_)
                 | FieldKind::Bytes(_)
+                | FieldKind::ScalarArray(_)
                 | FieldKind::RawBytes(_)
                 | FieldKind::Recursive(_)
                 | FieldKind::Flag(_)
@@ -1174,7 +1207,7 @@ fn render_error(
             let mismatch_message = format!("invalid constant field `{field_name}`: {{0}}");
             match &field.kind {
                 FieldKind::Scalar(scalar) => {
-                    let ty = value_type_tokens(scalar.value_type);
+                    let ty = value_type_tokens(&scalar.value_type);
                     variants.push(quote! {
                         #[doc = "The stored constant did not match the schema value."]
                         #[error(#mismatch_message)]
@@ -1190,6 +1223,7 @@ fn render_error(
                     });
                 }
                 FieldKind::RawBytes(_)
+                | FieldKind::ScalarArray(_)
                 | FieldKind::Array(_)
                 | FieldKind::Recursive(_)
                 | FieldKind::Flag(_)
@@ -1423,7 +1457,7 @@ fn render_frame_steps(
                 });
                 if scalar.constant.is_some() || scalar.value_type.is_converted() {
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
-                    let value_ty = value_type_tokens(scalar.value_type);
+                    let value_ty = value_type_tokens(&scalar.value_type);
                     let decode = from_bytes_method(scalar.endian);
                     let conversion = convert_from_wire(scalar, &raw);
                     let converted = if let Some(variant) = &names.conversion {
@@ -1494,6 +1528,27 @@ fn render_frame_steps(
                             additional_at_least: #end.saturating_sub(#frame_input.len()),
                         }))?;
                     #constant_check
+                });
+            }
+            FieldKind::ScalarArray(array) => {
+                let len = &array.len;
+                let element_width = array.element.width();
+                let total = private_ident(schema, &format!("array_{index}_width"));
+                let end = private_ident(schema, &format!("field_{index}_end"));
+                let shortage = &names.shortage;
+                steps.push(quote! {
+                    let #total = (#len as usize)
+                        .checked_mul(#element_width)
+                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                    let #end = #offset
+                        .checked_add(#total)
+                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                    #frame_input
+                        .get(#offset..#end)
+                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
+                            offset: #input_end,
+                            additional_at_least: #end.saturating_sub(#frame_input.len()),
+                        }))?;
                 });
             }
             FieldKind::Nested(nested) => {
@@ -1648,7 +1703,7 @@ fn render_explicit_frame_steps(
                 let raw = private_ident(schema, &format!("scalar_{index}_raw"));
                 let value = private_ident(schema, &format!("scalar_{index}_value"));
                 let wire_ty = scalar_type_tokens(scalar.wire_type);
-                let value_ty = value_type_tokens(scalar.value_type);
+                let value_ty = value_type_tokens(&scalar.value_type);
                 let decode = from_bytes_method(scalar.endian);
                 let conversion = convert_from_wire(scalar, &raw);
                 let converted = if let Some(variant) = &names.conversion {
@@ -1782,6 +1837,25 @@ fn render_explicit_frame_steps(
                             additional_at_least: #end.saturating_sub(#frame_input.len()),
                         }))?;
                     #constant_check
+                });
+            }
+            FieldKind::ScalarArray(array) => {
+                let shortage = &names.shortage;
+                let len = &array.len;
+                let element_width = array.element.width();
+                steps.push(quote! {
+                    let total = (#len as usize)
+                        .checked_mul(#element_width)
+                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                    let #end = #start
+                        .checked_add(total)
+                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                    #frame_input
+                        .get(#start..#end)
+                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
+                            offset: #input_end,
+                            additional_at_least: #end.saturating_sub(#frame_input.len()),
+                        }))?;
                 });
             }
             FieldKind::RawBytes(raw) => {
@@ -1943,7 +2017,7 @@ fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStre
             let name = &field.name;
             match &field.kind {
                 FieldKind::Scalar(scalar) => {
-                    let ty = value_type_tokens(scalar.value_type);
+                    let ty = value_type_tokens(&scalar.value_type);
                     let ty = if field.layout.condition.is_some() {
                         quote!(Option<#ty>)
                     } else {
@@ -1958,6 +2032,13 @@ fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStre
                     let ty = &field.ty;
                     quote! {
                         #[doc = concat!("Returns fixed byte-array field `", stringify!(#name), "`.")]
+                        fn #name(&self) -> #ty;
+                    }
+                }
+                FieldKind::ScalarArray(_) => {
+                    let ty = &field.ty;
+                    quote! {
+                        #[doc = concat!("Returns fixed scalar-array field `", stringify!(#name), "`.")]
                         fn #name(&self) -> #ty;
                     }
                 }
@@ -2074,6 +2155,11 @@ fn geometry_end(schema: &Schema, index: usize, runtime: &TokenStream) -> TokenSt
             let width = &bytes.len;
             quote!(#start + #width)
         }
+        FieldKind::ScalarArray(array) => {
+            let len = &array.len;
+            let width = array.element.width();
+            quote!(#start + (#len) * #width)
+        }
         FieldKind::Flag(_) | FieldKind::BitProjection(_) => start,
         FieldKind::Nested(nested) => {
             let ty = &nested.ty;
@@ -2111,47 +2197,48 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
             match &field.kind {
                 FieldKind::Scalar(scalar) => {
                     let width = scalar.width();
-                    let value_ty = value_type_tokens(scalar.value_type);
-                    let body = if matches!(scalar.value_type, ValueType::Char)
-                        && scalar.constant.is_none()
-                    {
-                        quote!(self.descriptor.#name)
-                    } else if let Some(constant) = &scalar.constant {
-                        quote! {
-                            let value: #value_ty = #constant;
-                            value
-                        }
-                    } else {
-                        let wire_ty = scalar_type_tokens(scalar.wire_type);
-                        let decode = from_bytes_method(scalar.endian);
-                        let raw = private_ident(schema, "scalar_raw");
-                        let decoded = if scalar.value_type.is_converted() {
-                            let conversion = convert_from_validated_wire(scalar, &raw);
-                            quote!(#conversion)
+                    let value_ty = value_type_tokens(&scalar.value_type);
+                    let body =
+                        if matches!(&scalar.value_type, ValueType::Char | ValueType::Custom(_))
+                            && scalar.constant.is_none()
+                        {
+                            quote!(self.descriptor.#name)
+                        } else if let Some(constant) = &scalar.constant {
+                            quote! {
+                                let value: #value_ty = #constant;
+                                value
+                            }
                         } else {
-                            quote!(#raw)
+                            let wire_ty = scalar_type_tokens(scalar.wire_type);
+                            let decode = from_bytes_method(scalar.endian);
+                            let raw = private_ident(schema, "scalar_raw");
+                            let decoded = if scalar.value_type.is_converted() {
+                                let conversion = convert_from_validated_wire(scalar, &raw);
+                                quote!(#conversion)
+                            } else {
+                                quote!(#raw)
+                            };
+                            if schema.has_explicit_geometry() {
+                                quote! {
+                                    let #raw = #wire_ty::#decode(
+                                        self.as_bytes()[#dynamic_start..#dynamic_end]
+                                            .try_into()
+                                            .expect("validated scalar field span"),
+                                    );
+                                    #decoded
+                                }
+                            } else {
+                                quote! {
+                                    let offset = #offset_value.expect("validated scalar offset");
+                                    let #raw = #wire_ty::#decode(
+                                        self.as_bytes()[offset..offset + #width]
+                                            .try_into()
+                                            .expect("validated scalar field span"),
+                                    );
+                                    #decoded
+                                }
+                            }
                         };
-                        if schema.has_explicit_geometry() {
-                            quote! {
-                                let #raw = #wire_ty::#decode(
-                                    self.as_bytes()[#dynamic_start..#dynamic_end]
-                                        .try_into()
-                                        .expect("validated scalar field span"),
-                                );
-                                #decoded
-                            }
-                        } else {
-                            quote! {
-                                let offset = #offset_value.expect("validated scalar offset");
-                                let #raw = #wire_ty::#decode(
-                                    self.as_bytes()[offset..offset + #width]
-                                        .try_into()
-                                        .expect("validated scalar field span"),
-                                );
-                                #decoded
-                            }
-                        }
-                    };
                     let (return_ty, body) = if let Some(condition) = condition {
                         (
                             quote!(Option<#value_ty>),
@@ -2199,6 +2286,31 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                         #[inline(always)]
                         fn #name(&self) -> #ty {
                             #body
+                        }
+                    }
+                }
+                FieldKind::ScalarArray(array) => {
+                    let ty = &field.ty;
+                    let element = scalar_type_tokens(array.element);
+                    let width = array.element.width();
+                    let decode = from_bytes_method(array.endian);
+                    let base = if schema.has_explicit_geometry() {
+                        quote!(#dynamic_start)
+                    } else {
+                        quote!(#offset_value.expect("validated scalar-array offset"))
+                    };
+                    quote! {
+                        #[inline]
+                        fn #name(&self) -> #ty {
+                            let base = #base;
+                            ::core::array::from_fn(|index| {
+                                let start = base + index * #width;
+                                #element::#decode(
+                                    self.as_bytes()[start..start + #width]
+                                        .try_into()
+                                        .expect("validated scalar-array element span"),
+                                )
+                            })
                         }
                     }
                 }
@@ -2341,6 +2453,17 @@ fn view_offset_for_end(
     runtime: &TokenStream,
 ) -> TokenStream {
     let offset = view_offset(&field.offset, runtime);
+    if let FieldKind::ScalarArray(array) = &field.kind {
+        let len = &array.len;
+        let element_width = array.element.width();
+        return quote!(
+            #offset.and_then(|offset| {
+                (#len as usize)
+                    .checked_mul(#element_width)
+                    .and_then(|width| offset.checked_add(width))
+            })
+        );
+    }
     let width = match &field.kind {
         FieldKind::Scalar(scalar) => {
             let width = scalar.width();
@@ -2350,6 +2473,7 @@ fn view_offset_for_end(
             let len = &bytes.len;
             quote!(#len)
         }
+        FieldKind::ScalarArray(_) => unreachable!("handled by checked scaled width"),
         FieldKind::BitProjection(_) => quote!(0usize),
         FieldKind::RawBytes(_)
         | FieldKind::Array(_)
@@ -2362,7 +2486,7 @@ fn view_offset_for_end(
 
 fn constants_differ(scalar: &Scalar, actual: &syn::Ident, expected: &syn::Ident) -> TokenStream {
     if matches!(
-        scalar.value_type,
+        &scalar.value_type,
         ValueType::Scalar(ScalarType::F32 | ScalarType::F64)
     ) {
         quote!(#actual.to_bits() != #expected.to_bits())
@@ -2372,17 +2496,19 @@ fn constants_differ(scalar: &Scalar, actual: &syn::Ident, expected: &syn::Ident)
 }
 
 fn convert_from_validated_wire(scalar: &Scalar, raw: &syn::Ident) -> TokenStream {
-    match scalar.value_type {
+    match &scalar.value_type {
         ValueType::Scalar(_) => quote!(#raw),
         ValueType::Usize => quote!(#raw as usize),
         ValueType::Isize => quote!(#raw as isize),
         ValueType::Bool => quote!(#raw != 0),
-        ValueType::Char => unreachable!("char getters use retained validated descriptor state"),
+        ValueType::Char | ValueType::Custom(_) => {
+            unreachable!("retained converted getters use descriptor state")
+        }
     }
 }
 
 fn convert_from_wire(scalar: &Scalar, raw: &syn::Ident) -> TokenStream {
-    match scalar.value_type {
+    match &scalar.value_type {
         ValueType::Scalar(_) => quote!(Some(#raw)),
         ValueType::Usize => quote!(usize::try_from(#raw).ok()),
         ValueType::Isize => quote!(isize::try_from(#raw).ok()),
@@ -2392,6 +2518,7 @@ fn convert_from_wire(scalar: &Scalar, raw: &syn::Ident) -> TokenStream {
             _ => None,
         }),
         ValueType::Char => quote!(u32::try_from(#raw).ok().and_then(char::from_u32)),
+        ValueType::Custom(ty) => quote!(<#ty>::try_from(#raw).ok()),
     }
 }
 

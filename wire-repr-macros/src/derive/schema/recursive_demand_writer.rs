@@ -26,7 +26,7 @@ pub(super) fn render(
     let controller_encode = super::to_bytes_method(controller.endian);
     let controller_width = controller.width();
     let scalar = demand.scalar_field;
-    let scalar_ty = super::value_type_tokens(scalar.value_type);
+    let scalar_ty = super::value_type_tokens(&scalar.value_type);
     let scalar_wire = super::scalar_type_tokens(scalar.wire_type);
     let scalar_encode = super::to_bytes_method(scalar.endian);
     let scalar_name = &schema.fields[demand.scalar].name;

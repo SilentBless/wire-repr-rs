@@ -24,6 +24,59 @@ enum Foo {
     Unknown(wire_repr::wire::Bytes),
 }
 
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum UnitFoo {
+    #[wire(value = 0)]
+    Ping,
+    #[wire(value = 1)]
+    Value(Bar),
+}
+
+pub fn unit_decode(seed: u64) -> u64 {
+    let (input, len) = unit_input(seed);
+    let Ok(view) = UnitFoo::view(&input[..len]) else {
+        return u64::MAX;
+    };
+    match view.variant() {
+        UnitFooVariant::Ping => 0,
+        UnitFooVariant::Value(value) => u64::from(value.value()),
+    }
+}
+
+pub fn unit_build(seed: u64) -> u64 {
+    let mut output = [0u8; 5];
+    let written = if seed & 1 == 0 {
+        let Ok(complete) = UnitFoo::builder(&mut output[..]).ping() else {
+            return u64::MAX;
+        };
+        let Ok(written) = complete.finish() else {
+            return u64::MAX;
+        };
+        written
+    } else {
+        let Ok(complete) = UnitFoo::builder(&mut output[..]).value(|bar| bar.value(seed as u32))
+        else {
+            return u64::MAX;
+        };
+        let Ok(written) = complete.finish() else {
+            return u64::MAX;
+        };
+        written
+    };
+    hash(written.as_bytes())
+}
+
+#[inline(never)]
+fn unit_input(seed: u64) -> ([u8; 5], usize) {
+    if seed & 1 == 0 {
+        ([0; 5], 1)
+    } else {
+        let value = (seed as u32).to_le_bytes();
+        ([1, value[0], value[1], value[2], value[3]], 5)
+    }
+}
+
 pub fn decode(seed: u64) -> u64 {
     try_decode(seed).unwrap_or(u64::MAX)
 }

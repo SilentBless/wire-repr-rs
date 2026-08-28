@@ -1,4 +1,4 @@
-//! error: this Rust primitive requires an explicit unsigned `as` wire type
+//! error: this Rust type requires an explicit unsigned `as` wire type
 
 use wire_repr::WireView;
 

@@ -45,6 +45,38 @@ pub fn copy(seed: u64) -> u64 {
     hash(&output)
 }
 
+pub fn unit_decode(seed: u64) -> u64 {
+    let (input, len) = unit_input(seed);
+    match (input[0], len) {
+        (0, 1) => 0,
+        (1, 5) => u64::from(u32::from_le_bytes(input[1..].try_into().unwrap())),
+        _ => u64::MAX,
+    }
+}
+
+pub fn unit_build(seed: u64) -> u64 {
+    let mut output = [0u8; 5];
+    let len = if seed & 1 == 0 {
+        output[0] = 0;
+        1
+    } else {
+        output[0] = 1;
+        output[1..].copy_from_slice(&(seed as u32).to_le_bytes());
+        5
+    };
+    hash(&output[..len])
+}
+
+#[inline(never)]
+fn unit_input(seed: u64) -> ([u8; 5], usize) {
+    if seed & 1 == 0 {
+        ([0; 5], 1)
+    } else {
+        let value = (seed as u32).to_le_bytes();
+        ([1, value[0], value[1], value[2], value[3]], 5)
+    }
+}
+
 fn validate(source: &[u8]) -> Option<()> {
     let selector = u16::from_le_bytes([*source.first()?, *source.get(1)?]);
     let valid = match selector {

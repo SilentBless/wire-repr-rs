@@ -101,9 +101,10 @@ The child exposes its detached initial state through `WireBuilder`; `WireWrite<V
 closure result directly into the parent's output. A manual `FIXED_SIZE` allows later physical
 fields while bounded child cursors prevent over- or under-writing that declared region.
 
-Primitive schemas support all fixed-width Rust integers and floats. `usize`, `isize`, `bool`, and
-`char` require an explicit physical representation such as `#[wire(as = u32, le)]`; both read and
-write conversions are checked.
+Primitive schemas support all fixed-width Rust integers and floats. `usize`, `isize`, `bool`,
+`char`, `NonZero*`, and user newtypes use an explicit physical representation such as
+`#[wire(as = u32, le)]`; arbitrary logical types compose through bidirectional `TryFrom`.
+Primitive `[T; N]` fields use the element's declared endian without allocation.
 
 ## Output ownership
 
@@ -159,17 +160,19 @@ callback or slot types.
 - Derived descriptors are reference-free and `State: 'static`; manual implementations certify the
   same invariant through unsafe `WireView`.
 - Scalar getters decode lazily from exact source bytes.
-- Fixed `[u8; N]` fields and constants preserve their exact bytes without endian conversion.
+- Fixed `[u8; N]` fields and constants preserve their exact bytes without endian conversion;
+  fixed primitive scalar arrays decode and write each element in the declared byte order.
 - Multiple fixed nested children retain independent state and field-site errors.
 - `wire::Bytes` exposes bounded or terminal source spans without copying.
 - Padding and placement gaps remain opaque on read and are zero-filled by fresh writers.
 - Bounded raw and nested payloads patch their physically earlier length controllers.
 - Shared byte-length controllers reject conflicting write intent without hidden plans.
 - `flag` and `depends_on` generate one present/absent choice closure for coherent groups.
-- `wire::Array<T>` exposes replayable range-and-count facades without retaining item indexes.
-- Streaming array writers patch count and accept exact generated or traversed item views.
+- `wire::Array<T>` exposes `IntoIterator` facades without retaining item indexes; iterators are
+  fused, and writer `try_extend` consumes arbitrary Rust iterators without retaining a plan.
 - Exact array forwarding copies one validated collection range and patches its authoritative count.
-- Static enums expose borrowed exhaustive variants and preserve exact unknown bodies.
+- Static enums expose Rust unit variants, borrowed exhaustive body variants, and exact unknown
+  bodies.
 - Nominal and inline bitfields use checked logical ranges while fresh writers zero undeclared bits.
 - Typed selections expose merged root-relative chunks and zero-sized paths through nested children.
 - Computed scalar destinations patch from logical fields and physical selections in DAG order.

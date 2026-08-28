@@ -89,6 +89,27 @@ pub(in super::super) fn render(
             let body = &variant.body;
             let value = variant.value.as_ref().expect("known selector");
             let field = variant.name.unraw().to_string();
+            if variant.unit {
+                return quote! {
+                    #[inline]
+                    #vis fn #method(mut self) -> Result<
+                        #complete<#cursor>,
+                        #runtime::OutputError<
+                            <#cursor as #runtime::__private::RecursiveCursor>::GrowError,
+                        >,
+                    > {
+                        let selector: #selector_ty = #value;
+                        #runtime::__private::RecursiveCursor::write(
+                            &mut self.output,
+                            &selector.#encode(),
+                        )?;
+                        Ok(#complete {
+                            output: self.output,
+                            marker: ::core::marker::PhantomData,
+                        })
+                    }
+                };
+            }
             if let Some(slot) = slot {
                 quote! {
                     #[inline]

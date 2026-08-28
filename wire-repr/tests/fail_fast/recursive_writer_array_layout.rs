@@ -1,4 +1,4 @@
-//! error: RecursiveWriteSlot<0>` is not implemented
+//! error: recursive writer layout for `Array<Value>` is not available
 
 use wire_repr::WireBuilder;
 

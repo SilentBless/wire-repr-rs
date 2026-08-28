@@ -113,16 +113,19 @@ count: u16,
 items: wire::Array<T>,
 ```
 
-The getter retains only the array range and authoritative count. Each `iter()` call replays item
-geometry without allocating an index. Writers stream items through one closure and patch count
-afterward. `item_view` and `item_result` copy individual exact views; `copy_from(source.items())`
-forwards one validated array range without semantic reconstruction or per-item writes.
+The getter retains only the array range and authoritative count. `ArrayView` implements
+`IntoIterator` by value and by reference; its iterator is fused and replays item geometry without
+allocating an index. Writers stream items through one closure and patch count afterward.
+`try_extend(values, build)` consumes any `IntoIterator`, including `Vec`, slices, arrays, and ranges,
+without retaining a plan. `item_view` and `item_result` copy individual exact views;
+`copy_from(source.items())` forwards one validated range without semantic reconstruction.
 
 ## Static enums and bitfields
 
-Static enums use one physical selector and expose a borrowed exhaustive variant enum. An
-`#[wire(unknown)]` variant retains the raw selector and exact bounded or terminal body, so
-`item_view` can forward it unchanged.
+Static enums use one physical selector and expose a borrowed exhaustive variant enum. Rust unit
+variants encode only their selector and build as `.ping()?`; body variants keep their closure
+setter. An `#[wire(unknown)]` variant retains the raw selector and exact bounded or terminal body,
+so `item_view` can forward it unchanged.
 
 Nominal bitfields declare `#[wire(as = u32, le)]` on the type and `bit`/`bits` on logical fields.
 For local projections, `#[wire(bits_of = raw, ...)]` derives zero-width getters and builder setters
@@ -225,26 +228,33 @@ validated logical values when needed, and check manual child extents before reco
 
 The schema model handles `u8`/`i8` and every 16-, 32-, 64-, and 128-bit integer in both byte
 orders, plus `f32` and `f64`. One-byte fields have no endian attribute; every multibyte field
-requires `le` or `be`.
+requires `le` or `be`. Fixed primitive arrays use the same element representation without
+allocation:
 
-Platform and logical Rust types declare their physical width explicitly:
+```rust
+#[wire(le)]
+lanes: [u16; 8],
+```
+
+Platform, logical, and newtype fields declare their physical width explicitly:
 
 ```rust
 #[derive(WireView, WireBuilder)]
 struct Index {
     #[wire(as = u32, le)]
     offset: usize,
-    #[wire(as = i64, be)]
-    delta: isize,
-    #[wire(as = u8)]
-    enabled: bool,
-    #[wire(as = u32, le)]
-    character: char,
+    #[wire(as = u16, be)]
+    count: core::num::NonZeroU16,
+    #[wire(as = u64, le)]
+    user: UserId,
 }
 ```
 
-Read and write conversions are checked. Invalid stored values and values that do not fit their
-declared wire width produce nominal field-site errors rather than truncating.
+For an arbitrary newtype, `Logical: TryFrom<Physical>` validates reading and
+`Physical: TryFrom<Logical>` validates writing. Conversion implementation errors do not enter the
+generated public error type; failures remain nominal field-site `ScalarConversionError` values.
+Missing capabilities receive direct trait diagnostics instead of hidden generated callback/slot
+bounds. Invalid stored values and values that do not fit their wire width never truncate.
 
 ## Behavioral guarantees
 

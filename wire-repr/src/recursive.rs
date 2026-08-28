@@ -145,6 +145,10 @@ pub enum RecursiveStep<Continuation> {
 }
 
 /// Resolves a generated recursive slot without reconstructing hidden item names.
+#[diagnostic::on_unimplemented(
+    message = "recursive view layout for `{Self}` is not available",
+    label = "this recursive body shape is unsupported"
+)]
 #[doc(hidden)]
 pub trait RecursiveSlot<const INDEX: usize> {
     /// Hidden marker selected for this concrete body instantiation.
@@ -192,6 +196,10 @@ pub trait RecursiveFrame<Slot> {
 
 /// Hidden recursive framing surface generated for a generic body slot.
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be framed as this recursive body",
+    label = "the recursive body grammar is unsupported"
+)]
 #[allow(unsafe_code)]
 pub trait RecursiveBody<C, Slot>: Sized {
     /// Finite local body state. Recursive child states are never retained here.
@@ -267,6 +275,10 @@ pub enum RecursiveWriteError {
 }
 
 /// Associates a generic recursive body with its generated progressive-write slot marker.
+#[diagnostic::on_unimplemented(
+    message = "recursive writer layout for `{Self}` is not available",
+    label = "this recursive body shape is unsupported"
+)]
 #[doc(hidden)]
 pub trait RecursiveWriteSlot<const INDEX: usize> {
     /// Marker statically binding a body grammar to one recursive root callback.
@@ -415,6 +427,10 @@ pub trait RecursiveWrite {
 }
 
 /// Generated progressive writer for one recursive body grammar.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be written as this recursive body",
+    label = "the recursive writer grammar is unsupported"
+)]
 #[doc(hidden)]
 pub trait RecursiveWriteBody<Callback, Slot> {
     /// Initial body writer owning one progressive cursor.

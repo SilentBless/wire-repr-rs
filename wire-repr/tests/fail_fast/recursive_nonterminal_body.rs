@@ -1,4 +1,4 @@
-//! error: RecursiveSlot<0>` is not implemented
+//! error: recursive view layout for `Body<Root>` is not available
 
 use wire_repr::WireView;
 

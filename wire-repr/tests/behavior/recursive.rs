@@ -180,6 +180,15 @@ enum RecursiveWriterRootCollision {
     Root(WritePair<RecursiveWriterRootCollision>),
 }
 
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum UnitRecursiveValue {
+    #[wire(value = 0)]
+    Null,
+    #[wire(value = 1)]
+    Pair(WritePair<UnitRecursiveValue>),
+}
+
 #[derive(WireView)]
 struct WideDemandPair<T> {
     #[wire(le)]
@@ -1117,6 +1126,18 @@ fn recursive_writer_composes_exact_roots_through_ordinary_parents()
     Ok(())
 }
 
+#[test]
+fn recursive_unit_variants_need_no_synthetic_body() -> Result<(), Box<dyn std::error::Error>> {
+    let view = UnitRecursiveValue::view::<16>([0])?;
+    assert!(matches!(view.variant(), UnitRecursiveValueVariant::Null));
+
+    let mut output = [0xff; 1];
+    UnitRecursiveValue::builder(&mut output[..])
+        .null()?
+        .finish()?;
+    assert_eq!(output, [0]);
+    Ok(())
+}
 #[test]
 fn progressive_recursive_writer_streams_fixed_segments_between_children()
 -> Result<(), Box<dyn std::error::Error>> {

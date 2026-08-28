@@ -156,8 +156,9 @@ remain first in generated generic declarations.
 Declaration order is physical order. The target field vocabulary includes:
 
 - fixed Rust integers and floats with explicit `be` or `le` where width exceeds one byte;
-- `usize`, `isize`, `bool`, and `char` with an explicit physical `as = integer_type`;
-- fixed byte arrays;
+- `usize`, `isize`, `bool`, `char`, `NonZero*`, and user newtypes with an explicit physical
+  `as = integer_type` and bidirectional checked `TryFrom`;
+- fixed byte arrays and fixed primitive scalar arrays;
 - general stored constants with `constant = value`;
 - manual and derived nested wire types;
 - `wire::Bytes` for lifetime-free variable raw bytes in schema declarations;
@@ -227,6 +228,9 @@ enum Value {
     Second(SecondBody),
 }
 ```
+
+Known variants may also be Rust unit variants. They encode only the selector, appear as ordinary
+unit cases in the borrowed variant enum, and expose a no-argument progressive writer method.
 
 Views expose a generated borrowed variant enum for ordinary exhaustive `match`. An explicit
 `#[wire(unknown)]` variant preserves the raw selector and exact bounded or terminal body bytes, so
@@ -317,14 +321,12 @@ packet.details(|details| match value {
 Generated code writes fixed fields directly at compile-time offsets, retains offsets rather than
 pointers across relocations, and patches controllers or computed destinations when their
 dependencies become available. Runtime collections use a streaming closure that writes one item at
-a time and patches count or byte controllers without retaining item plans:
+a time and patches count or byte controllers without retaining item plans. `try_extend` accepts any
+`IntoIterator`:
 
 ```rust
-packet.items(|mut items| {
-    for value in source {
-        items = items.item(|item| item.value(value))?;
-    }
-    Ok(items)
+packet.items(|items| {
+    items.try_extend(source, |item, value| item.value(value))
 })?
 ```
 
@@ -455,17 +457,17 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fifteen discovered zones and fifty-seven cases: fixed scalars and
-constants, explicit logical conversions, one generic nested child, a four-level compound generic
-lattice, fixed byte arrays with multiple nested children, dynamic geometry, conditional
-controllers, runtime collection decode/build/copy, static enum decode/build/copy, nominal and
-inline bitfields, fragmented and nested physical selections, fixed and dynamic computed fields,
-fixed and variable homogeneous views, heterogeneous cursors, all eight compact recursive geometry
-forms plus replay, recursive pair and demand continuations, progressive recursive object/array/
-demand builds, and fixed, borrowed-growable, owned-growable, and callback-driven output. Each
-covers read and write paths where applicable. The measurement tool inspects final linked consumer
-symbols for code
-shape, call topology, stack, allocation, and dispatch evidence.
+The current mandatory corpus has fifteen discovered zones and sixty-three cases: fixed scalars,
+fixed primitive arrays, constants, built-in and generic `TryFrom` conversions, one generic nested
+child, a four-level compound generic lattice, fixed byte arrays with multiple nested children,
+dynamic geometry, conditional controllers, runtime collection decode/build/copy, static body and
+unit enum decode/build/copy, nominal and inline bitfields, fragmented and nested physical
+selections, fixed and dynamic computed fields, fixed and variable homogeneous views,
+heterogeneous cursors, all eight compact recursive geometry forms plus replay, recursive pair and
+demand continuations, progressive recursive object/array/demand builds, and fixed,
+borrowed-growable, owned-growable, and callback-driven output. Each covers read and write paths
+where applicable. The measurement tool inspects final linked consumer symbols for code shape, call
+topology, stack, allocation, and dispatch evidence.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
 IR may explain an optimization result but is not treated as a latency oracle. State and
 artifact-size probes remain isolated from measured hot-path implementations.
