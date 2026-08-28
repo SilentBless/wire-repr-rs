@@ -210,7 +210,12 @@ warmup = 20
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+assert = "generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "unresolved call attention"
+level = "attention"
+assert = "generated_artifact_indirect_calls == 0"
+message = "Rizin cannot prove hoisted ELF linkage calls are non-dispatch"
 [[cases.rules]]
 name = "stack attention"
 level = "attention"
