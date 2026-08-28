@@ -106,17 +106,26 @@ strip = false
         if !output.status.success() {
             return Err(HarnessError::Build(cargo_failure(&output)));
         }
-        let executable = output
+        let artifact = output
             .stdout
             .split(|byte| *byte == b'\n')
             .filter_map(|line| serde_json::from_slice::<CargoMessage>(line).ok())
-            .filter_map(|message| message.executable)
+            .filter(|message| message.executable.is_some())
             .next_back()
             .ok_or_else(|| HarnessError::Build("cargo did not report an executable".to_owned()))?;
-        let debug_info = executable
-            .with_extension("pdb")
-            .is_file()
-            .then(|| executable.with_extension("pdb"));
+        let executable = artifact
+            .executable
+            .expect("filtered cargo artifact contains an executable");
+        let debug_info = artifact
+            .filenames
+            .into_iter()
+            .find(|path| path.extension().is_some_and(|extension| extension == "pdb"))
+            .or_else(|| {
+                executable
+                    .with_extension("pdb")
+                    .is_file()
+                    .then(|| executable.with_extension("pdb"))
+            });
         Ok(Harness {
             executable,
             debug_info,
@@ -212,6 +221,8 @@ pub struct Sample {
 #[derive(Deserialize)]
 struct CargoMessage {
     executable: Option<PathBuf>,
+    #[serde(default)]
+    filenames: Vec<PathBuf>,
     message: Option<CargoDiagnostic>,
 }
 

@@ -133,7 +133,7 @@ impl Analyzer {
                     .iter()
                     .find(|entry| entry.name.strip_prefix('_') == Some(symbol))
             })
-            .map(|entry| entry.vaddr)
+            .and_then(|entry| entry.vaddr)
             .ok_or_else(|| ArtifactError::MissingSymbol {
                 path: self.path.clone(),
                 symbol: symbol.to_owned(),
@@ -315,7 +315,7 @@ struct LocalMetrics {
 #[derive(Deserialize)]
 struct SymbolInfo {
     name: String,
-    vaddr: u64,
+    vaddr: Option<u64>,
 }
 
 #[derive(Deserialize)]
