@@ -150,6 +150,95 @@ enum WriteValue {
     Decorated(WriteDecorated<WriteValue>),
 }
 
+#[derive(WireView, WireBuilder)]
+struct DemandPair<T> {
+    #[wire(le)]
+    metadata_len: u64,
+    left: wire_repr::wire::Recursive<T>,
+    #[wire(bytes = metadata_len)]
+    metadata: wire_repr::wire::Bytes,
+    #[wire(le, pad_before = 1, align_before = 4)]
+    opcode: u16,
+    right: wire_repr::wire::Recursive<T>,
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum DemandValue {
+    #[wire(value = 1)]
+    Leaf(WriteLeaf),
+    #[wire(value = 2)]
+    Pair(DemandPair<DemandValue>),
+}
+
+#[derive(WireBuilder)]
+#[wire(selector = u8)]
+enum RecursiveWriterRootCollision {
+    #[wire(value = 1)]
+    Leaf(WriteLeaf),
+    #[wire(value = 2)]
+    Root(WritePair<RecursiveWriterRootCollision>),
+}
+
+#[derive(WireView)]
+struct WideDemandPair<T> {
+    #[wire(le)]
+    metadata_len: u128,
+    left: wire_repr::wire::Recursive<T>,
+    #[wire(bytes = metadata_len)]
+    metadata: wire_repr::wire::Bytes,
+    #[wire(le)]
+    opcode: u16,
+    right: wire_repr::wire::Recursive<T>,
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum WideDemandValue {
+    #[wire(value = 1)]
+    Leaf(WriteLeaf),
+    #[wire(value = 2)]
+    Pair(WideDemandPair<WideDemandValue>),
+}
+
+#[derive(WireView)]
+struct CompactDemandPair<T> {
+    #[wire(le)]
+    metadata_len: u64,
+    left: wire_repr::wire::Recursive<T>,
+    #[wire(bytes = metadata_len)]
+    metadata: wire_repr::wire::Bytes,
+    #[wire(le)]
+    opcode: u16,
+    right: wire_repr::wire::Recursive<T>,
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum CompactDemandValue {
+    #[wire(value = 1)]
+    Leaf(WriteLeaf),
+    #[wire(value = 2)]
+    Pair(CompactDemandPair<CompactDemandValue>),
+}
+
+fn write_demand_pair<C: wire_repr::RecursiveCursor>(
+    pair: DemandValuePairWriter<C>,
+    metadata: &[u8],
+) -> DemandValueWriteResult<DemandValuePairWriterComplete<C>, C> {
+    let pair = pair.left(|value| value.leaf(|leaf| leaf.value(10)))?;
+    let pair = pair.metadata(metadata)?;
+    let pair = pair.opcode(0x1234)?;
+    pair.right(|value| value.leaf(|leaf| leaf.value(20)))
+}
+
+fn write_demand_value<C: wire_repr::RecursiveCursor>(
+    writer: DemandValueRootWriter<C>,
+    metadata: &[u8],
+) -> DemandValueWriteResult<DemandValueRootWriterComplete<C>, C> {
+    writer.pair(|pair| write_demand_pair(pair, metadata))
+}
+
 #[derive(WireBuilder)]
 #[wire(selector = u8)]
 enum RecursiveWriterCollision {
@@ -878,7 +967,78 @@ fn progressive_recursive_writer_streams_object_and_array_children()
         })?
         .finish()?;
     assert_eq!(written.as_bytes(), [2, 1, 10, 0xaa, 3, 2, 1, 20, 1, 30]);
+
     Ok(())
+}
+#[test]
+fn recursive_demand_geometry_retains_u64_controller_across_child()
+-> Result<(), Box<dyn std::error::Error>> {
+    type Slot = <DemandPair<DemandValue> as wire_repr::__private::RecursiveSlot<0>>::Marker;
+    type Continuation = <DemandPair<DemandValue> as wire_repr::__private::RecursiveBody<
+        __WireReprDemandValueRecursiveCallback,
+        Slot,
+    >>::Continuation;
+    assert_eq!(core::mem::size_of::<Continuation>(), 17);
+    assert_eq!(core::mem::align_of::<Continuation>(), 1);
+    let metadata = [0xaa, 0xbb, 0xcc];
+    let mut output = [0xff; 21];
+    let written = write_demand_value(DemandValue::builder(&mut output[..]), &metadata)?.finish()?;
+    assert_eq!(
+        written.as_bytes(),
+        [
+            2, 3, 0, 0, 0, 0, 0, 0, 0, 1, 10, 0xaa, 0xbb, 0xcc, 0, 0, 0, 0x34, 0x12, 1, 20,
+        ]
+    );
+
+    let view = DemandValue::view::<16>(written.as_bytes())?;
+    let DemandValueVariant::Pair(pair) = view.variant() else {
+        panic!("demand pair")
+    };
+    assert_eq!(pair.metadata(), metadata);
+    assert_eq!(pair.opcode(), 0x1234);
+    assert!(matches!(
+        pair.left()?.variant(),
+        DemandValueVariant::Leaf(value) if value.value() == 10
+    ));
+    assert!(matches!(
+        pair.right()?.variant(),
+        DemandValueVariant::Leaf(value) if value.value() == 20
+    ));
+    Ok(())
+}
+
+#[test]
+fn recursive_demand_continuation_scales_to_u128_without_alignment_padding() {
+    type CompactSlot =
+        <CompactDemandPair<CompactDemandValue> as wire_repr::__private::RecursiveSlot<0>>::Marker;
+    type CompactContinuation =
+        <CompactDemandPair<CompactDemandValue> as wire_repr::__private::RecursiveBody<
+            __WireReprCompactDemandValueRecursiveCallback,
+            CompactSlot,
+        >>::Continuation;
+    assert_eq!(core::mem::size_of::<CompactContinuation>(), 9);
+    assert_eq!(core::mem::align_of::<CompactContinuation>(), 1);
+    type Slot = <WideDemandPair<WideDemandValue> as wire_repr::__private::RecursiveSlot<0>>::Marker;
+    type Continuation = <WideDemandPair<WideDemandValue> as wire_repr::__private::RecursiveBody<
+        __WireReprWideDemandValueRecursiveCallback,
+        Slot,
+    >>::Continuation;
+    assert_eq!(core::mem::size_of::<Continuation>(), 17);
+    assert_eq!(core::mem::align_of::<Continuation>(), 1);
+
+    let mut input = vec![2];
+    input.extend_from_slice(&u128::MAX.to_le_bytes());
+    input.extend_from_slice(&[1, 10]);
+    let error = match WideDemandValue::view::<16>(input) {
+        Ok(_) => panic!("oversized recursive demand extent unexpectedly framed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        WideDemandValueViewError::Recursive(wire_repr::__private::RecursiveError::Layout(
+            wire_repr::LayoutError { field: "metadata" }
+        ))
+    ));
 }
 
 #[test]
@@ -907,10 +1067,24 @@ fn recursive_writer_forwards_an_exact_root_view() -> Result<(), Box<dyn std::err
     let input = [2, 1, 10, 0xaa, 1, 20];
     let source = WriteValue::view::<16>(input)?;
     let mut output = [0u8; 6];
+
     let written = WriteValue::builder(&mut output[..])
         .copy_from(source)?
         .finish()?;
     assert_eq!(written.as_bytes(), input);
+    Ok(())
+}
+#[test]
+fn recursive_writer_reserves_root_state_alias_names() -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = [0u8; 6];
+    let written = RecursiveWriterRootCollision::builder(&mut output[..])
+        .root(|pair| {
+            let pair = pair.left(|value| value.leaf(|leaf| leaf.value(10)))?;
+            let pair = pair.opcode(0xaa)?;
+            pair.right(|value| value.leaf(|leaf| leaf.value(20)))
+        })?
+        .finish()?;
+    assert_eq!(written.as_bytes(), [2, 1, 10, 0xaa, 1, 20]);
     Ok(())
 }
 

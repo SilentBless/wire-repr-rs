@@ -11,6 +11,13 @@ pub(super) fn render(
     root: &Ident,
     runtime: &TokenStream,
 ) -> syn::Result<TokenStream> {
+    if schema
+        .fields
+        .iter()
+        .any(|field| matches!(field.kind, FieldKind::RawBytes(_)))
+    {
+        return super::recursive_demand::render(schema, slot_index, marker, root, runtime);
+    }
     validate(schema, root)?;
 
     let name = &schema.name;
@@ -96,6 +103,7 @@ pub(super) fn render(
             for #self_type #body_where
         {
             type State = #state;
+            type Continuation = u32;
             type Error = #runtime::__private::RecursiveError;
             type View<
                 '__wire_repr_recursive_view,
@@ -110,15 +118,21 @@ pub(super) fn render(
             fn recursive_start(
                 input: &[u8],
                 absolute_offset: usize,
-            ) -> Result<#runtime::__private::RecursiveStep, Self::Error> {
+            ) -> Result<
+                #runtime::__private::RecursiveStep<Self::Continuation>,
+                Self::Error,
+            > {
                 #start_step
             }
 
             fn recursive_resume(
                 input: &[u8],
                 absolute_offset: usize,
-                continuation: u32,
-            ) -> Result<#runtime::__private::RecursiveStep, Self::Error> {
+                continuation: Self::Continuation,
+            ) -> Result<
+                #runtime::__private::RecursiveStep<Self::Continuation>,
+                Self::Error,
+            > {
                 match continuation {
                     #(#resume_arms,)*
                     _ => Err(#runtime::__private::RecursiveError::Layout(

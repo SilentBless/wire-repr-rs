@@ -33,6 +33,7 @@ pub(super) fn render(context: Context<'_>) -> syn::Result<TokenStream> {
         depth,
     } = context;
     let mut grammar_keys = Vec::<String>::new();
+    let mut grammar_entries = Vec::<(&Type, &Type)>::new();
     let recursive_kinds = known
         .iter()
         .zip(recursive_slots)
@@ -45,27 +46,49 @@ pub(super) fn render(context: Context<'_>) -> syn::Result<TokenStream> {
                 .position(|candidate| candidate == &key)
                 .unwrap_or_else(|| {
                     grammar_keys.push(key);
+                    grammar_entries.push((body, slot));
                     grammar_keys.len() - 1
                 });
             Some(kind)
         })
         .collect::<Vec<_>>();
-    let recursive_kind_count = grammar_keys.len();
-    if recursive_kind_count > usize::from(u16::MAX) {
-        return Err(syn::Error::new_spanned(
-            &schema.name,
-            "recursive enum has too many continuation body kinds",
-        ));
-    }
-    let kind_suffix = if recursive_kind_count <= usize::from(u8::MAX) + 1 {
-        "u8"
+    let recursive_kind_count = grammar_entries.len();
+    let continuation = quote::format_ident!(
+        "__WireRepr{}Continuation",
+        schema.name,
+        span = proc_macro2::Span::mixed_site(),
+    );
+    let continuation_variants = grammar_entries
+        .iter()
+        .enumerate()
+        .map(|(kind, (body, slot))| {
+            let variant = quote::format_ident!("Kind{kind}");
+            quote! {
+                #variant(
+                    <#body as #runtime::__private::RecursiveBody<
+                        #callback,
+                        #slot,
+                    >>::Continuation,
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let continuation_declaration = if recursive_kind_count == 1 {
+        let (body, slot) = grammar_entries[0];
+        quote! {
+            type #continuation =
+                <#body as #runtime::__private::RecursiveBody<
+                    #callback,
+                    #slot,
+                >>::Continuation;
+        }
     } else {
-        "u16"
-    };
-    let kind_type = if kind_suffix == "u8" {
-        quote!(u8)
-    } else {
-        quote!(u16)
+        quote! {
+            #[derive(Clone, Copy)]
+            enum #continuation {
+                #(#continuation_variants,)*
+            }
+        }
     };
     let skip_arms = known
         .iter()
@@ -78,12 +101,12 @@ pub(super) fn render(context: Context<'_>) -> syn::Result<TokenStream> {
             let body = &variant.body;
             if let Some(slot) = slot {
                 let kind = recursive_kinds[index].expect("recursive variant kind");
-                let kind = syn::LitInt::new(
-                    &format!("{kind}{kind_suffix}"),
-                    proc_macro2::Span::call_site(),
-                );
-                let store_kind =
-                    (recursive_kind_count > 1).then(|| quote!(kinds[stack_depth].write(#kind);));
+                let stored_continuation = if recursive_kind_count == 1 {
+                    quote!(continuation)
+                } else {
+                    let variant = quote::format_ident!("Kind{kind}");
+                    quote!(#continuation::#variant(continuation))
+                };
                 quote! {
                     value if value == { let selector: #selector_ty = #value; selector } => {
                         let body_start = cursor
@@ -136,8 +159,7 @@ pub(super) fn render(context: Context<'_>) -> syn::Result<TokenStream> {
                                         additional_at_least: cursor - input.len(),
                                     }));
                                 }
-                                pending[stack_depth].write(continuation);
-                                #store_kind
+                                pending[stack_depth].write(#stored_continuation);
                                 stack_depth += 1;
                                 nested_depth = nested_depth.max(
                                     u32::try_from(stack_depth).unwrap_or(u32::MAX),
@@ -199,6 +221,7 @@ pub(super) fn render(context: Context<'_>) -> syn::Result<TokenStream> {
         })
         .collect::<Vec<_>>();
     let mut emitted_kinds = vec![false; recursive_kind_count];
+    let mut single_resume = None;
     let resume_arms = known
         .iter()
         .zip(recursive_slots)
@@ -211,8 +234,8 @@ pub(super) fn render(context: Context<'_>) -> syn::Result<TokenStream> {
             }
             let body = &variant.body;
             let variant_name = &variant.name;
-            Some(quote! {
-                #kind => {
+            let call = quote! {
+                {
                     let body_offset = absolute_offset.checked_add(cursor).ok_or(
                         #view_error::Layout(#runtime::LayoutError {
                             field: stringify!(#variant_name),
@@ -229,31 +252,48 @@ pub(super) fn render(context: Context<'_>) -> syn::Result<TokenStream> {
                         other => #view_error::Recursive(other),
                     })?
                 }
-            })
+            };
+            if recursive_kind_count == 1 {
+                single_resume = Some(call);
+                None
+            } else {
+                let variant = quote::format_ident!("Kind{kind}");
+                Some(quote! {
+                    #continuation::#variant(continuation) => {
+                        match #call {
+                            #runtime::__private::RecursiveStep::Done { advance } => {
+                                #runtime::__private::RecursiveStep::Done { advance }
+                            }
+                            #runtime::__private::RecursiveStep::Child {
+                                advance,
+                                continuation: next,
+                            } => {
+                                #runtime::__private::RecursiveStep::Child {
+                                    advance,
+                                    continuation: #continuation::#variant(next),
+                                }
+                            }
+                        }
+                    }
+                })
+            }
         })
         .collect::<Vec<_>>();
-    let kind_storage = (recursive_kind_count > 1).then(|| {
-        quote! {
-            let mut kinds = [
-                ::core::mem::MaybeUninit::<#kind_type>::uninit();
-                #depth
-            ];
-        }
-    });
-    let read_kind = if recursive_kind_count > 1 {
-        quote! {
-            // SAFETY: the kind slot is initialized before `stack_depth` includes this frame.
-            let kind = usize::from(unsafe { kinds[frame].assume_init() });
-        }
+    let resume_dispatch = if recursive_kind_count == 1 {
+        single_resume.expect("one recursive continuation grammar")
     } else {
-        quote!(let kind = 0usize;)
+        quote! {
+            match continuation {
+                #(#resume_arms,)*
+            }
+        }
     };
     let render_skip = quote! {
+        #continuation_declaration
         let mut pending = [
-            ::core::mem::MaybeUninit::<u32>::uninit();
+            ::core::mem::MaybeUninit::<#continuation>::uninit();
             #depth
         ];
-        #kind_storage
         let mut stack_depth = 0usize;
         let mut cursor = 0usize;
         let mut shape = 0u64;
@@ -296,17 +336,10 @@ pub(super) fn render(context: Context<'_>) -> syn::Result<TokenStream> {
                     });
                 }
                 let frame = stack_depth - 1;
-                // SAFETY: both slots are initialized before `stack_depth` includes this frame.
+                // SAFETY: pending[frame] is written before stack_depth includes the frame;
+                // Continuation: Copy leaves no drop state behind.
                 let continuation = unsafe { pending[frame].assume_init() };
-                #read_kind
-                let step = match kind {
-                    #(#resume_arms,)*
-                    _ => {
-                        return Err(#view_error::Layout(#runtime::LayoutError {
-                            field: "recursive continuation",
-                        }));
-                    }
-                };
+                let step = #resume_dispatch;
                 match step {
                     #runtime::__private::RecursiveStep::Done { advance } => {
                         cursor = cursor.checked_add(advance).ok_or(

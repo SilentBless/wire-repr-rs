@@ -2,7 +2,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 
-use super::super::{EnumSchema, variant_method_names};
+use super::super::{EnumSchema, variant_method_names, variant_type_stems};
 
 pub(in super::super) fn render(
     mut schema: EnumSchema,
@@ -40,6 +40,7 @@ pub(in super::super) fn render(
     let child_builder = super::super::super::fresh_type_ident(&schema.generics, "ChildBuilder");
     let view = super::super::super::fresh_type_ident(&schema.generics, "RecursiveView");
     let known = schema.known_variants().collect::<Vec<_>>();
+    let type_stems = variant_type_stems(&known, &["Root"]);
     let method_names = variant_method_names(&known, &["copy_from"]);
     let write_slots = known
         .iter()
@@ -51,6 +52,35 @@ pub(in super::super) fn render(
             )
         })
         .collect::<syn::Result<Vec<_>>>()?;
+    let result_alias = format_ident!("{}WriteResult", name.unraw());
+    let root_writer_alias = format_ident!("{}RootWriter", name.unraw());
+    let root_complete_alias = format_ident!("{}RootWriterComplete", name.unraw());
+    let writer_aliases = known
+        .iter()
+        .zip(&write_slots)
+        .zip(&type_stems)
+        .filter_map(|((variant, slot), stem)| {
+            let slot = slot.as_ref()?;
+            let body = &variant.body;
+            let writer_alias = format_ident!("{}{}Writer", name.unraw(), stem);
+            let complete_alias = format_ident!("{}{}WriterComplete", name.unraw(), stem);
+            Some(quote! {
+                #[doc = "Initial progressive writer for this recursive variant body."]
+                #vis type #writer_alias<#cursor: #runtime::RecursiveCursor> =
+                    <#body as #runtime::__private::RecursiveWriteBody<
+                        #callback,
+                        #slot,
+                    >>::Writer<#cursor>;
+
+                #[doc = "Completed progressive writer for this recursive variant body."]
+                #vis type #complete_alias<#cursor: #runtime::RecursiveCursor> =
+                    <#body as #runtime::__private::RecursiveWriteBody<
+                        #callback,
+                        #slot,
+                    >>::Complete<#cursor>;
+            })
+        })
+        .collect::<Vec<_>>();
     let recursive_methods = known
         .iter()
         .zip(&write_slots)
@@ -192,6 +222,23 @@ pub(in super::super) fn render(
     };
 
     Ok(quote! {
+        #[doc = "Initial progressive writer for this recursive root."]
+        #vis type #root_writer_alias<#cursor: #runtime::RecursiveCursor> = #writer<#cursor>;
+
+        #[doc = "Completed progressive writer for this recursive root."]
+        #vis type #root_complete_alias<#cursor: #runtime::RecursiveCursor> = #complete<#cursor>;
+
+        #[doc = "Result returned while progressively writing this recursive root."]
+        #vis type #result_alias<T, #cursor: #runtime::RecursiveCursor> = Result<
+            T,
+            #runtime::WriteError<
+                #runtime::__private::RecursiveWriteError,
+                <#cursor as #runtime::RecursiveCursor>::GrowError,
+            >,
+        >;
+
+        #(#writer_aliases)*
+
         #[doc(hidden)]
         #vis struct #detached;
 

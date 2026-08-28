@@ -266,12 +266,13 @@ declared wire width produce nominal field-site errors rather than truncating.
 
 ## Recursive arrays, object continuations, and writers
 
-A closed selector enum may recurse through a generic counted-array body or a fixed sequential
-object body containing `wire::Recursive<T>`. The caller selects a compile-time depth; zero returns
-`DepthExceeded`, while positive values reserve one `[MaybeUninit<u32>; DEPTH]` continuation stack,
-or `4 * DEPTH` bytes. Multiple recursive body grammars add a generated u8/u16 kind stack. Generated
-code never uses recursive Rust calls, allocation, or a per-item offset index. Recursive stored
-counts must fit `u32` even when their physical controller is wider.
+A closed selector enum may recurse through a generic counted-array body or an object body containing
+`wire::Recursive<T>`. The caller selects a compile-time depth; zero returns `DepthExceeded`.
+Generated code uses one typed continuation stack with no recursive Rust calls, allocation, or
+per-item offset index. Continuation payloads are selected at compile time and use transparent
+byte-packed representations: a plain `u64` controller plus tag uses nine bytes and plain `u128`
+uses seventeen. Child-relative alignment adds one packed `usize` body origin only to that grammar.
+Recursive stored counts remain limited to `u32`.
 
 ```rust
 #[derive(WireView, WireBuilder)]
@@ -342,6 +343,38 @@ allocation, or hidden depth stack is retained. Object fields are written in phys
 Recursive arrays stream items and patch their count after the closure; exact root views may be
 copied directly. The detached `WireBuilder` path for a recursive root deliberately exposes exact
 View copying only—semantic recursive construction remains progressive.
+
+Demand geometry may cross a recursive child without exposing the controller setter:
+
+```rust
+#[derive(WireView, WireBuilder)]
+struct RoutedPair<T> {
+    #[wire(le)]
+    metadata_len: u64,
+    left: wire_repr::wire::Recursive<T>,
+    #[wire(bytes = metadata_len)]
+    metadata: wire_repr::wire::Bytes,
+    #[wire(le, pad_before = 1, align_before = 4)]
+    opcode: u16,
+    right: wire_repr::wire::Recursive<T>,
+}
+```
+
+Generated roots expose stable aliases for passing writers through named helpers:
+
+```rust
+fn write_pair<C: wire_repr::RecursiveCursor>(
+    pair: ValuePairWriter<C>,
+    node: &PairNode,
+) -> ValueWriteResult<ValuePairWriterComplete<C>, C> {
+    let pair = pair.left(|value| write_value(value, &node.left))?;
+    let pair = pair.opcode(node.opcode)?;
+    pair.right(|value| write_value(value, &node.right))
+}
+```
+
+The builder is already a movable value. Closures are only the continuation boundary that returns
+the same cursor from a completed child; they do not retain the recursive tree.
 
 ## Examples
 

@@ -108,12 +108,18 @@ write conversions are checked.
 ## Recursive array/object views and writers
 
 A closed selector enum may pass itself directly to a generic body containing either an unsigned
-stored count followed by terminal `wire::Array<T>` or fixed sequential fields separated by
-`wire::Recursive<T>` markers. Such roots expose `Schema::view::<DEPTH>(backing)` for a
-caller-selected const depth; zero returns `DepthExceeded`. Framing uses an iterative
-`[MaybeUninit<u32>; DEPTH]` continuation stack rather than allocation or recursive Rust calls.
-One recursive body grammar costs `4 * DEPTH` stack bytes; multiple body grammars add a generated
-one- or two-byte kind stack per level. Recursive count values must fit `u32`.
+stored count followed by terminal `wire::Array<T>` or object fields separated by
+`wire::Recursive<T>`. Recursive demand bodies may retain a leading unsigned byte controller across
+a child to bound following raw bytes, then apply padding/alignment before a fixed scalar and the
+next child. Such roots expose `Schema::view::<DEPTH>(backing)` for a caller-selected const depth;
+zero returns `DepthExceeded`.
+
+Framing uses one iterative typed continuation stack. Payloads are selected at compile time and use
+transparent byte-packed representations: plain `u32` counts use four bytes, a plain `u64`
+controller plus resume tag uses nine, and plain `u128` uses seventeen. Child-relative alignment
+adds one packed `usize` body origin only to that grammar. Multiple root body grammars form one
+generated continuation enum whose size is the maximum active payload plus its discriminant, not
+the sum of per-grammar stacks.
 
 Recursive item getters return the same generated root view family. Arrays retain at most 384 bytes
 for exact fixed, affine-formula, interval-event, ranked-palette, factorized, recursive-shape,
@@ -123,7 +129,7 @@ offsets, and a forward iterator always retains one physical cursor.
 Schema-specific constant, conversion, validator, and manual-leaf errors crossing recursive
 repetition retain their absolute offset but flatten to finite `RecursiveError::Child` values.
 
-Recursive object bodies compile their fixed segments and child markers into static `start` and
+Recursive object bodies compile physical segments and child markers into static `start` and
 `resume` transitions. Their views retain direct field boundaries only; a recursive child getter
 re-frames its already-proven exact range into the same generated root view family.
 
@@ -132,6 +138,9 @@ cursor through physical-order typestate stages; recursive array items stream thr
 root-wide callback and patch their count after completion. The callback is monomorphized and
 retains no recursive tree, plan, allocation, or hidden depth stack. Exact recursive views can be
 copied through either the progressive root writer or the root's copy-only detached capability.
+Generated aliases such as `ValueRootWriter<C>`, `ValuePairWriter<C>`, and
+`ValueWriteResult<T, C>` allow named helpers to move current writer states without naming hidden
+callback or slot types.
 
 ## Guarantees
 

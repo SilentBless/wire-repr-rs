@@ -418,6 +418,7 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                 for #self_type #body_where
             {
                 type State = #state;
+                type Continuation = u32;
                 type Error = #runtime::__private::RecursiveError;
                 type View<
                     '__wire_repr_recursive_view,
@@ -432,7 +433,10 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                 fn recursive_start(
                     input: &[u8],
                     absolute_offset: usize,
-                ) -> Result<#runtime::__private::RecursiveStep, Self::Error> {
+                ) -> Result<
+                    #runtime::__private::RecursiveStep<Self::Continuation>,
+                    Self::Error,
+                > {
                     let bytes: [u8; #width] = input
                         .get(..#width)
                         .ok_or(#runtime::__private::RecursiveError::NeedMore(
@@ -462,8 +466,11 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                 fn recursive_resume(
                     _input: &[u8],
                     absolute_offset: usize,
-                    continuation: u32,
-                ) -> Result<#runtime::__private::RecursiveStep, Self::Error> {
+                    continuation: Self::Continuation,
+                ) -> Result<
+                    #runtime::__private::RecursiveStep<Self::Continuation>,
+                    Self::Error,
+                > {
                     let remaining = continuation.checked_sub(1).ok_or(
                         #runtime::__private::RecursiveError::Layout(
                             #runtime::LayoutError { field: stringify!(#items_name) },

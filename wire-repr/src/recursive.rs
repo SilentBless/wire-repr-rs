@@ -129,7 +129,7 @@ where
 /// One transition in a generated iterative recursive-body grammar.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RecursiveStep {
+pub enum RecursiveStep<Continuation> {
     /// The body completes after advancing over one final nonrecursive segment.
     Done {
         /// Bytes consumed before body completion.
@@ -139,8 +139,8 @@ pub enum RecursiveStep {
     Child {
         /// Bytes consumed before the child root begins.
         advance: usize,
-        /// Body-local token resumed after the child completes.
-        continuation: u32,
+        /// Body-local state resumed after the child completes.
+        continuation: Continuation,
     },
 }
 
@@ -196,20 +196,25 @@ pub trait RecursiveFrame<Slot> {
 pub trait RecursiveBody<C, Slot>: Sized {
     /// Finite local body state. Recursive child states are never retained here.
     type State: 'static;
+    /// Minimal generated continuation payload retained per active body level.
+    type Continuation: Copy + 'static;
     /// Finite body error.
     type Error: core::error::Error + 'static;
     /// Body view borrowing the immutable root item span.
     type View<'view, const DEPTH: usize>: AsRef<[u8]>;
 
     /// Starts the generated body machine before its first recursive child.
-    fn recursive_start(input: &[u8], absolute_offset: usize) -> Result<RecursiveStep, Self::Error>;
+    fn recursive_start(
+        input: &[u8],
+        absolute_offset: usize,
+    ) -> Result<RecursiveStep<Self::Continuation>, Self::Error>;
 
     /// Resumes the generated body machine after one recursive child completed.
     fn recursive_resume(
         input: &[u8],
         absolute_offset: usize,
-        continuation: u32,
-    ) -> Result<RecursiveStep, Self::Error>;
+        continuation: Self::Continuation,
+    ) -> Result<RecursiveStep<Self::Continuation>, Self::Error>;
 
     /// Frames the complete body and builds compact exact item geometry.
     fn frame_recursive<const DEPTH: usize>(
@@ -243,6 +248,12 @@ pub enum RecursiveWriteError {
         /// Variant or field that owned the failing child.
         field: &'static str,
     },
+    /// Recursive body placement or arithmetic was invalid.
+    #[error("recursive layout for `{field}` is unavailable")]
+    Layout {
+        /// Field whose generated placement failed.
+        field: &'static str,
+    },
     /// A streamed recursive collection exceeded the recursive count limit or stored representation.
     #[error(
         "recursive collection `{field}` count {count} exceeds its recursive limit or controller"
@@ -262,8 +273,10 @@ pub trait RecursiveWriteSlot<const INDEX: usize> {
     type Marker;
 }
 
-/// Restricted progressive cursor accepted by generated recursive writers.
-#[doc(hidden)]
+/// Progressive cursor moved through generated recursive writer states.
+///
+/// Implementations must advance `position` after successful writes and may patch only previously
+/// emitted bytes. `Writer` and `ChildWriter` provide the standard implementations.
 pub trait RecursiveCursor {
     /// Caller-controlled output growth failure.
     type GrowError: core::error::Error + 'static;
@@ -280,6 +293,9 @@ pub trait RecursiveCursor {
         offset: usize,
         bytes: &[u8],
     ) -> Result<(), crate::OutputError<Self::GrowError>>;
+
+    /// Zero-fills forward to one absolute output position.
+    fn fill_to(&mut self, position: usize) -> Result<(), crate::OutputError<Self::GrowError>>;
 
     /// Writes one detached ordinary child through its existing schema capability.
     fn write_value<Schema, Value>(
@@ -307,6 +323,10 @@ impl<O: crate::Output> RecursiveCursor for crate::ChildWriter<'_, O> {
         bytes: &[u8],
     ) -> Result<(), crate::OutputError<Self::GrowError>> {
         crate::ChildWriter::patch_at(self, offset, bytes)
+    }
+
+    fn fill_to(&mut self, position: usize) -> Result<(), crate::OutputError<Self::GrowError>> {
+        crate::ChildWriter::fill_to(self, position)
     }
 
     fn write_value<Schema, Value>(
@@ -346,6 +366,17 @@ impl<O: crate::Output> RecursiveCursor for crate::Writer<O> {
             });
         }
         crate::Writer::write_at(self, offset, bytes)
+    }
+
+    fn fill_to(&mut self, position: usize) -> Result<(), crate::OutputError<Self::GrowError>> {
+        if position < self.position() {
+            return Err(crate::OutputError::Backwards {
+                position,
+                written: self.position(),
+            });
+        }
+        let length = position - self.position();
+        crate::Writer::fill_at(self, self.position(), length, 0)
     }
 
     fn write_value<Schema, Value>(

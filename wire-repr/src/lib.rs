@@ -44,7 +44,7 @@ pub mod __private {
 pub use output::{
     ArrayWriter, ChildWriter, GrowthRequest, Output, OutputError, WriteError, Writer, Written,
 };
-pub use recursive::DepthExceeded;
+pub use recursive::{DepthExceeded, RecursiveCursor};
 pub use schema::{
     ArrayError, ArrayItem, ArrayIter, ArrayView, ByteSelection, ConstantMismatch, Cursor,
     ExactWire, FixedViews, Frame, InvalidFrameExtent, LayoutError, NeedMore, NextView,

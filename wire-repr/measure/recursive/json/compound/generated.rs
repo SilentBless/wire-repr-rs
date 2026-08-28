@@ -68,6 +68,103 @@ enum PairValue {
     Decorated(DecoratedPair<PairValue>),
 }
 
+#[derive(WireView, WireBuilder)]
+struct DemandPair<T> {
+    #[wire(le)]
+    metadata_len: u64,
+    left: wire_repr::wire::Recursive<T>,
+    #[wire(bytes = metadata_len)]
+    metadata: wire_repr::wire::Bytes,
+    #[wire(le)]
+    opcode: u16,
+    right: wire_repr::wire::Recursive<T>,
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum DemandValue {
+    #[wire(value = 1)]
+    Leaf(Bool),
+    #[wire(value = 6)]
+    Pair(DemandPair<DemandValue>),
+}
+
+pub fn demand_view(seed: u64) -> u64 {
+    let input = opaque_demand_input(seed);
+    let view = match DemandValue::view::<32>(input.as_slice()) {
+        Ok(view) => view,
+        Err(_) => return u64::MAX,
+    };
+    let DemandValueVariant::Pair(pair) = view.variant() else {
+        return u64::MAX;
+    };
+    let left = match pair.left() {
+        Ok(left) => left,
+        Err(_) => return u64::MAX,
+    };
+    let right = match pair.right() {
+        Ok(right) => right,
+        Err(_) => return u64::MAX,
+    };
+    let (DemandValueVariant::Leaf(left), DemandValueVariant::Leaf(right)) =
+        (left.variant(), right.variant())
+    else {
+        return u64::MAX;
+    };
+    hash_bytes(pair.metadata())
+        ^ (u64::from(pair.opcode()) << 32)
+        ^ (u64::from(left.value()) << 8)
+        ^ u64::from(right.value())
+}
+
+pub fn demand_build(seed: u64) -> u64 {
+    let (metadata, metadata_len) = opaque_demand_metadata(seed);
+    let metadata = &metadata[..metadata_len];
+    let mut output = [0u8; 64];
+    let complete = match DemandValue::builder(&mut output[..]).pair(|pair| {
+        let pair = pair.left(|value| value.leaf(|leaf| leaf.value(seed as u8)))?;
+        let pair = pair.metadata(metadata)?;
+        let pair = pair.opcode((seed as u16).rotate_left(3))?;
+        pair.right(|value| value.leaf(|leaf| leaf.value((seed as u8).wrapping_add(1))))
+    }) {
+        Ok(complete) => complete,
+        Err(_) => return u64::MAX,
+    };
+    match complete.finish() {
+        Ok(written) => hash_bytes(written.as_bytes()),
+        Err(_) => u64::MAX,
+    }
+}
+
+#[inline(never)]
+fn opaque_demand_input(seed: u64) -> PairInput {
+    let metadata_len = seed as usize % 16;
+    let mut input = PairInput {
+        bytes: [0; 256],
+        len: 0,
+    };
+    input.bytes[0] = 6;
+    input.bytes[1..9].copy_from_slice(&(metadata_len as u64).to_le_bytes());
+    input.bytes[9..11].copy_from_slice(&[1, seed as u8]);
+    for index in 0..metadata_len {
+        input.bytes[11 + index] = (seed as u8).wrapping_mul(3).wrapping_add(index as u8);
+    }
+    let opcode = 11 + metadata_len;
+    input.bytes[opcode..opcode + 2].copy_from_slice(&(seed as u16).rotate_left(3).to_le_bytes());
+    input.bytes[opcode + 2..opcode + 4].copy_from_slice(&[1, (seed as u8).wrapping_add(1)]);
+    input.len = opcode + 4;
+    input
+}
+
+#[inline(never)]
+fn opaque_demand_metadata(seed: u64) -> ([u8; 16], usize) {
+    let metadata_len = seed as usize % 16;
+    let mut metadata = [0u8; 16];
+    for index in 0..metadata_len {
+        metadata[index] = (seed as u8).wrapping_mul(3).wrapping_add(index as u8);
+    }
+    (metadata, metadata_len)
+}
 pub fn pair_view(seed: u64) -> u64 {
     let input = opaque_pair_input(seed);
     let root = match PairValue::view::<64>(input.as_slice()) {

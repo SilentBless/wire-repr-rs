@@ -1,4 +1,4 @@
-//! error: recursive object bodies currently support recursive markers, plain fixed scalars, and fixed byte arrays
+//! error: recursive demand body currently requires controller, child, bounded bytes, scalar, child
 
 use wire_repr::WireBuilder;
 

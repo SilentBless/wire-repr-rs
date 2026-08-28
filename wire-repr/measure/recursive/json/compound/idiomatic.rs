@@ -43,6 +43,72 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     })
 }
 
+pub fn demand_view(seed: u64) -> u64 {
+    let input = opaque_demand_input(seed);
+    let bytes = input.as_slice();
+    if bytes.first() != Some(&6) || bytes.get(9) != Some(&1) {
+        return u64::MAX;
+    }
+    let metadata_len = u64::from_le_bytes(bytes[1..9].try_into().unwrap_or([0; 8])) as usize;
+    let metadata_end = 11 + metadata_len;
+    if metadata_end + 4 != bytes.len() || bytes.get(metadata_end + 2) != Some(&1) {
+        return u64::MAX;
+    }
+    let opcode = u16::from_le_bytes(
+        bytes[metadata_end..metadata_end + 2]
+            .try_into()
+            .unwrap_or([0; 2]),
+    );
+    hash_bytes(&bytes[11..metadata_end])
+        ^ (u64::from(opcode) << 32)
+        ^ (u64::from(bytes[10]) << 8)
+        ^ u64::from(bytes[metadata_end + 3])
+}
+
+pub fn demand_build(seed: u64) -> u64 {
+    let (metadata, metadata_len) = opaque_demand_metadata(seed);
+    let mut output = [0u8; 64];
+    output[0] = 6;
+    output[1..9].copy_from_slice(&(metadata_len as u64).to_le_bytes());
+    output[9..11].copy_from_slice(&[1, seed as u8]);
+    output[11..11 + metadata_len].copy_from_slice(&metadata[..metadata_len]);
+    let opcode = 11 + metadata_len;
+    output[opcode..opcode + 2].copy_from_slice(&(seed as u16).rotate_left(3).to_le_bytes());
+    output[opcode + 2..opcode + 4].copy_from_slice(&[1, (seed as u8).wrapping_add(1)]);
+    hash_bytes(&output[..opcode + 4])
+}
+
+#[inline(never)]
+fn opaque_demand_metadata(seed: u64) -> ([u8; 16], usize) {
+    let metadata_len = seed as usize % 16;
+    let mut metadata = [0u8; 16];
+    for index in 0..metadata_len {
+        metadata[index] = (seed as u8).wrapping_mul(3).wrapping_add(index as u8);
+    }
+    (metadata, metadata_len)
+}
+
+#[inline(never)]
+
+fn opaque_demand_input(seed: u64) -> PairInput {
+    let metadata_len = seed as usize % 16;
+    let mut input = PairInput {
+        bytes: [0; 256],
+        len: 0,
+    };
+    input.bytes[0] = 6;
+    input.bytes[1..9].copy_from_slice(&(metadata_len as u64).to_le_bytes());
+    input.bytes[9..11].copy_from_slice(&[1, seed as u8]);
+    for index in 0..metadata_len {
+        input.bytes[11 + index] = (seed as u8).wrapping_mul(3).wrapping_add(index as u8);
+    }
+    let opcode = 11 + metadata_len;
+    input.bytes[opcode..opcode + 2].copy_from_slice(&(seed as u16).rotate_left(3).to_le_bytes());
+    input.bytes[opcode + 2..opcode + 4].copy_from_slice(&[1, (seed as u8).wrapping_add(1)]);
+    input.len = opcode + 4;
+    input
+}
+
 pub fn pair_view(seed: u64) -> u64 {
     let input = opaque_pair_input(seed);
     let bytes = input.as_slice();

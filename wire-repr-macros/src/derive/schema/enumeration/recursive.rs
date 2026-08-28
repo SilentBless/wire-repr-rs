@@ -78,7 +78,7 @@ pub(super) fn render_view(
         })
         .collect::<Vec<_>>();
     let duplicate_selector = quote!(false #(|| #duplicate_checks)*);
-    let type_stems = variant_type_stems(&known, false);
+    let type_stems = variant_type_stems(&known, &[]);
     let error_variant_names = type_stems
         .iter()
         .map(|stem| format_ident!("Variant{stem}"))

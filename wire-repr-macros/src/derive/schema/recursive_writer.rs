@@ -14,7 +14,17 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
             .iter()
             .any(|&index| matches!(schema.fields[index].kind, FieldKind::Recursive(_)))
         {
-            rendered.extend(render_object(schema, &slot, runtime)?);
+            if schema
+                .fields
+                .iter()
+                .any(|field| matches!(field.kind, FieldKind::RawBytes(_)))
+            {
+                rendered.extend(super::recursive_demand_writer::render(
+                    schema, &slot, runtime,
+                )?);
+            } else {
+                rendered.extend(render_object(schema, &slot, runtime)?);
+            }
         } else if slot.fields.len() == 1 && schema.fields.len() == 2 && slot.fields[0] == 1 {
             rendered.extend(render_array(schema, &slot, runtime)?);
         }
@@ -475,7 +485,7 @@ fn render_array(
     })
 }
 
-fn write_marker(schema: &Schema, slot: &RecursiveSlot) -> Ident {
+pub(super) fn write_marker(schema: &Schema, slot: &RecursiveSlot) -> Ident {
     format_ident!(
         "__WireRepr{}RecursiveWriteSlot{}",
         schema.name.unraw(),

@@ -4,6 +4,8 @@ mod computed;
 mod enumeration;
 mod model;
 mod recursive;
+mod recursive_demand;
+mod recursive_demand_writer;
 mod recursive_object;
 mod recursive_writer;
 mod view;

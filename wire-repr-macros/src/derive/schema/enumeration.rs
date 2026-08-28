@@ -45,7 +45,7 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
     let backing = fresh_type_ident(&schema.generics, "Backing");
 
     let known = schema.known_variants().collect::<Vec<_>>();
-    let type_stems = variant_type_stems(&known, false);
+    let type_stems = variant_type_stems(&known, &[]);
     let error_variant_names = type_stems
         .iter()
         .map(|stem| format_ident!("Variant{stem}"))
@@ -922,7 +922,8 @@ pub(super) fn render_builder(
     };
     let self_type = quote!(#name #type_generics);
     let marker = quote!(fn() -> #self_type);
-    let type_stems = variant_type_stems(&known, schema.unknown().is_some());
+    let reserved = schema.unknown().is_some().then_some("Unknown");
+    let type_stems = variant_type_stems(&known, reserved.as_slice());
     let detached_types = type_stems
         .iter()
         .map(|stem| format_ident!("{}{stem}Builder", name.unraw()))
@@ -1501,11 +1502,11 @@ fn generic_arguments(generics: &Generics) -> Vec<TokenStream> {
         })
         .collect()
 }
-fn variant_type_stems(variants: &[&Variant], reserve_unknown: bool) -> Vec<String> {
-    let mut used = BTreeSet::new();
-    if reserve_unknown {
-        used.insert("Unknown".to_owned());
-    }
+fn variant_type_stems(variants: &[&Variant], reserved: &[&str]) -> Vec<String> {
+    let mut used = reserved
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
     variants
         .iter()
         .map(|variant| {

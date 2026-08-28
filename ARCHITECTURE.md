@@ -99,22 +99,29 @@ Generated descriptors and getters specialize by geometry:
 - controller values are retained only when later geometry needs them.
 
 The shipped recursive read capability covers a closed static enum whose recursive variants pass
-the root directly either to a generic `count` plus terminal `wire::Array<T>` body or to a fixed
-sequential object body containing `wire::Recursive<T>` fields. The generated entry point is
-`Schema::view::<DEPTH>(backing)` for any caller-selected const depth, including zero as a typed
+the root directly either to a generic `count` plus terminal `wire::Array<T>` body or to a generated
+object grammar containing `wire::Recursive<T>` fields. Object grammars cover fixed segments and a
+demand continuation with a leading unsigned byte controller, a recursive child, bounded raw bytes,
+an optional padded/aligned fixed scalar, and a following recursive child. The generated entry point
+is `Schema::view::<DEPTH>(backing)` for any caller-selected const depth, including zero as a typed
 `DepthExceeded` boundary.
 
-Generated root skipping uses one iterative `[MaybeUninit<u32>; DEPTH]` continuation stack, hidden
-static callbacks, and the same backing-generic root `ViewImpl`; it has no registry, dynamic
-dispatch, allocation, recursive Rust calls, or per-item offset index. One recursive body kind costs
-four bytes per permitted level, so depth `128` reserves 512 bytes. An enum with multiple recursive
-body grammars additionally retains a generated one- or two-byte body-kind stack per level.
-Counted arrays use the continuation as an authoritative remaining count. Object bodies compile
-fixed segments and recursive fields into `start`/`resume` transitions; after a child completes, the
-machine resumes at the following scalar, byte array, or child. Their local state keeps one boundary
-per direct physical field, while a recursive child getter re-frames only its already-proven exact
-range. Progressive recursive writers use the corresponding body grammar but transfer one output
-cursor by value through consuming typestate stages; they retain no recursive value tree.
+Generated root skipping uses one iterative typed continuation stack, hidden static callbacks, and
+the same backing-generic root `ViewImpl`; it has no registry, dynamic dispatch, allocation,
+recursive Rust calls, or per-item offset index. Each body chooses the minimal `Copy` continuation
+payload known at compile time; counted arrays and fixed pairs use `u32`. Demand controllers are
+packed without native alignment: a plain `u64` plus resume tag occupies nine bytes per active
+level, while plain `u128` occupies seventeen. Child-relative alignment also retains the body
+origin, adding one packed `usize` only for that grammar (seventeen bytes for aligned `u64` on a
+64-bit target). Multiple body grammars form a generated enum sized for the maximum payload plus its
+discriminant rather than the sum of every body stack.
+
+Object bodies compile physical segments and recursive fields into `start`/`resume` transitions;
+after a child completes, the machine resumes at bounded bytes, padding/alignment, a fixed scalar,
+or the following child. Local view state keeps direct physical boundaries only, while a recursive
+child getter re-frames its already-proven exact range. Progressive recursive writers use the
+corresponding body grammar but transfer one output cursor by value through consuming typestate
+stages; they retain no recursive value tree.
 
 The current fixed-layout vertical cannot inspect a generic child's associated fixed-size capability
 during macro expansion. Instantiating a nonterminal child whose `FIXED_SIZE` is `None` therefore
@@ -338,6 +345,11 @@ items may be built semantically or copied from exact root views. The detached `W
 for a recursive root intentionally supports exact View copying only; semantic recursive
 construction stays on the progressive output-owning path rather than retaining an encoded tree.
 
+Generated roots also expose stable writer-state aliases such as `ValueRootWriter<C>` and
+`ValuePairWriter<C>`, plus `ValueWriteResult<T, C>`. Callers may therefore move the current writer
+through named recursive helpers without exposing hidden callback or slot types; closures remain
+only the scoped continuation boundary where a child returns the same cursor to its parent.
+
 Generated views implement the same item write capability by copying their exact represented bytes.
 `items.copy_from(source.items())` forwards a parent-validated array as one range and patches its
 authoritative count; a terminal array validates deferred item geometry once before copying. No
@@ -425,9 +437,9 @@ runtime budget.
 ## 11. Implementation order
 
 The fixed, demand-geometry, dependency, collection, enum, bitfield, root-selection, computed,
-sequence, cursor, bounded-recursive-array, recursive-object, recursive-writer, nested-selection,
-fuzz, protocol-fixture, example, and release-verification verticals are complete. General
-traversal is the remaining future composition surface.
+sequence, cursor, bounded-recursive-array, recursive-object, recursive-demand, recursive-writer,
+nested-selection, fuzz, protocol-fixture, example, and release-verification verticals are complete.
+General traversal is the remaining future composition surface.
 
 Each shipped vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads,
 behavioral tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not
@@ -439,14 +451,14 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fifteen discovered zones and fifty-four cases: fixed scalars and
+The current mandatory corpus has fifteen discovered zones and fifty-six cases: fixed scalars and
 constants, explicit logical conversions, one generic nested child, a four-level compound generic
 lattice, fixed byte arrays with multiple nested children, dynamic geometry, conditional
 controllers, runtime collection decode/build/copy, static enum decode/build/copy, nominal and
 inline bitfields, fragmented and nested physical selections, fixed and dynamic computed fields,
 fixed and variable homogeneous views, heterogeneous cursors, all eight compact recursive geometry
-forms plus replay, recursive pair continuations, progressive recursive object and array builds, and
-fixed, automatic, and callback-driven output growth. Each covers read and
+forms plus replay, recursive pair and demand continuations, progressive recursive object/array/
+demand builds, and fixed, automatic, and callback-driven output growth. Each covers read and
 write paths where applicable. The measurement tool inspects final linked consumer symbols for code
 shape, call topology, stack, allocation, and dispatch evidence.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
