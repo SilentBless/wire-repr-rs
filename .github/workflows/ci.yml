@@ -14,6 +14,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust 1.91.0
         run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+      - name: Install Rizin 0.9.1
+        run: |
+          curl -fsSL https://github.com/rizinorg/rizin/releases/download/v0.9.1/rizin-v0.9.1-static-x86_64.tar.xz -o "$RUNNER_TEMP/rizin.tar.xz"
+          echo "9102249a9f0b6319c5334a2e5cf8d9cc3f2035e1d3def027c41f6a90f647e8cf  $RUNNER_TEMP/rizin.tar.xz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/rizin"
+          tar -xJf "$RUNNER_TEMP/rizin.tar.xz" -C "$RUNNER_TEMP/rizin"
+          echo "$RUNNER_TEMP/rizin/bin" >> "$GITHUB_PATH"
       - name: Format
         run: cargo +1.91.0 fmt --all -- --check
       - name: Check
@@ -30,6 +37,45 @@ jobs:
         run: cargo +1.91.0 clippy --workspace --all-targets -- -D warnings
       - name: Documentation
         run: RUSTDOCFLAGS='-D warnings' cargo +1.91.0 doc --workspace --no-deps
+
+  artifact-platforms:
+    name: artifact (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-15
+          - name: windows-x86_64
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install Rust 1.91.0
+        run: rustup toolchain install 1.91.0 --profile minimal
+      - name: Install Rizin 0.9.1 on macOS
+        if: runner.os == 'macOS'
+        run: |
+          curl -fsSL https://github.com/rizinorg/rizin/releases/download/v0.9.1/rizin-macos-v0.9.1.pkg -o "$RUNNER_TEMP/rizin.pkg"
+          echo "949f56d56698bdad2f39996badc10d0ada13033fad5fc7ef4fe5eaa89d945e94  $RUNNER_TEMP/rizin.pkg" | shasum -a 256 --check
+          sudo installer -pkg "$RUNNER_TEMP/rizin.pkg" -target /
+      - name: Install Rizin 0.9.1 on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "rizin.zip"
+          Invoke-WebRequest "https://github.com/rizinorg/rizin/releases/download/v0.9.1/rizin-windows-static-v0.9.1.zip" -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne "2d14e0a6ecba1196dcd742d63de83bbaffed2a7a78ef5a0a9b4e92a0f73d1d28") {
+            throw "Rizin archive checksum mismatch: $actual"
+          }
+          $destination = Join-Path $env:RUNNER_TEMP "rizin"
+          Expand-Archive $archive -DestinationPath $destination
+          Join-Path $destination "rizin-win-installer-vs2019_static-64/bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Verify artifact analysis and native debug information
+        run: cargo +1.91.0 test -p wire-repr-measure --test harness
+      - name: Verify representative generated workload
+        run: cargo +1.91.0 run -p wire-repr-measure --release -- run --workload collection/runtime/compound --filter copy --json
 
   measure-inventory:
     runs-on: ubuntu-24.04
@@ -59,6 +105,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust 1.91.0
         run: rustup toolchain install 1.91.0 --profile minimal
+      - name: Install Rizin 0.9.1
+        run: |
+          curl -fsSL https://github.com/rizinorg/rizin/releases/download/v0.9.1/rizin-v0.9.1-static-x86_64.tar.xz -o "$RUNNER_TEMP/rizin.tar.xz"
+          echo "9102249a9f0b6319c5334a2e5cf8d9cc3f2035e1d3def027c41f6a90f647e8cf  $RUNNER_TEMP/rizin.tar.xz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/rizin"
+          tar -xJf "$RUNNER_TEMP/rizin.tar.xz" -C "$RUNNER_TEMP/rizin"
+          echo "$RUNNER_TEMP/rizin/bin" >> "$GITHUB_PATH"
       - name: Build measurement tool
         run: cargo +1.91.0 build -p wire-repr-measure --release
       - name: Measure generated code and runtime performance
