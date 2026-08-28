@@ -42,7 +42,7 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_vtable_references == 0"
+assert = "generated_artifact_transitive_indirect_calls == 0"
 [[cases.rules]]
 name = "idiomatic latency"
 level = "error"
@@ -107,7 +107,7 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_vtable_references == 0"
+assert = "generated_artifact_transitive_indirect_calls == 0"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"

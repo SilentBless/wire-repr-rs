@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 use thiserror::Error;
 
 use crate::formula::FormulaEngine;
-use crate::measure::artifact::stack::{StackError, stack_bytes};
 use crate::measure::artifact::{Analyzer, ArtifactError, Metrics as ArtifactMetrics};
 use crate::measure::harness::{Harness, HarnessBuilder, HarnessError};
 use crate::measure::runtime::{RuntimeError, calibration_next, interleaved_roles, summarize};
@@ -34,17 +32,9 @@ pub enum EngineError {
     #[error(transparent)]
     Artifact(#[from] ArtifactError),
     #[error(transparent)]
-    Stack(#[from] StackError),
-    #[error(transparent)]
     Runtime(#[from] RuntimeError),
     #[error(transparent)]
     Policy(#[from] PolicyError),
-    #[error("failed to read {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("failed to query compiler: {0}")]
     Compiler(String),
     #[error("workload filter selected no cases")]
@@ -98,14 +88,7 @@ pub fn run(options: &Options) -> Result<Report, EngineError> {
             let mut states = BTreeMap::new();
             for (role, source) in &workload.roles {
                 let harness = builder.build(source, &case.entry)?;
-                let mut artifact =
-                    Analyzer::open(harness.executable())?.analyze("measure_entry")?;
-                let assembly =
-                    fs::read_to_string(harness.assembly()).map_err(|source| EngineError::Io {
-                        path: harness.assembly().to_owned(),
-                        source,
-                    })?;
-                artifact.stack_bytes = Some(stack_bytes(&assembly, "measure_entry")?);
+                let artifact = Analyzer::open(harness.executable())?.analyze("measure_entry")?;
                 states.insert(
                     role.clone(),
                     RoleState {
@@ -264,34 +247,27 @@ fn insert_artifact(values: &mut BTreeMap<String, f64>, role: &str, metrics: &Art
         ("instructions", metrics.instructions),
         ("branches", metrics.branches),
         ("direct_calls", metrics.direct_calls),
+        ("linkage_calls", metrics.linkage_calls),
         ("tail_calls", metrics.tail_calls),
         ("indirect_calls", metrics.indirect_calls),
-        ("loads", metrics.loads),
-        ("stores", metrics.stores),
         ("panic_paths", metrics.panic_paths),
         ("allocation_symbols", metrics.allocation_symbols),
-        ("vtable_references", metrics.vtable_references),
         ("reachable_functions", metrics.reachable_functions),
         ("transitive_instructions", metrics.transitive_instructions),
         ("transitive_branches", metrics.transitive_branches),
         ("transitive_direct_calls", metrics.transitive_direct_calls),
+        ("transitive_linkage_calls", metrics.transitive_linkage_calls),
         ("transitive_tail_calls", metrics.transitive_tail_calls),
         (
             "transitive_indirect_calls",
             metrics.transitive_indirect_calls,
         ),
-        ("transitive_loads", metrics.transitive_loads),
-        ("transitive_stores", metrics.transitive_stores),
         ("transitive_panic_paths", metrics.transitive_panic_paths),
         (
             "transitive_allocation_symbols",
             metrics.transitive_allocation_symbols,
         ),
         ("max_call_depth", metrics.max_call_depth),
-        (
-            "transitive_vtable_references",
-            metrics.transitive_vtable_references,
-        ),
     ] {
         values.insert(format!("{role}_artifact_{name}"), value as f64);
     }

@@ -469,8 +469,9 @@ selections, fixed and dynamic computed fields, fixed and variable homogeneous vi
 heterogeneous cursors, all eight compact recursive geometry forms plus replay, recursive pair and
 demand continuations, progressive recursive object/array/demand builds, and fixed,
 borrowed-growable, owned-growable, and callback-driven output. Each covers read and write paths
-where applicable. The measurement tool inspects final linked consumer symbols for code shape, call
-topology, stack, allocation, and dispatch evidence.
+where applicable. Pinned Rizin 0.9.1 analyzes final linked ELF, Mach-O, and PE consumers through an
+exported `measure_entry`; Windows builds additionally load their generated PDB. Artifact evidence
+keeps named linker calls distinct from unresolved indirect dispatch.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
 IR may explain an optimization result but is not treated as a latency oracle. State and
 artifact-size probes remain isolated from measured hot-path implementations.

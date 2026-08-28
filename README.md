@@ -213,12 +213,15 @@ plan.
 ## 🔬 What reaches the CPU
 
 The repository compares every shipped layout class against independent idiomatic handwritten and
-best-safe implementations. The measurement project inspects final linked symbols, call topology,
-stack, allocation and dispatch evidence, then runs calibrated interleaved runtime samples.
+best-safe implementations. A pinned Rizin backend inspects final ELF, Mach-O, and PE consumers,
+separating named linker calls from unresolved dispatch before runtime samples are interleaved.
 
 > [!NOTE]
 > LLVM instruction counts are diagnostic evidence, not a latency oracle. Workload-local formulas
 > own hard failures and optimization attention.
+>
+> Repository contributors running the measurement harness need Rizin 0.9.1 on `PATH`; CI installs
+> the release package by checksum. `WIRE_REPR_RIZIN` may point to another executable location.
 
 The core remains featureless and allocation-free; optional application storage appears only through
 caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/ARCHITECTURE.md)

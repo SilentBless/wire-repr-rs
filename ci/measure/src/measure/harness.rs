@@ -74,6 +74,7 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+debug = 2
 strip = false
 
 [workspace]
@@ -83,9 +84,7 @@ strip = false
         write(&root.join("Cargo.toml"), &manifest)?;
         write(&source_dir.join("main.rs"), &main_source(&role, entry))?;
 
-        let assembly = root.join("measure.s");
         let build_target = self.target.join("build");
-        let emit = format!("--emit=link,asm={}", assembly.display());
         let output = Command::new("cargo")
             .arg(format!("+{}", self.toolchain))
             .args([
@@ -95,7 +94,6 @@ strip = false
                 &root.join("Cargo.toml").to_string_lossy(),
                 "--message-format=json-render-diagnostics",
                 "--",
-                &emit,
                 "-C",
                 "link-dead-code=yes",
             ])
@@ -115,15 +113,13 @@ strip = false
             .filter_map(|message| message.executable)
             .next_back()
             .ok_or_else(|| HarnessError::Build("cargo did not report an executable".to_owned()))?;
-        if !assembly.is_file() {
-            return Err(HarnessError::Build(format!(
-                "rustc did not emit {}",
-                assembly.display()
-            )));
-        }
+        let debug_info = executable
+            .with_extension("pdb")
+            .is_file()
+            .then(|| executable.with_extension("pdb"));
         Ok(Harness {
             executable,
-            assembly,
+            debug_info,
         })
     }
 }
@@ -131,7 +127,7 @@ strip = false
 #[derive(Clone, Debug)]
 pub struct Harness {
     executable: PathBuf,
-    assembly: PathBuf,
+    debug_info: Option<PathBuf>,
 }
 
 impl Harness {
@@ -141,8 +137,8 @@ impl Harness {
     }
 
     #[must_use]
-    pub fn assembly(&self) -> &Path {
-        &self.assembly
+    pub fn debug_info(&self) -> Option<&Path> {
+        self.debug_info.as_deref()
     }
 
     pub fn check(&self, seeds: &[i64]) -> Result<Vec<(i64, u64)>, HarnessError> {
@@ -236,6 +232,12 @@ mod implementation;
 pub extern "C" fn measure_entry(seed: u64) -> u64 {{
     implementation::{entry}(seed)
 }}
+
+#[cfg(target_os = "windows")]
+#[used]
+#[unsafe(link_section = ".drectve")]
+static EXPORT_MEASURE_ENTRY: [u8; b" /EXPORT:measure_entry".len()] =
+    *b" /EXPORT:measure_entry";
 
 fn main() {{
     let mut arguments = std::env::args().skip(1);

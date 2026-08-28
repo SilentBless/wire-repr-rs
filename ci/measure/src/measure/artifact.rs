@@ -1,30 +1,25 @@
-#[cfg(test)]
-mod limit;
-pub mod stack;
-#[cfg(test)]
-mod tail;
-#[cfg(test)]
-mod vtable;
-
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use capstone::arch::ArchOperand;
-use capstone::arch::arm64::Arm64OperandType;
-use capstone::arch::x86::{X86OperandType, X86Reg};
-use capstone::prelude::*;
-use object::{
-    Object, ObjectSection, ObjectSymbol, Relocation, RelocationFlags, RelocationKind,
-    RelocationTarget, SectionKind, SymbolKind,
-};
+use rzpipe::{RzPipe, RzPipeSpawnOptions};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
 const ALLOCATION_MARKERS: &[&str] = &[
     "__rust_alloc",
     "__rust_realloc",
     "__rust_dealloc",
     "exchange_malloc",
+    "::alloc::alloc",
+    "raw_vec",
+    "RawVec",
+    "malloc",
+    "realloc",
+    "HeapAlloc",
 ];
 const PANIC_MARKERS: &[&str] = &[
     "panic",
@@ -32,6 +27,8 @@ const PANIC_MARKERS: &[&str] = &[
     "slice_index",
     "copy_from_slice",
     "assert_failed",
+    "unwrap_failed",
+    "expect_failed",
 ];
 const MAX_REACHABLE_FUNCTIONS: usize = 256;
 
@@ -41,23 +38,19 @@ pub struct Metrics {
     pub instructions: u64,
     pub branches: u64,
     pub direct_calls: u64,
+    pub linkage_calls: u64,
     pub tail_calls: u64,
     pub indirect_calls: u64,
-    pub loads: u64,
-    pub stores: u64,
     pub panic_paths: u64,
-    pub vtable_references: u64,
     pub allocation_symbols: u64,
     pub reachable_functions: u64,
     pub transitive_instructions: u64,
     pub transitive_branches: u64,
     pub transitive_direct_calls: u64,
+    pub transitive_linkage_calls: u64,
     pub transitive_tail_calls: u64,
     pub transitive_indirect_calls: u64,
-    pub transitive_loads: u64,
-    pub transitive_stores: u64,
     pub transitive_panic_paths: u64,
-    pub transitive_vtable_references: u64,
     pub transitive_allocation_symbols: u64,
     pub max_call_depth: u64,
     pub stack_bytes: Option<u64>,
@@ -65,816 +58,398 @@ pub struct Metrics {
 
 #[derive(Debug, Error)]
 pub enum ArtifactError {
-    #[error("failed to read artifact {path:?}: {source}")]
+    #[error("failed to access artifact {path:?}: {source}")]
     Read {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to parse artifact {path:?}: {source}")]
-    Object {
-        path: PathBuf,
+    #[error("artifact path {0:?} is not valid UTF-8")]
+    Path(PathBuf),
+    #[error("invalid artifact symbol `{0}`")]
+    InvalidSymbol(String),
+    #[error("failed to start Rizin for {path:?}: {detail}")]
+    Start { path: PathBuf, detail: String },
+    #[error("Rizin command `{command}` failed: {detail}")]
+    Command { command: String, detail: String },
+    #[error("Rizin returned invalid JSON for `{command}`: {source}")]
+    Json {
+        command: String,
         #[source]
-        source: object::Error,
+        source: serde_json::Error,
     },
     #[error("artifact {path:?} has no text symbol `{symbol}`")]
     MissingSymbol { path: PathBuf, symbol: String },
     #[error("transitive analysis of `{symbol}` exceeds {limit} reachable functions")]
     TraversalLimit { symbol: String, limit: usize },
-    #[error("unsupported artifact architecture {0:?}")]
-    Unsupported(object::Architecture),
-    #[error("failed to disassemble `{symbol}`: {source}")]
-    Disassemble {
-        symbol: String,
-        #[source]
-        source: capstone::Error,
-    },
 }
 
 pub struct Analyzer {
     path: PathBuf,
-    data: Vec<u8>,
+    pipe: RefCell<RzPipe>,
 }
 
 impl Analyzer {
     pub fn open(path: &Path) -> Result<Self, ArtifactError> {
-        let data = fs::read(path).map_err(|source| ArtifactError::Read {
+        fs::metadata(path).map_err(|source| ArtifactError::Read {
             path: path.to_owned(),
             source,
         })?;
-        object::File::parse(&*data).map_err(|source| ArtifactError::Object {
-            path: path.to_owned(),
-            source,
-        })?;
+        let artifact = path
+            .to_str()
+            .ok_or_else(|| ArtifactError::Path(path.to_owned()))?;
+        let executable = env::var("WIRE_REPR_RIZIN").unwrap_or_else(|_| "rizin".to_owned());
+        let options = RzPipeSpawnOptions {
+            exepath: executable,
+            args: vec!["-2"],
+        };
+        let mut pipe =
+            RzPipe::spawn(artifact, Some(options)).map_err(|source| ArtifactError::Start {
+                path: path.to_owned(),
+                detail: source.to_string(),
+            })?;
+        command(&mut pipe, "e scr.color=0")?;
+        let pdb = path.with_extension("pdb");
+        if pdb.is_file() {
+            command(&mut pipe, &format!("idp {}", command_path(&pdb)))?;
+        }
         Ok(Self {
             path: path.to_owned(),
-            data,
+            pipe: RefCell::new(pipe),
         })
     }
 
     pub fn analyze(&self, symbol: &str) -> Result<Metrics, ArtifactError> {
-        let file = object::File::parse(&*self.data).map_err(|source| ArtifactError::Object {
-            path: self.path.clone(),
-            source,
-        })?;
-        let symbols = symbols(&file);
-        let relocations = relocation_values(&file, &symbols);
-        let vtables = vtable_candidates(&file, &symbols, &relocations.pointers);
-        let root = find_symbol(&symbols, symbol).ok_or_else(|| ArtifactError::MissingSymbol {
-            path: self.path.clone(),
-            symbol: symbol.to_owned(),
-        })?;
-        let disassembler = disassembler(file.architecture())?;
-        let mut visited = BTreeSet::new();
-        let mut metrics = Metrics::default();
-        let mut pending = vec![(root.address, 0u64)];
-
-        while let Some((address, depth)) = pending.pop() {
-            if !register_function(&mut visited, address, symbol)? {
-                continue;
-            }
-            let Some(function) = symbols.get(&address) else {
-                continue;
-            };
-            let bytes = symbol_bytes(&file, function)?;
-            let local = analyze_bytes(
-                &disassembler,
-                bytes,
-                function.address,
-                &symbols,
-                &vtables,
-                &relocations.pointers,
-                &relocations.linkage,
-            )
-            .map_err(|source| ArtifactError::Disassemble {
-                symbol: function.name.clone(),
-                source,
+        if !identifier(symbol) {
+            return Err(ArtifactError::InvalidSymbol(symbol.to_owned()));
+        }
+        self.run("aa")?;
+        let symbols: Vec<SymbolInfo> = self.json("isj")?;
+        let address = symbols
+            .iter()
+            .find(|entry| entry.name == symbol)
+            .or_else(|| {
+                symbols
+                    .iter()
+                    .find(|entry| entry.name.strip_prefix('_') == Some(symbol))
+            })
+            .map(|entry| entry.vaddr)
+            .ok_or_else(|| ArtifactError::MissingSymbol {
+                path: self.path.clone(),
+                symbol: symbol.to_owned(),
             })?;
-            if address == root.address {
-                metrics.text_bytes = function.size;
-                metrics.instructions = local.instructions;
-                metrics.branches = local.branches;
-                metrics.direct_calls = local.direct_calls;
-                metrics.tail_calls = local.tail_calls;
-                metrics.indirect_calls = local.indirect_calls;
-                metrics.loads = local.loads;
-                metrics.stores = local.stores;
-                metrics.panic_paths = local.panic_paths;
-                metrics.vtable_references = local.vtable_references;
-                metrics.allocation_symbols = local.allocation_symbols;
+        let imports: Vec<ImportInfo> = self.json("iij")?;
+        let import_addresses = imports
+            .iter()
+            .filter_map(|import| import.plt)
+            .collect::<BTreeSet<_>>();
+
+        let mut functions = BTreeMap::new();
+        let mut pending = VecDeque::from([address]);
+        while let Some(current) = pending.pop_front() {
+            if functions.contains_key(&current) {
+                continue;
             }
+            if functions.len() == MAX_REACHABLE_FUNCTIONS {
+                return Err(ArtifactError::TraversalLimit {
+                    symbol: symbol.to_owned(),
+                    limit: MAX_REACHABLE_FUNCTIONS,
+                });
+            }
+            let local = self.analyze_function(current, &import_addresses)?;
+            for &callee in &local.callees {
+                if !functions.contains_key(&callee) {
+                    pending.push_back(callee);
+                }
+            }
+            functions.insert(current, local);
+        }
+
+        let root = functions
+            .get(&address)
+            .expect("root function is inserted before aggregation");
+        let mut metrics = Metrics {
+            text_bytes: root.text_bytes,
+            instructions: root.instructions,
+            branches: root.branches,
+            direct_calls: root.direct_calls,
+            linkage_calls: root.linkage_calls,
+            tail_calls: root.tail_calls,
+            indirect_calls: root.indirect_calls,
+            panic_paths: root.panic_paths,
+            allocation_symbols: root.allocation_symbols,
+            reachable_functions: functions.len() as u64,
+            max_call_depth: max_call_depth(address, &functions),
+            stack_bytes: Some(root.stack_bytes),
+            ..Metrics::default()
+        };
+        for local in functions.values() {
             metrics.transitive_instructions += local.instructions;
             metrics.transitive_branches += local.branches;
             metrics.transitive_direct_calls += local.direct_calls;
+            metrics.transitive_linkage_calls += local.linkage_calls;
             metrics.transitive_tail_calls += local.tail_calls;
             metrics.transitive_indirect_calls += local.indirect_calls;
-            metrics.transitive_loads += local.loads;
-            metrics.transitive_stores += local.stores;
             metrics.transitive_panic_paths += local.panic_paths;
             metrics.transitive_allocation_symbols += local.allocation_symbols;
-            metrics.transitive_vtable_references += local.vtable_references;
-            metrics.max_call_depth = metrics.max_call_depth.max(depth);
-            for target in local.internal_calls {
-                pending.push((target, depth + 1));
-            }
         }
-        metrics.reachable_functions = visited.len() as u64;
         Ok(metrics)
     }
-}
 
-fn register_function(
-    visited: &mut BTreeSet<u64>,
-    address: u64,
-    symbol: &str,
-) -> Result<bool, ArtifactError> {
-    if visited.contains(&address) {
-        return Ok(false);
-    }
-    if visited.len() >= MAX_REACHABLE_FUNCTIONS {
-        return Err(ArtifactError::TraversalLimit {
-            symbol: symbol.to_owned(),
-            limit: MAX_REACHABLE_FUNCTIONS,
-        });
-    }
-    visited.insert(address);
-    Ok(true)
-}
-
-#[derive(Clone, Debug)]
-struct Symbol {
-    name: String,
-    address: u64,
-    size: u64,
-    section: object::SectionIndex,
-}
-
-fn symbols(file: &object::File<'_>) -> BTreeMap<u64, Symbol> {
-    let mut symbols = file
-        .symbols()
-        .filter(|symbol| symbol.kind() == SymbolKind::Text && symbol.address() > 0)
-        .filter_map(|symbol| {
-            Some(Symbol {
-                name: symbol.name().ok()?.to_owned(),
-                address: symbol.address(),
-                size: symbol.size(),
-                section: symbol.section_index()?,
-            })
-        })
-        .collect::<Vec<_>>();
-    symbols.sort_by_key(|symbol| (symbol.section.0, symbol.address));
-    for index in 0..symbols.len() {
-        if symbols[index].size != 0 {
-            continue;
-        }
-        let end = symbols[index + 1..]
-            .iter()
-            .find(|next| {
-                next.section == symbols[index].section && next.address > symbols[index].address
-            })
-            .map(|next| next.address)
-            .or_else(|| {
-                let section = file.section_by_index(symbols[index].section).ok()?;
-                Some(section.address() + section.size())
-            })
-            .unwrap_or(symbols[index].address);
-        symbols[index].size = end.saturating_sub(symbols[index].address);
-    }
-    symbols
-        .into_iter()
-        .filter(|symbol| symbol.size > 0)
-        .fold(BTreeMap::new(), |mut map, symbol| {
-            map.entry(symbol.address).or_insert(symbol);
-            map
-        })
-}
-
-fn find_symbol<'a>(symbols: &'a BTreeMap<u64, Symbol>, name: &str) -> Option<&'a Symbol> {
-    symbols
-        .values()
-        .find(|symbol| symbol.name == name || symbol.name == format!("_{name}"))
-}
-
-fn vtable_candidates(
-    file: &object::File<'_>,
-    text_symbols: &BTreeMap<u64, Symbol>,
-    relocated_pointers: &BTreeMap<u64, u64>,
-) -> BTreeSet<u64> {
-    let little_endian = file.is_little_endian();
-    let mut candidates = BTreeSet::new();
-    for section in file.sections() {
-        if !matches!(
-            section.kind(),
-            SectionKind::ReadOnlyData | SectionKind::Data | SectionKind::Unknown
-        ) {
-            continue;
-        }
-        let Ok(data) = section.data() else {
-            continue;
-        };
-        for offset in (0..data.len().saturating_sub(31)).step_by(8) {
-            let words = [
-                relocated_word(
-                    data,
-                    offset,
-                    section.address(),
-                    little_endian,
-                    relocated_pointers,
-                ),
-                relocated_word(
-                    data,
-                    offset + 8,
-                    section.address(),
-                    little_endian,
-                    relocated_pointers,
-                ),
-                relocated_word(
-                    data,
-                    offset + 16,
-                    section.address(),
-                    little_endian,
-                    relocated_pointers,
-                ),
-                relocated_word(
-                    data,
-                    offset + 24,
-                    section.address(),
-                    little_endian,
-                    relocated_pointers,
-                ),
-            ];
-            let drop_is_valid = words[0] == 0 || text_contains(text_symbols, words[0]);
-            let size_is_valid = words[1] <= (1u64 << 40);
-            let align_is_valid =
-                words[2] != 0 && words[2].is_power_of_two() && words[2] <= (1u64 << 20);
-            if drop_is_valid
-                && size_is_valid
-                && align_is_valid
-                && text_contains(text_symbols, words[3])
-            {
-                candidates.insert(section.address() + offset as u64);
-            }
-        }
-    }
-    candidates
-}
-
-#[derive(Default)]
-struct RelocationValues {
-    pointers: BTreeMap<u64, u64>,
-    linkage: BTreeMap<u64, u64>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ResolvedRelocation {
-    Pointer(u64),
-    Linkage(u64),
-}
-
-fn relocation_values(
-    file: &object::File<'_>,
-    text_symbols: &BTreeMap<u64, Symbol>,
-) -> RelocationValues {
-    let little_endian = file.is_little_endian();
-    let mut values = RelocationValues::default();
-    let dynamic_symbols = file
-        .dynamic_symbols()
-        .filter(|symbol| !symbol.is_undefined() && symbol.address() != 0)
-        .map(|symbol| (symbol.index(), symbol.address()))
-        .collect::<HashMap<_, _>>();
-
-    for section in file.sections() {
-        if !pointer_section(section.kind()) {
-            continue;
-        }
-        let Ok(data) = section.data() else {
-            continue;
-        };
-        for (offset, relocation) in section.relocations() {
-            let Ok(offset) = usize::try_from(offset) else {
-                continue;
-            };
-            let Some(raw) = data
-                .get(offset..offset.saturating_add(8))
-                .map(|bytes| word(bytes, little_endian))
-            else {
-                continue;
-            };
-            if let Some(value) = section_relocation_value(file, &relocation, raw) {
-                values
-                    .pointers
-                    .insert(section.address() + offset as u64, value);
-            }
-        }
-    }
-
-    if let Some(relocations) = file.dynamic_relocations() {
-        for (address, relocation) in relocations {
-            let raw = raw_word_at(file, address, little_endian);
-            if relocation.has_implicit_addend() && raw.is_none() {
-                continue;
-            }
-            match dynamic_relocation_value(&relocation, raw.unwrap_or(0), &dynamic_symbols) {
-                Some(ResolvedRelocation::Pointer(value)) => {
-                    values.pointers.insert(address, value);
-                }
-                Some(ResolvedRelocation::Linkage(target))
-                    if text_contains(text_symbols, target) =>
-                {
-                    values.linkage.insert(address, target);
-                }
-                Some(ResolvedRelocation::Linkage(_)) | None => {}
-            }
-        }
-    }
-
-    values
-}
-
-fn section_relocation_value(
-    file: &object::File<'_>,
-    relocation: &Relocation,
-    raw: u64,
-) -> Option<u64> {
-    if relocation.size() != 64 || relocation.kind() != RelocationKind::Absolute {
-        return None;
-    }
-    let target = match relocation.target() {
-        RelocationTarget::Symbol(index) => file.symbol_by_index(index).ok()?.address(),
-        RelocationTarget::Section(index) => file.section_by_index(index).ok()?.address(),
-        _ => return None,
-    };
-    let value = target.wrapping_add(relocation.addend() as u64);
-    Some(if relocation.has_implicit_addend() {
-        raw.wrapping_add(value)
-    } else {
-        value
-    })
-}
-
-fn dynamic_relocation_value(
-    relocation: &Relocation,
-    raw: u64,
-    dynamic_symbols: &HashMap<object::SymbolIndex, u64>,
-) -> Option<ResolvedRelocation> {
-    let RelocationFlags::Elf { r_type } = relocation.flags() else {
-        return None;
-    };
-    let addend = if relocation.has_implicit_addend() {
-        raw
-    } else {
-        relocation.addend() as u64
-    };
-    if matches!(
-        r_type,
-        object::elf::R_X86_64_RELATIVE | object::elf::R_AARCH64_RELATIVE
-    ) && relocation.target() != RelocationTarget::Absolute
-    {
-        return None;
-    }
-    let defined_target = match relocation.target() {
-        RelocationTarget::Symbol(index) => dynamic_symbols.get(&index).copied(),
-        _ => None,
-    };
-    elf_dynamic_value(r_type, defined_target, addend)
-}
-
-fn elf_dynamic_value(
-    r_type: object::elf::RelocationType,
-    defined_target: Option<u64>,
-    addend: u64,
-) -> Option<ResolvedRelocation> {
-    match r_type {
-        object::elf::R_X86_64_RELATIVE | object::elf::R_AARCH64_RELATIVE => {
-            Some(ResolvedRelocation::Pointer(addend))
-        }
-        object::elf::R_X86_64_64 => Some(ResolvedRelocation::Pointer(
-            defined_target?.wrapping_add(addend),
-        )),
-        object::elf::R_X86_64_GLOB_DAT | object::elf::R_X86_64_JUMP_SLOT => {
-            Some(ResolvedRelocation::Linkage(defined_target?))
-        }
-        _ => None,
-    }
-}
-
-fn raw_word_at(file: &object::File<'_>, address: u64, little_endian: bool) -> Option<u64> {
-    for section in file.sections() {
-        if !pointer_section(section.kind()) {
-            continue;
-        }
-        let Some(offset) = address.checked_sub(section.address()) else {
-            continue;
-        };
-        let Ok(offset) = usize::try_from(offset) else {
-            continue;
-        };
-        let Ok(data) = section.data() else {
-            continue;
-        };
-        let Some(end) = offset.checked_add(8) else {
-            continue;
-        };
-        if let Some(bytes) = data.get(offset..end) {
-            return Some(word(bytes, little_endian));
-        }
-    }
-    None
-}
-
-fn relocated_word(
-    data: &[u8],
-    offset: usize,
-    section_address: u64,
-    little_endian: bool,
-    relocated_pointers: &BTreeMap<u64, u64>,
-) -> u64 {
-    relocated_pointers
-        .get(&(section_address + offset as u64))
-        .copied()
-        .unwrap_or_else(|| word(&data[offset..offset + 8], little_endian))
-}
-
-fn pointer_section(kind: SectionKind) -> bool {
-    matches!(
-        kind,
-        SectionKind::ReadOnlyData | SectionKind::Data | SectionKind::Unknown
-    )
-}
-
-fn text_contains(symbols: &BTreeMap<u64, Symbol>, address: u64) -> bool {
-    symbols
-        .range(..=address)
-        .next_back()
-        .is_some_and(|(_, symbol)| address < symbol.address.saturating_add(symbol.size))
-}
-
-fn word(bytes: &[u8], little_endian: bool) -> u64 {
-    let bytes: [u8; 8] = bytes.try_into().expect("vtable word has exact width");
-    if little_endian {
-        u64::from_le_bytes(bytes)
-    } else {
-        u64::from_be_bytes(bytes)
-    }
-}
-
-fn symbol_bytes<'a>(file: &object::File<'a>, symbol: &Symbol) -> Result<&'a [u8], ArtifactError> {
-    let section =
-        file.section_by_index(symbol.section)
-            .map_err(|source| ArtifactError::Object {
-                path: PathBuf::from("<loaded artifact>"),
-                source,
+    fn analyze_function(
+        &self,
+        address: u64,
+        imports: &BTreeSet<u64>,
+    ) -> Result<LocalMetrics, ArtifactError> {
+        let seek = format!("0x{address:x}");
+        self.run(&format!("afr @ {seek}"))?;
+        let information: Vec<FunctionInfo> = self.json(&format!("afij @ {seek}"))?;
+        let information = information
+            .into_iter()
+            .find(|function| function.offset == address)
+            .ok_or_else(|| ArtifactError::MissingSymbol {
+                path: self.path.clone(),
+                symbol: seek.clone(),
             })?;
-    let data = section.data().map_err(|source| ArtifactError::Object {
-        path: PathBuf::from("<loaded artifact>"),
-        source,
-    })?;
-    let offset = (symbol.address - section.address()) as usize;
-    Ok(&data[offset..offset + symbol.size as usize])
+        let body: FunctionBody = self.json(&format!("pdfj @ {seek}"))?;
+        let start = information.offset;
+        let end = start.saturating_add(information.size);
+        let mut metrics = LocalMetrics {
+            text_bytes: information.size,
+            stack_bytes: information.stackframe,
+            ..LocalMetrics::default()
+        };
+
+        for operation in body.ops {
+            metrics.instructions += 1;
+            if branch(&operation.kind) {
+                metrics.branches += 1;
+            }
+            let linkage = linkage(&operation, imports);
+            let call = operation.kind.ends_with("call");
+            if call {
+                if linkage {
+                    metrics.linkage_calls += 1;
+                } else if operation.kind == "call" {
+                    metrics.direct_calls += 1;
+                } else {
+                    metrics.indirect_calls += 1;
+                }
+                let panic = marker(&operation.disasm, PANIC_MARKERS);
+                let allocation = marker(&operation.disasm, ALLOCATION_MARKERS);
+                metrics.panic_paths += u64::from(panic);
+                metrics.allocation_symbols += u64::from(allocation);
+                if operation.kind == "call"
+                    && !panic
+                    && !allocation
+                    && let Some(target) = operation.jump
+                    && !imports.contains(&target)
+                    && !(start..end).contains(&target)
+                {
+                    metrics.callees.insert(target);
+                }
+            }
+
+            if unconditional_jump(&operation.kind) {
+                let leaves_function = operation
+                    .jump
+                    .is_none_or(|target| !(start..end).contains(&target));
+                if leaves_function {
+                    metrics.tail_calls += 1;
+                    if linkage {
+                        metrics.linkage_calls += 1;
+                    } else if operation.kind != "jmp" {
+                        metrics.indirect_calls += 1;
+                    } else if let Some(target) = operation.jump
+                        && !imports.contains(&target)
+                    {
+                        metrics.callees.insert(target);
+                    }
+                }
+            }
+        }
+        Ok(metrics)
+    }
+
+    fn run(&self, command_text: &str) -> Result<String, ArtifactError> {
+        command(&mut self.pipe.borrow_mut(), command_text)
+    }
+
+    fn json<T: DeserializeOwned>(&self, command_text: &str) -> Result<T, ArtifactError> {
+        let value = self
+            .pipe
+            .borrow_mut()
+            .cmdj(command_text)
+            .map_err(|source| ArtifactError::Command {
+                command: command_text.to_owned(),
+                detail: source.to_string(),
+            })?;
+        serde_json::from_value(value).map_err(|source| ArtifactError::Json {
+            command: command_text.to_owned(),
+            source,
+        })
+    }
 }
 
-fn disassembler(architecture: object::Architecture) -> Result<Capstone, ArtifactError> {
-    match architecture {
-        object::Architecture::X86_64 => Capstone::new()
-            .x86()
-            .mode(capstone::arch::x86::ArchMode::Mode64)
-            .detail(true)
-            .build()
-            .map_err(|_| ArtifactError::Unsupported(architecture)),
-        object::Architecture::Aarch64 => Capstone::new()
-            .arm64()
-            .mode(capstone::arch::arm64::ArchMode::Arm)
-            .detail(true)
-            .build()
-            .map_err(|_| ArtifactError::Unsupported(architecture)),
-        _ => Err(ArtifactError::Unsupported(architecture)),
+impl Drop for Analyzer {
+    fn drop(&mut self) {
+        self.pipe.get_mut().close();
     }
 }
 
 #[derive(Default)]
 struct LocalMetrics {
+    text_bytes: u64,
     instructions: u64,
     branches: u64,
     direct_calls: u64,
+    linkage_calls: u64,
     tail_calls: u64,
     indirect_calls: u64,
-    loads: u64,
-    stores: u64,
     panic_paths: u64,
     allocation_symbols: u64,
-    vtable_references: u64,
-    internal_calls: Vec<u64>,
+    stack_bytes: u64,
+    callees: BTreeSet<u64>,
 }
 
-fn analyze_bytes(
-    disassembler: &Capstone,
-    bytes: &[u8],
-    address: u64,
-    symbols: &BTreeMap<u64, Symbol>,
-    vtables: &BTreeSet<u64>,
-    relocated_pointers: &BTreeMap<u64, u64>,
-    linkage_targets: &BTreeMap<u64, u64>,
-) -> Result<LocalMetrics, capstone::Error> {
-    let instructions = disassembler.disasm_all(bytes, address)?;
-    let reachable = reachable_instruction_addresses(disassembler, instructions.as_ref())?;
-    let mut metrics = LocalMetrics::default();
-    let mut register_values = BTreeMap::new();
-    let mut referenced_vtables = BTreeSet::new();
-    for instruction in instructions
-        .as_ref()
-        .iter()
-        .filter(|instruction| reachable.contains(&instruction.address()))
-    {
-        metrics.instructions += 1;
-        let detail = disassembler.insn_detail(instruction)?;
-        let call = detail
-            .groups()
-            .iter()
-            .any(|group| group.0 == capstone::InsnGroupType::CS_GRP_CALL as u8);
-        let branch = detail
-            .groups()
-            .iter()
-            .any(|group| group.0 == capstone::InsnGroupType::CS_GRP_JUMP as u8);
-        let tail = terminal_branch(instruction.mnemonic());
-        if branch || tail {
-            metrics.branches += 1;
-        }
-
-        let operands = detail.arch_detail().operands();
-        track_vtables(
-            instruction,
-            &operands,
-            vtables,
-            relocated_pointers,
-            &mut register_values,
-            &mut referenced_vtables,
-        );
-        let target = if call || tail {
-            branch_target(&operands)
-                .or_else(|| relocated_indirect_target(instruction, &operands, linkage_targets))
-        } else {
-            None
-        };
-        if call {
-            if let Some(target) = target {
-                metrics.direct_calls += 1;
-                if let Some(target_symbol) = symbols.get(&target) {
-                    if PANIC_MARKERS
-                        .iter()
-                        .any(|marker| target_symbol.name.contains(marker))
-                    {
-                        metrics.panic_paths += 1;
-                    }
-                    if ALLOCATION_MARKERS
-                        .iter()
-                        .any(|marker| target_symbol.name.contains(marker))
-                    {
-                        metrics.allocation_symbols += 1;
-                    }
-                    metrics.internal_calls.push(target);
-                }
-            } else {
-                metrics.indirect_calls += 1;
-            }
-        }
-        if tail {
-            metrics.tail_calls += 1;
-            match target {
-                Some(target) if target != address && symbols.contains_key(&target) => {
-                    metrics.internal_calls.push(target);
-                }
-                None => metrics.indirect_calls += 1,
-                Some(_) => {}
-            }
-        }
-
-        for operand in &operands {
-            if let Some(access) = memory_access(operand) {
-                metrics.loads += u64::from(access.is_readable());
-                metrics.stores += u64::from(access.is_writable());
-            }
-        }
-    }
-    metrics.vtable_references = referenced_vtables.len() as u64;
-    Ok(metrics)
+#[derive(Deserialize)]
+struct SymbolInfo {
+    name: String,
+    vaddr: u64,
 }
 
-fn reachable_instruction_addresses(
-    disassembler: &Capstone,
-    instructions: &[capstone::Insn<'_>],
-) -> Result<BTreeSet<u64>, capstone::Error> {
-    let by_address = instructions
-        .iter()
-        .enumerate()
-        .map(|(index, instruction)| (instruction.address(), index))
-        .collect::<BTreeMap<_, _>>();
-    let Some(first) = instructions.first() else {
-        return Ok(BTreeSet::new());
-    };
-    let mut reachable = BTreeSet::new();
-    let mut pending = vec![first.address()];
-    while let Some(address) = pending.pop() {
-        if !reachable.insert(address) {
-            continue;
+#[derive(Deserialize)]
+struct ImportInfo {
+    #[serde(default)]
+    plt: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct FunctionInfo {
+    offset: u64,
+    size: u64,
+    #[serde(default)]
+    stackframe: u64,
+}
+
+#[derive(Deserialize)]
+struct FunctionBody {
+    ops: Vec<Operation>,
+}
+
+#[derive(Deserialize)]
+struct Operation {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    disasm: String,
+    #[serde(default)]
+    jump: Option<u64>,
+    #[serde(default)]
+    ptr: Option<u64>,
+}
+
+fn command(pipe: &mut RzPipe, command_text: &str) -> Result<String, ArtifactError> {
+    pipe.cmd(command_text)
+        .map_err(|source| ArtifactError::Command {
+            command: command_text.to_owned(),
+            detail: source.to_string(),
+        })
+}
+
+fn max_call_depth(root: u64, functions: &BTreeMap<u64, LocalMetrics>) -> u64 {
+    fn visit(
+        address: u64,
+        functions: &BTreeMap<u64, LocalMetrics>,
+        active: &mut BTreeSet<u64>,
+        memo: &mut BTreeMap<u64, u64>,
+    ) -> Option<u64> {
+        if let Some(depth) = memo.get(&address) {
+            return Some(*depth);
         }
-        let Some(&index) = by_address.get(&address) else {
-            continue;
-        };
-        let instruction = &instructions[index];
-        let detail = disassembler.insn_detail(instruction)?;
-        let groups = detail.groups();
-        let branch = groups
-            .iter()
-            .any(|group| group.0 == capstone::InsnGroupType::CS_GRP_JUMP as u8);
-        let returns = groups
-            .iter()
-            .any(|group| group.0 == capstone::InsnGroupType::CS_GRP_RET as u8);
-        let tail = terminal_branch(instruction.mnemonic());
-        if branch {
-            let operands = detail.arch_detail().operands();
-            if let Some(target) = branch_target(&operands)
-                && by_address.contains_key(&target)
-            {
-                pending.push(target);
-            }
-        }
-        if !returns
-            && !tail
-            && let Some(next) = instructions.get(index + 1)
-        {
-            pending.push(next.address());
-        }
-    }
-    Ok(reachable)
-}
-
-fn terminal_branch(mnemonic: Option<&str>) -> bool {
-    matches!(
-        mnemonic,
-        Some("jmp" | "ljmp" | "b" | "br" | "braa" | "braaz" | "brab" | "brabz")
-    )
-}
-
-fn branch_target(operands: &[ArchOperand]) -> Option<u64> {
-    operands.iter().rev().find_map(immediate)
-}
-
-fn immediate(operand: &ArchOperand) -> Option<u64> {
-    match operand {
-        ArchOperand::X86Operand(operand) => match operand.op_type {
-            X86OperandType::Imm(value) => Some(value as u64),
-            _ => None,
-        },
-        ArchOperand::Arm64Operand(operand) => match operand.op_type {
-            Arm64OperandType::Imm(value) => Some(value as u64),
-            _ => None,
-        },
-    }
-}
-
-fn relocated_indirect_target(
-    instruction: &capstone::Insn<'_>,
-    operands: &[ArchOperand],
-    linkage_targets: &BTreeMap<u64, u64>,
-) -> Option<u64> {
-    operands.iter().find_map(|operand| {
-        let ArchOperand::X86Operand(operand) = operand else {
-            return None;
-        };
-        let X86OperandType::Mem(memory) = operand.op_type else {
-            return None;
-        };
-        if memory.base().0 != X86Reg::X86_REG_RIP as u16 {
+        if !active.insert(address) {
             return None;
         }
-        let next = instruction.address() + instruction.bytes().len() as u64;
-        linkage_targets
-            .get(&next.wrapping_add_signed(memory.disp()))
-            .copied()
-            .filter(|target| *target != 0)
-    })
-}
-
-fn memory_access(operand: &ArchOperand) -> Option<capstone::AccessType> {
-    match operand {
-        ArchOperand::X86Operand(operand) => matches!(operand.op_type, X86OperandType::Mem(_))
-            .then_some(operand.access)
-            .flatten(),
-        ArchOperand::Arm64Operand(operand) => matches!(operand.op_type, Arm64OperandType::Mem(_))
-            .then_some(operand.access)
-            .flatten(),
-    }
-}
-
-fn track_vtables(
-    instruction: &capstone::Insn<'_>,
-    operands: &[ArchOperand],
-    candidates: &BTreeSet<u64>,
-    relocated_pointers: &BTreeMap<u64, u64>,
-    registers: &mut BTreeMap<u16, u64>,
-    references: &mut BTreeSet<u64>,
-) {
-    let mnemonic = instruction.mnemonic().unwrap_or_default();
-    if matches!(mnemonic, "adr" | "adrp") {
-        if let (Some(register), Some(address)) = (
-            operands.first().and_then(arm_register),
-            operands.get(1).and_then(arm_immediate),
-        ) {
-            registers.insert(register, address);
-            if mnemonic == "adr" {
-                record_vtable(address, candidates, relocated_pointers, references);
-            }
-        }
-    } else if mnemonic == "add"
-        && let (Some(destination), Some(source), Some(offset)) = (
-            operands.first().and_then(arm_register),
-            operands.get(1).and_then(arm_register),
-            operands.get(2).and_then(arm_immediate),
-        )
-        && let Some(base) = registers.get(&source).copied()
-    {
-        let address = base.wrapping_add(offset);
-        registers.insert(destination, address);
-        record_vtable(address, candidates, relocated_pointers, references);
-    } else if mnemonic == "mov"
-        && let (Some(destination), Some(source)) = (
-            operands.first().and_then(arm_register),
-            operands.get(1).and_then(arm_register),
-        )
-        && let Some(value) = registers.get(&source).copied()
-    {
-        registers.insert(destination, value);
+        let depth = functions
+            .get(&address)
+            .into_iter()
+            .flat_map(|function| &function.callees)
+            .filter_map(|callee| {
+                functions
+                    .contains_key(callee)
+                    .then(|| visit(*callee, functions, active, memo))
+                    .flatten()
+                    .map(|depth| depth + 1)
+            })
+            .max()
+            .unwrap_or(0);
+        active.remove(&address);
+        memo.insert(address, depth);
+        Some(depth)
     }
 
-    for operand in operands {
-        match operand {
-            ArchOperand::X86Operand(operand) => {
-                if let X86OperandType::Mem(memory) = operand.op_type
-                    && memory.base().0 == X86Reg::X86_REG_RIP as u16
-                {
-                    let next = instruction.address() + instruction.bytes().len() as u64;
-                    record_vtable(
-                        next.wrapping_add_signed(memory.disp()),
-                        candidates,
-                        relocated_pointers,
-                        references,
-                    );
-                }
-            }
-            ArchOperand::Arm64Operand(operand) => {
-                if let Arm64OperandType::Mem(memory) = operand.op_type
-                    && let Some(base) = registers.get(&memory.base().0).copied()
-                {
-                    record_vtable(
-                        base.wrapping_add_signed(i64::from(memory.disp())),
-                        candidates,
-                        relocated_pointers,
-                        references,
-                    );
-                }
-            }
-        }
-    }
+    visit(root, functions, &mut BTreeSet::new(), &mut BTreeMap::new()).unwrap_or(0)
 }
 
-fn arm_register(operand: &ArchOperand) -> Option<u16> {
-    match operand {
-        ArchOperand::Arm64Operand(operand) => match operand.op_type {
-            Arm64OperandType::Reg(register) => Some(register.0),
-            _ => None,
-        },
-        _ => None,
-    }
+fn identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
-fn arm_immediate(operand: &ArchOperand) -> Option<u64> {
-    match operand {
-        ArchOperand::Arm64Operand(operand) => match operand.op_type {
-            Arm64OperandType::Imm(value) => Some(value as u64),
-            _ => None,
-        },
-        _ => None,
-    }
+fn command_path(path: &Path) -> String {
+    let path = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace('"', "\\\"");
+    format!("\"{path}\"")
 }
 
-fn record_vtable(
-    address: u64,
-    candidates: &BTreeSet<u64>,
-    relocated_pointers: &BTreeMap<u64, u64>,
-    references: &mut BTreeSet<u64>,
-) {
-    let mut address = address;
-    for _ in 0..=2 {
-        if candidates.contains(&address) {
-            references.insert(address);
-            return;
-        }
-        let Some(next) = relocated_pointers.get(&address).copied() else {
-            return;
+fn branch(kind: &str) -> bool {
+    kind.ends_with("jmp") || kind == "switch"
+}
+
+fn unconditional_jump(kind: &str) -> bool {
+    matches!(kind, "jmp" | "rjmp" | "ijmp" | "ujmp")
+}
+
+fn linkage(operation: &Operation, imports: &BTreeSet<u64>) -> bool {
+    operation.disasm.contains("reloc.")
+        || operation.disasm.contains("sym.imp.")
+        || operation
+            .jump
+            .into_iter()
+            .chain(operation.ptr)
+            .any(|target| imports.contains(&target))
+}
+
+fn marker(value: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| value.contains(marker))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Operation, linkage};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn distinguishes_linker_relocations_from_dynamic_dispatch() {
+        let linker_call = Operation {
+            kind: "ircall".to_owned(),
+            disasm: "call qword [reloc.memcpy]".to_owned(),
+            jump: None,
+            ptr: Some(0x2000),
         };
-        if next == address {
-            return;
-        }
-        address = next;
+        let dynamic_call = Operation {
+            kind: "rcall".to_owned(),
+            disasm: "call rax".to_owned(),
+            jump: None,
+            ptr: None,
+        };
+
+        assert!(linkage(&linker_call, &BTreeSet::new()));
+        assert!(!linkage(&dynamic_call, &BTreeSet::new()));
     }
 }
