@@ -267,6 +267,7 @@ impl Analyzer {
                 metrics.panic_paths += u64::from(panic);
                 metrics.allocation_symbols += u64::from(allocation);
                 if operation.kind == "call"
+                    && !linkage
                     && !panic
                     && !allocation
                     && let Some(target) = operation.jump

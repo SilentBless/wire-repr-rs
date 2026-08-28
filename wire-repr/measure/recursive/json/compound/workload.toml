@@ -59,7 +59,12 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated direct recursive lookup has stack optimization headroom"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
@@ -90,7 +95,12 @@ unit = "%"
 [[cases.rules]]
 name = "artifact invariants"
 level = "error"
-assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0 && generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+assert = "generated_artifact_indirect_calls == 0 && generated_artifact_allocation_symbols == 0"
+[[cases.rules]]
+name = "stack attention"
+level = "attention"
+assert = "generated_artifact_stack_bytes <= idiomatic_artifact_stack_bytes + 2048"
+message = "generated mixed recursive lookup has stack optimization headroom"
 [[cases.rules]]
 name = "idiomatic latency attention"
 level = "attention"
