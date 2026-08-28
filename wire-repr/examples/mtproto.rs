@@ -1,3 +1,5 @@
+//! Generic composition of two real MTProto TL constructors.
+
 #![allow(dead_code)]
 
 use wire_repr::{WireBuilder, WireView};

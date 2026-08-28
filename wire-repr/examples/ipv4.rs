@@ -1,6 +1,8 @@
+//! Complete fixed IPv4 header with nominal bitfields and a computed Internet checksum.
+
 #![allow(dead_code)]
 
-use wire_repr::{ByteSelection, WireBuilder, WireView};
+use wire_repr::{ByteSelection, WireBuilder, WireView, select};
 
 #[derive(WireView, WireBuilder)]
 #[wire(as = u8)]
@@ -61,6 +63,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(view.version_ihl().version(), 4);
     assert!(view.flags_fragment().dont_fragment());
     assert_eq!(view.header_checksum(), 0xc2fd);
+    assert_eq!(
+        internet_checksum(select(&view).exclude(|fields| fields.header_checksum)),
+        view.header_checksum()
+    );
 
     let mut output = [0u8; 20];
     Ipv4Header::builder(&mut output[..])

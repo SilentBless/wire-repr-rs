@@ -1,83 +1,234 @@
-# Wire schemas, exact-source views, and progressive writers
+# Exact-source wire views and progressive writers
 
-`wire-repr` compiles Rust schema declarations into a safe public, `no_std`, allocation-free read
-and write API. A schema struct describes physical bytes; it is not the decoded semantic value.
+`wire-repr` compiles Rust schema declarations into immutable views over exact source bytes and
+output-owning typestate writers. The generated target API is `no_std`, allocation-free, and
+statically dispatched.
 
-The production `WireView`/`WireBuilder` contract is implemented across fixed and dynamic layouts,
-dependencies, collections, enums, bitfields, selections, computed fields, sequences, and cursors.
-[`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/main/ARCHITECTURE.md) defines
-the shipped boundaries and deferred composition work.
+A schema describes physical representation rather than a decoded semantic object. The library owns
+byte order, widths, field order, framing, selectors, controllers, geometry, and exact represented
+ranges. Protocol and application semantics remain in consumer code.
 
-## Generic schema
+## Quick start
 
-```rust
-use wire_repr::{WireBuilder, WireView};
+```
+use wire_repr::{WireBuilder, WireView, wire};
+
+#[derive(WireView, WireBuilder)]
+struct Packet {
+    #[wire(be, constant = 0x5752)]
+    magic: u16,
+    kind: u8,
+    #[wire(be)]
+    payload_len: u16,
+    #[wire(bytes = payload_len)]
+    payload: wire::Bytes,
+}
+
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
+let input = [0x57, 0x52, 7, 0, 5, b'h', b'e', b'l', b'l', b'o'];
+let packet = Packet::view(&input)?;
 
-#[derive(WireView, WireBuilder)]
-struct HelpGetConfig {
-    #[wire(le, constant = 0xc4f9_186b)]
-    constructor: u32,
-}
+assert_eq!(packet.magic(), 0x5752);
+assert_eq!(packet.kind(), 7);
+assert_eq!(packet.payload(), b"hello");
+assert_eq!(packet.as_bytes(), input);
 
-#[derive(WireView, WireBuilder)]
-struct InvokeWithLayer<T> {
-    #[wire(le, constant = 0xda9b_0d0d)]
-    constructor: u32,
-    #[wire(le)]
-    layer: i32,
-    query: T,
-}
-
-type Query = InvokeWithLayer<HelpGetConfig>;
-
-let input = [
-    0x0d, 0x0d, 0x9b, 0xda,
-    0xc8, 0x00, 0x00, 0x00,
-    0x6b, 0x18, 0xf9, 0xc4,
-];
-
-let view = Query::view(input).unwrap();
-assert_eq!(view.layer(), 200);
-assert_eq!(view.query().constructor(), 0xc4f9_186b);
-assert_eq!(view.as_bytes(), &input);
-
-let mut output = [0xa5; 16];
-let written = Query::builder(&mut output[..])
-    .layer(200)?
-    .query(|query| query)?
+let mut output = Vec::new();
+let written = Packet::builder(&mut output)
+    .kind(7)?
+    .payload(&b"hello"[..])?
     .finish()?;
-assert_eq!(written.range(), 0..12);
-assert_eq!(written.as_bytes(), &input);
-assert_eq!(&output[12..], &[0xa5; 4]);
+
+assert_eq!(written.as_bytes(), input);
 # Ok(())
 # }
 ```
 
-`view<T: AsRef<[u8]>>(input: T)` stores `T` directly. Passing a reference borrows; passing an
-owned container moves it into the opaque view. No wire-repr feature selects another API.
-Nested views borrow their parent and use retained reference-free descriptor state.
+The stored length remains visible on the view, but the writer derives it from `payload`; no length
+setter is generated. Constants are validated and exposed on views, then emitted automatically.
 
-Retained backing must expose the same immutable byte span for the view's lifetime. Slices, `Vec`,
-`bytes::Bytes`, and ordinary owned wrappers satisfy this; stateful `AsRef` projections do not.
+See the runnable [packet example](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/packet.rs).
 
-Constants are validated on read, exposed by getters, and omitted from writers. Generic children
-write through their static capabilities and the same progressive output cursor.
+## Retained views
+
+A generated `Schema::view<T: AsRef<[u8]>>(input: T)` stores `T` directly. Passing a reference
+creates a borrowed root view. Passing an array, `Vec`, `bytes::Bytes`, or another owned wrapper moves
+that backing into the opaque root view. There is no separate owned renderer or schema lifetime.
+
+Framing proves the exact root geometry and rejects trailing bytes. Fixed scalar getters decode from
+the original bytes when called. Nested views borrow their parent and reconstruct only exact ranges
+whose state was already proven. Dynamic collection items may be framed lazily as their iterator or
+getter advances.
+
+Retained backing must keep projecting the same immutable byte span while the view exists. Ordinary
+slices and immutable contiguous collections meet this contract. Intentionally stateful `AsRef`
+implementations that switch their projection do not.
+
+## Progressive writers
+
+A generated `Schema::builder(output)` immediately owns or borrows one progressive output cursor.
+Each field setter consumes one typestate stage and returns the next, so `?` is the ordinary control
+flow. `finish()` is available only after all required fields have been supplied and returns a
+[`Written`] publication token with the exact represented range.
+
+Output behavior is type-directed:
+
+- `&mut [u8]` is fixed and returns [`OutputError::NeedMore`](crate::OutputError::NeedMore);
+- `&mut Vec<u8>` and `&mut bytes::BytesMut` grow through `Extend<u8>`;
+- [`output::bounded`] constrains a target to a caller-selected limit;
+- [`output::grow_with`] delegates fallible or custom growth to a callback;
+- [`output::owned`] stores a growable target by value, allowing unfinished writer states to inherit
+  its `Send` and `'static` properties.
+
+Generated writers retain offsets rather than pointers and reacquire the mutable slice after growth,
+so relocation is safe. The crate does not allocate by itself; a growable target allocates only
+through its own implementation.
+
+Writing is progressive, not transactional. An error may leave partial unpublished bytes. A caller
+that requires atomic publication should write into an unpublished slot, staging buffer, or double
+buffer and publish only after `finish()` succeeds.
+
+## Scalars and logical representations
+
+Direct scalar fields support fixed-width Rust integers and floats. Multibyte scalars require `be`
+or `le`; one-byte integers do not accept an endian marker. Primitive fixed arrays use the same
+per-element representation:
+
+```
+use wire_repr::{WireBuilder, WireView};
+
+#[derive(WireView, WireBuilder)]
+struct Lanes {
+    #[wire(le)]
+    lanes: [u16; 8],
+}
+```
+
+Platform-sized and logical types declare a fixed physical representation:
+
+```
+use wire_repr::{WireBuilder, WireView};
+
+#[derive(WireView, WireBuilder)]
+struct Index {
+    #[wire(as = u32, le)]
+    offset: usize,
+    #[wire(as = u16, be)]
+    count: core::num::NonZeroU16,
+}
+```
+User-defined newtypes use the same form when they implement the required conversions.
+
+
+Reading requires `Logical: TryFrom<Physical>`. Writing requires `Physical: TryFrom<Logical>`.
+Conversion failures remain nominal field-site [`ScalarConversionError`] or
+[`ScalarBuildConversionError`] values; implementation-specific conversion error types do not leak
+through generated public error enums. Stored constants use the direct physical representation.
+
+## Geometry and dependencies
+
+Declaration order is physical order. Generated framing and writing support:
+
+- bounded raw bytes and nested children controlled by physically earlier unsigned scalars;
+- terminal `rest` bytes;
+- padding, alignment, and forward placement;
+- shared byte-length controllers whose write payloads must agree;
+- zero-width logical flags and contiguous conditional choice groups;
+- runtime arrays controlled by physically earlier counts.
+
+Read controllers are authoritative. Write payload intent is authoritative: generated writers patch
+lengths, counts, presence bits, and bit projections when their dependent values become known.
+Controller setters are omitted.
+
+Padding, alignment, and placement gaps are geometry rather than canonicality checks. Views accept
+their exact source bytes. Fresh writers fill forward gaps with zeroes. Exact view copying preserves
+the source representation.
+
+## Runtime arrays
+
+[`wire::Array<T>`](crate::wire::Array) marks a repeated representation while the stored count remains
+an ordinary physical field. [`ArrayView`] retains only the exact collection range and authoritative
+count. It implements `IntoIterator` by value and by reference; iteration keeps one forward cursor
+and does not retain item offsets.
+
+[`ArrayWriter::try_extend`] consumes any `IntoIterator` and writes one item at a time. Exact item
+views can be copied without semantic reconstruction. [`ArrayWriter::copy_from`] forwards an already
+validated source array as one represented range and patches its authoritative count.
+
+## Static enums and bitfields
+
+A static enum declares one physical selector with `#[wire(selector = Physical, endian)]`. Unit
+variants write only the selector. Body variants expose borrowed views and closure-based writer
+methods. An explicit `#[wire(unknown)]` body preserves the raw selector and exact bounded or
+terminal body for lossless forwarding.
+
+Nominal bitfields declare their physical unsigned integer on the type and `bit` or `bits` ranges on
+logical fields. Inline `bits_of` projections expose logical fields from an earlier physical scalar.
+Fresh writers zero undeclared bits; exact view copying preserves every source bit.
+
+## Physical selections and computed fields
+
+[`select`] resolves typed physical field expressions against a generated view. A [`Selection`]
+exposes merged wire-order [`Selection::chunks`] and byte iteration without materializing a flat
+buffer. Nested field routes are zero-sized types and impose no runtime depth limit or path storage.
+
+Computed scalar destinations use `computed = callback(...)`; fallible callbacks use
+`try_computed`. Callback arguments may combine logical getters with `include(...)` and
+`exclude(...)` physical selections. The generated dependency DAG evaluates and patches computed
+fields in topological order.
+
+The complete [IPv4 example](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ipv4.rs)
+uses nominal bitfields and computes the Internet checksum over all physical header bytes except the
+checksum destination.
+
+## Sequences and cursors
+
+Syntactically fixed schemas expose prevalidated [`FixedViews`], an infallible
+`ExactSizeIterator`. Variable schemas with a provable leading extent expose [`VariableViews`], whose
+`next` frames one representation lazily. [`Cursor`] consumes heterogeneous schemas from one shared
+input.
+
+Views yielded by these facades borrow the original input rather than the facade or cursor, so they
+may coexist. A framing failure or `NeedMore` never advances the position. Terminal `rest`, terminal
+arrays, and unknown enum bodies do not claim a leading extent and therefore cannot be consumed
+ambiguously through these helpers.
+
+## Recursive schemas
+
+A closed selector enum may pass itself into a counted terminal array or an object body containing
+[`wire::Recursive<T>`](crate::wire::Recursive). Recursive roots expose
+`Schema::view::<DEPTH>(backing)`, where the caller chooses the const depth bound and zero produces
+[`DepthExceeded`].
+
+Generated root skipping uses one iterative typed continuation stack. Recursive array state retains
+bounded exact geometry rather than item offsets. Proven fixed, affine, interval, palette,
+factorized, recursive-shape, periodic, or packed-run representations accelerate lookup; unsupported
+shapes fall back to exact prefix replay. Iteration always keeps one forward cursor and remains
+linear in represented bytes.
+
+Deriving [`WireBuilder`] generates progressive recursive object and array writers. One output cursor
+moves through monomorphized continuation closures. The writer retains no recursive semantic tree,
+encoded plan, allocation, dynamic dispatch, or hidden depth stack. Exact recursive views may be
+copied directly.
+
+See the runnable [recursive example](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/recursive.rs).
 
 ## Manual capabilities
 
-Manual representations implement read and write independently. Manual read implementations are an
-explicit audited unsafe boundary because they certify retained state for later zero-cost
-reconstruction. Manual writers use the safe public progressive cursor.
+Manual formats implement reading and writing independently. [`WireView`] is an unsafe trait because
+a manual implementation certifies that its reference-free state remains memory-safe for any
+immutable span of the framed length. Generated parents validate child extents before invoking that
+reconstruction boundary.
 
-```rust
+Manual writing remains safe:
+
+```
 use wire_repr::{ChildWriter, Output, WireBuilder, WireWrite, WriteError};
 
 struct LittleEndianWord;
 
 impl WireBuilder for LittleEndianWord {
     const FIXED_SIZE: Option<usize> = Some(4);
-
     type Builder = ();
 
     fn builder() -> Self::Builder {}
@@ -96,97 +247,21 @@ impl WireWrite<u32> for LittleEndianWord {
 }
 ```
 
-Generated parents configure both derived and manual children through the same closure setter.
-The child exposes its detached initial state through `WireBuilder`; `WireWrite<V>` writes the
-closure result directly into the parent's output. A manual `FIXED_SIZE` allows later physical
-fields while bounded child cursors prevent over- or under-writing that declared region.
+A manual `FIXED_SIZE` allows later physical fields. Otherwise the child must be terminal or bounded
+by an explicit byte controller. Manual writer errors may occur after partial output.
 
-Primitive schemas support all fixed-width Rust integers and floats. `usize`, `isize`, `bool`,
-`char`, `NonZero*`, and user newtypes use an explicit physical representation such as
-`#[wire(as = u32, le)]`; arbitrary logical types compose through bidirectional `TryFrom`.
-Primitive `[T; N]` fields use the element's declared endian without allocation.
+## Error contract
 
-## Output ownership
+Generated errors are nominal field-site enums. Nested errors retain concrete source types. Read
+errors carry absolute root-input offsets. Incomplete contiguous input reports [`NeedMore`] with the
+offset and an exact or lower-bound `additional_at_least` value.
 
-Fixed slices and borrowed growable collections remain the shortest writer inputs. The generic
-`output::owned(target)` adapter instead stores any contiguous
-`AsRef<[u8]> + AsMut<[u8]> + Extend<u8>` target by value. It adds no allocator dependency and
-allocates only through the target's `Extend` implementation. Unfinished writer states inherit the
-target's `Send` and `'static` properties, so an owned `Vec`, `BytesMut`, or compatible collection
-may cross an ordinary worker channel. `Written::into_parts()` returns the adapter and exact range;
-`Owned::into_inner()` recovers the target.
+The caller owns buffering and retries. The core does not own `Read`, `AsyncRead`, segmented input,
+or resumable parser state.
 
-## Recursive array/object views and writers
+## Deliberate boundaries
 
-A closed selector enum may pass itself directly to a generic body containing either an unsigned
-stored count followed by terminal `wire::Array<T>` or object fields separated by
-`wire::Recursive<T>`. Recursive demand bodies may retain a leading unsigned byte controller across
-a child to bound following raw bytes, then apply padding/alignment before a fixed scalar and the
-next child. Such roots expose `Schema::view::<DEPTH>(backing)` for a caller-selected const depth;
-zero returns `DepthExceeded`.
-
-Framing uses one iterative typed continuation stack. Payloads are selected at compile time and use
-transparent byte-packed representations: plain `u32` counts use four bytes, a plain `u64`
-controller plus resume tag uses nine, and plain `u128` uses seventeen. Child-relative alignment
-adds one packed `usize` body origin only to that grammar. Multiple root body grammars form one
-generated continuation enum whose size is the maximum active payload plus its discriminant, not
-the sum of per-grammar stacks.
-
-Recursive item getters return the same generated root view family. Arrays retain at most 384 bytes
-for exact fixed, affine-formula, interval-event, ranked-palette, factorized, recursive-shape,
-periodic-palette, or packed-run geometry. Every candidate is validated across the complete
-represented sequence before selection; failures use exact prefix replay. No mode stores item
-offsets, and a forward iterator always retains one physical cursor.
-Schema-specific constant, conversion, validator, and manual-leaf errors crossing recursive
-repetition retain their absolute offset but flatten to finite `RecursiveError::Child` values.
-
-Recursive object bodies compile physical segments and child markers into static `start` and
-`resume` transitions. Their views retain direct field boundaries only; a recursive child getter
-re-frames its already-proven exact range into the same generated root view family.
-
-Deriving `WireBuilder` generates an output-owning recursive root writer. Object fields transfer the
-cursor through physical-order typestate stages; recursive array items stream through the same
-root-wide callback and patch their count after completion. The callback is monomorphized and
-retains no recursive tree, plan, allocation, or hidden depth stack. Exact recursive views can be
-copied through either the progressive root writer or the root's copy-only detached capability.
-Generated aliases such as `ValueRootWriter<C>`, `ValuePairWriter<C>`, and
-`ValueWriteResult<T, C>` allow named helpers to move current writer states without naming hidden
-callback or slot types.
-
-## Guarantees
-
-- `view()` accepts one exact representation and rejects trailing input.
-- Generated errors retain field sites, concrete nested sources, and absolute offsets.
-- Derived descriptors are reference-free and `State: 'static`; manual implementations certify the
-  same invariant through unsafe `WireView`.
-- Scalar getters decode lazily from exact source bytes.
-- Fixed `[u8; N]` fields and constants preserve their exact bytes without endian conversion;
-  fixed primitive scalar arrays decode and write each element in the declared byte order.
-- Multiple fixed nested children retain independent state and field-site errors.
-- `wire::Bytes` exposes bounded or terminal source spans without copying.
-- Padding and placement gaps remain opaque on read and are zero-filled by fresh writers.
-- Bounded raw and nested payloads patch their physically earlier length controllers.
-- Shared byte-length controllers reject conflicting write intent without hidden plans.
-- `flag` and `depends_on` generate one present/absent choice closure for coherent groups.
-- `wire::Array<T>` exposes `IntoIterator` facades without retaining item indexes; iterators are
-  fused, and writer `try_extend` consumes arbitrary Rust iterators without retaining a plan.
-- Exact array forwarding copies one validated collection range and patches its authoritative count.
-- Static enums expose Rust unit variants, borrowed exhaustive body variants, and exact unknown
-  bodies.
-- Nominal and inline bitfields use checked logical ranges while fresh writers zero undeclared bits.
-- Typed selections expose merged root-relative chunks and zero-sized paths through nested children.
-- Computed scalar destinations patch from logical fields and physical selections in DAG order.
-- Syntactically fixed structs/bitfields expose prevalidated `ExactSizeIterator` views; closed enums
-  and variable structs frame lazily.
-- Heterogeneous cursors yield coexisting views and never advance on failure.
-- Recursive enum arrays and object bodies retain no per-item offset index, accept caller-selected
-  depths beyond 64, and fail with `DepthExceeded` before crossing that bound.
-- Progressive recursive writers stream object and array children directly, retaining only the
-  output cursor, current count/controller offset, and compile-time typestate.
-- Fixed writers return `NeedMore`; growable collections use their existing `Extend<u8>` capability.
-- Write failure may leave partial unpublished bytes. `finish()` returns the exact represented range.
-- Generated and manual writers allocate nothing inside wire-repr and dispatch statically.
-
-General traversal is the remaining future composition surface. The core does not add negotiated
-selector maps, hidden indexes, general resource-limit machinery, runtime schemas, semantic object
-materialization, async I/O, or feature-selected renderers.
+The `1.0` core does not provide mutable views, semantic object materialization, runtime schema
+reflection, negotiated selector registries, hidden collection indexes, async transport I/O, general
+resource-limit machinery, or general traversal. These boundaries keep representation mechanics
+static, allocation-free, and visible in the type system.

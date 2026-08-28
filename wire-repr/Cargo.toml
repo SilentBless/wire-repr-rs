@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "A no_std, no_alloc Rust library for wire representations."
+description = "Exact-source wire views and progressive no-alloc writers for Rust."
 documentation = "https://docs.rs/wire-repr"
 repository.workspace = true
 homepage.workspace = true
@@ -31,12 +31,20 @@ name = "protocol"
 path = "tests/protocol.rs"
 
 [[example]]
+name = "packet"
+path = "examples/packet.rs"
+
+[[example]]
 name = "mtproto"
 path = "examples/mtproto.rs"
 
 [[example]]
 name = "ipv4"
 path = "examples/ipv4.rs"
+
+[[example]]
+name = "recursive"
+path = "examples/recursive.rs"
 
 [lints]
 workspace = true

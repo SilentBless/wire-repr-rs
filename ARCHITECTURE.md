@@ -1,14 +1,16 @@
 # Architecture
 
-This document defines the target production architecture and clean-cutover contract for
-`wire-repr`. The current implementation covers named structs, fixed scalars and byte arrays,
-constants, explicit logical conversions, validators, nested children, demand geometry, controller
-dependencies, conditional choice groups, counted runtime arrays, static enums, nominal and inline
-bitfields, nested physical selections, computed fields, homogeneous views, heterogeneous cursors,
-exact View forwarding, depth-bounded recursive enum arrays, recursive object continuations, and
-progressive recursive writers. General traversal remains future composition work. New layout
-classes extend this one model rather than restoring the removed legacy renderer or introducing
-parallel modes.
+This document defines the shipped `1.0` architecture and its extension contract. User-facing
+installation and examples live in [`README.md`](README.md); this document records the invariants
+behind generated code, manual capability boundaries, recursion, and measurement.
+
+The implementation covers named structs, fixed scalars and arrays, constants, checked logical
+conversions, validators, nested children, demand geometry, controller dependencies, conditional
+choice groups, counted runtime arrays, static enums, nominal and inline bitfields, nested physical
+selections, computed fields, homogeneous views, heterogeneous cursors, exact View forwarding,
+depth-bounded recursive enum arrays, recursive object continuations, and progressive recursive
+writers. General traversal is not part of the `1.0` core. New layout classes extend this one model
+rather than restoring the removed legacy renderer or introducing parallel modes.
 
 ## 1. Product boundary
 
@@ -153,7 +155,7 @@ remain first in generated generic declarations.
 
 ## 5. Physical fields
 
-Declaration order is physical order. The target field vocabulary includes:
+Declaration order is physical order. The supported field vocabulary includes:
 
 - fixed Rust integers and floats with explicit `be` or `le` where width exceeds one byte;
 - `usize`, `isize`, `bool`, `char`, `NonZero*`, and user newtypes with an explicit physical
@@ -440,16 +442,16 @@ protect geometry; the application owns policy for how far it chooses to iterate.
 physical boundaries are ambiguous are rejected by derive rather than guarded by an arbitrary
 runtime budget.
 
-## 11. Implementation order
+## 11. Shipped verticals
 
 The fixed, demand-geometry, dependency, collection, enum, bitfield, root-selection, computed,
 sequence, cursor, bounded-recursive-array, recursive-object, recursive-demand, recursive-writer,
-nested-selection, fuzz, protocol-fixture, example, and release-verification verticals are complete.
-General traversal is the remaining future composition surface.
+nested-selection, fuzz, protocol-fixture, example, and release-verification verticals are present
+in `1.0`.
 
-Each shipped vertical owns its runtime, derive model, generated/idiomatic/best-safe workloads,
-behavioral tests, fail-fast diagnostics, and documentation in one coherent commit. A phase does not
-land as a compiling scaffold or with a second temporary renderer.
+Each representation class owns its runtime, derive model, generated/idiomatic/best-safe workloads,
+behavioral tests, fail-fast diagnostics, and documentation. General traversal remains a separate
+future composition surface rather than an implicit promise of the current view API.
 
 ## 12. Performance and verification
 
