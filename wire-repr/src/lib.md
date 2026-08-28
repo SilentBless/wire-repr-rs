@@ -47,7 +47,27 @@ assert_eq!(written.as_bytes(), input);
 The stored length remains visible on the view, but the writer derives it from `payload`; no length
 setter is generated. Constants are validated and exposed on views, then emitted automatically.
 
-See the runnable [packet example](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/packet.rs).
+## Executable showcases
+
+The repository includes live network examples with no application credentials:
+
+- [DNS over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/dns.rs)
+  builds a query and frames the returned datagram.
+- [NTPv4 over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ntp.rs)
+  validates real server timestamps and calculates the observed clock offset.
+- [Telegram MTProto over TCP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/telegram.rs)
+  performs `req_pq_multi → resPQ` against DC2 with typed TL views, computed request fields, schema
+  validators, bounded transport reads, and a runtime fingerprint array.
+- The [recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
+  compiles an expression, patches a physical digest, validates the framed program, and evaluates
+  retained recursive child views.
+
+Network and operating-system randomness are example-only dependencies; they do not enter the
+normal target graph.
+
+DNS and NTP are plaintext demonstrations: their correlation fields do not authenticate a responder.
+The Telegram example likewise stops before the authentication-key exchange establishes identity.
+
 
 ## Retained views
 
@@ -176,10 +196,13 @@ Computed scalar destinations use `computed = callback(...)`; fallible callbacks 
 `try_computed`. Callback arguments may combine logical getters with `include(...)` and
 `exclude(...)` physical selections. The generated dependency DAG evaluates and patches computed
 fields in topological order.
+Callbacks with arguments use the generated `WireView` to resolve exact fields and ranges. A
+zero-argument callback needs no view and remains available to a `WireBuilder`-only schema.
 
-The complete [IPv4 example](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ipv4.rs)
-uses nominal bitfields and computes the Internet checksum over all physical header bytes except the
-checksum destination.
+The
+[expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
+uses `exclude(self)` to compute an FNV-1a digest over dynamic bytecode, then verifies the stored
+value through a schema validator.
 
 ## Sequences and cursors
 
@@ -211,7 +234,8 @@ moves through monomorphized continuation closures. The writer retains no recursi
 encoded plan, allocation, dynamic dispatch, or hidden depth stack. Exact recursive views may be
 copied directly.
 
-See the runnable [recursive example](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/recursive.rs).
+See the runnable
+[recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs).
 
 ## Manual capabilities
 

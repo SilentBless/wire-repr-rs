@@ -413,10 +413,11 @@ cycle; excluding it is the ordinary checksum form. `try_computed` uses the same 
 expects a fallible callback marked with `#[computed]`. At `finish`, the generated dependency DAG
 patches callbacks in topological order after payload controllers are authoritative. Computed
 destinations cannot themselves control geometry, be conditional, declare placement, or follow a
-demand-derived offset. Writing computed fields requires the schema's generated `WireView`
-capability so the final patch pass can frame exact physical ranges without retaining per-field
-plans. Reading returns the stored value and never recomputes it. A fallible callback may leave
-partial unpublished output.
+demand-derived offset. Writing callbacks that inspect logical fields or physical selections
+requires the schema's generated `WireView` capability so the final patch pass can frame exact
+ranges without retaining per-field plans. A zero-argument callback specializes to a direct call
+and therefore remains available to a `WireBuilder`-only schema. Reading returns the stored value
+and never recomputes it. A fallible callback may leave partial unpublished output.
 
 ## 10. Errors and incomplete input
 
@@ -484,9 +485,11 @@ than retaining an infinitely recursive concrete source type. Fuzzing extends the
 controller overflow, count bombs, non-progress items, dependency cycles, malformed deferred
 ranges, and iteration termination.
 
-The release fixtures exercise generic MTProto TL composition and an IPv4 header with nominal
-bitfields plus a computed Internet checksum. Deterministic structural fuzz cases cover controller
-bombs, malformed dynamic ranges, collection termination, and failure-atomic sequence movement.
+Protocol fixtures exercise generic MTProto TL composition and an IPv4 header with nominal
+bitfields plus a computed Internet checksum. Public examples additionally execute live DNS and NTP
+round trips, a typed Telegram `req_pq_multi → resPQ` bootstrap, and a computed/validated recursive
+expression VM. Deterministic structural fuzz cases cover controller bombs, malformed dynamic
+ranges, collection termination, and failure-atomic sequence movement.
 
 ## 13. Explicit non-goals
 

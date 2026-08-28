@@ -36,5 +36,7 @@ The first stable release of `wire-repr`.
   class.
 - Behavioral, compile-failure, protocol, structural-fuzz, documentation, package, MSRV, and
   cross-target release checks.
+- Executable DNS, NTP, Telegram MTProto, and recursive expression-VM showcases exercise real
+  network bytes, computed fields, schema validators, runtime collections, and recursive writers.
 
 [1.0.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.0

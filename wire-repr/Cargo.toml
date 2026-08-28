@@ -21,6 +21,7 @@ wire-repr-macros.workspace = true
 
 [dev-dependencies]
 bytes.workspace = true
+getrandom.workspace = true
 
 [[test]]
 name = "suite"
@@ -31,20 +32,20 @@ name = "protocol"
 path = "tests/protocol.rs"
 
 [[example]]
-name = "packet"
-path = "examples/packet.rs"
+name = "dns"
+path = "examples/dns.rs"
 
 [[example]]
-name = "mtproto"
-path = "examples/mtproto.rs"
+name = "ntp"
+path = "examples/ntp.rs"
 
 [[example]]
-name = "ipv4"
-path = "examples/ipv4.rs"
+name = "telegram"
+path = "examples/telegram.rs"
 
 [[example]]
-name = "recursive"
-path = "examples/recursive.rs"
+name = "expression_vm"
+path = "examples/expression_vm.rs"
 
 [lints]
 workspace = true

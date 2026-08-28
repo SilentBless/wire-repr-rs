@@ -65,8 +65,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 patches it from `payload`, so no length setter is generated. Constants behave the same way: they are
 validated and exposed on views, then written automatically.
 
-The complete runnable version is
-[`wire-repr/examples/packet.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/packet.rs).
+## Live network examples
+
+The examples include actual network round trips rather than only embedded byte fixtures:
+
+```text
+cargo run -p wire-repr --example dns -- example.com
+cargo run -p wire-repr --example ntp
+cargo run -p wire-repr --example telegram
+```
+
+[`dns.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/dns.rs)
+builds a DNS query, sends it through `UdpSocket`, frames the returned datagram, and prints its
+flags and section counts.
+[`ntp.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ntp.rs)
+builds an NTPv4 client packet, validates the server response, and calculates the observed clock
+offset.
+
+DNS transaction IDs and echoed NTP origin timestamps correlate replies but do not authenticate
+plaintext UDP. Their output is informational; consumers requiring trusted naming or time need the
+appropriate authenticated protocol.
+
+The advanced
+[`telegram.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/telegram.rs)
+example opens a real intermediate-transport TCP connection to Telegram DC2. Its schema writes the
+transport marker as a constant, derives both framing lengths, computes a fresh MTProto message ID,
+and obtains the `int128` nonce through a fallible computed callback. The response is represented by
+typed `resPQ`, short TL bytes, and fingerprint-vector views with schema validators—no hand-written
+wire parser. It stops before factorization and Diffie-Hellman because receiving `resPQ` alone does
+not authenticate the server.
+
+These binaries use only `std` networking plus the dev-only `getrandom` dependency. Neither enters
+the normal `wire-repr` target dependency graph. Every network read has a timeout and a declared
+maximum frame size; command-line arguments can override the default resolver, time server, or
+Telegram endpoint.
 
 ## Views retain your backing
 
@@ -181,9 +213,10 @@ checksum: u16,
 ```
 
 `select(&view)` also exposes ordered, merged `chunks()` and byte iteration through nested typed
-field paths. See the complete
-[IPv4 example](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ipv4.rs)
-for nominal bitfields and an Internet checksum over exact physical bytes.
+field paths. The
+[expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
+wraps recursive bytecode in a dynamic representation whose FNV-1a digest is generated from exact
+physical ranges and checked again by a schema validator.
 
 ## Recursive layouts
 
@@ -200,8 +233,9 @@ Progressive recursive writers stream children through the same output cursor and
 tree or encoded plan.
 
 The runnable
-[recursive example](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/recursive.rs)
-builds and reads a nested pair/list value.
+[recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
+compiles `(20 + 22) * -2` through the progressive writer, wraps it with a computed and validated
+digest, then evaluates the retained recursive child views.
 [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/ARCHITECTURE.md)
 documents the compact geometry and continuation invariants for maintainers.
 
@@ -222,23 +256,23 @@ The caller owns buffering and retries. `wire-repr` does not retain resumable par
 
 ## Examples
 
-All examples are executable with the pinned Rust 1.91 toolchain:
+From a repository checkout, all examples are executable with the pinned Rust 1.91 toolchain:
 
 ```text
-cargo run -p wire-repr --example packet
-cargo run -p wire-repr --example mtproto
-cargo run -p wire-repr --example ipv4
-cargo run -p wire-repr --example recursive
+cargo run -p wire-repr --example dns -- example.com
+cargo run -p wire-repr --example ntp
+cargo run -p wire-repr --example telegram
+cargo run -p wire-repr --example expression_vm
 ```
 
-- [`packet.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/packet.rs)
-  — the shortest end-to-end dynamic packet.
-- [`mtproto.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/mtproto.rs)
-  — generic TL constructor composition.
-- [`ipv4.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ipv4.rs)
-  — a real IPv4 header with bitfields and checksum patching.
-- [`recursive.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/recursive.rs)
-  — recursive arrays and object continuations.
+- [`dns.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/dns.rs)
+  — live DNS query and response framing over UDP.
+- [`ntp.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ntp.rs)
+  — live NTPv4 request, timestamp validation, and clock-offset calculation.
+- [`telegram.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/telegram.rs)
+  — real MTProto auth bootstrap against Telegram DC2.
+- [`expression_vm.rs`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
+  — recursive binary compiler, computed digest, validator, and evaluator.
 
 The full API guide is on [docs.rs](https://docs.rs/wire-repr). The detailed internal contract is
 in [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/ARCHITECTURE.md).
