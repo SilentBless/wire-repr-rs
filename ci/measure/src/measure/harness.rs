@@ -1,4 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -23,6 +24,28 @@ pub enum HarnessError {
     Output(String),
 }
 
+#[derive(Clone, Debug, Hash)]
+pub struct HarnessEntry {
+    symbol: String,
+    source: String,
+    function: String,
+}
+
+impl HarnessEntry {
+    #[must_use]
+    pub fn new(
+        symbol: impl Into<String>,
+        source: impl Into<String>,
+        function: impl Into<String>,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            source: source.into(),
+            function: function.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HarnessBuilder {
     workspace: PathBuf,
@@ -39,16 +62,58 @@ impl HarnessBuilder {
         }
     }
 
-    pub fn build(&self, role: &Path, entry: &str) -> Result<Harness, HarnessError> {
-        let role = canonical(role)?;
-        if !identifier(entry) {
-            return Err(HarnessError::Build(format!(
-                "entry `{entry}` is not a Rust identifier"
-            )));
+    pub fn build(
+        &self,
+        sources: &BTreeMap<String, PathBuf>,
+        entries: &[HarnessEntry],
+    ) -> Result<HarnessSet, HarnessError> {
+        if sources.is_empty() || entries.is_empty() {
+            return Err(HarnessError::Build(
+                "harness requires at least one source and entry".to_owned(),
+            ));
         }
-        let mut hasher = DefaultHasher::new();
-        role.hash(&mut hasher);
-        entry.hash(&mut hasher);
+
+        let mut canonical_sources = BTreeMap::new();
+        for (name, path) in sources {
+            if !identifier(name) {
+                return Err(HarnessError::Build(format!(
+                    "source `{name}` is not a Rust identifier"
+                )));
+            }
+            canonical_sources.insert(name.clone(), canonical(path)?);
+        }
+
+        let mut symbols = BTreeSet::new();
+        for entry in entries {
+            if !identifier(&entry.symbol)
+                || !identifier(&entry.source)
+                || !identifier(&entry.function)
+            {
+                return Err(HarnessError::Build(format!(
+                    "harness entry `{}` contains an invalid Rust identifier",
+                    entry.symbol
+                )));
+            }
+            if !canonical_sources.contains_key(&entry.source) {
+                return Err(HarnessError::Build(format!(
+                    "harness entry `{}` references missing source `{}`",
+                    entry.symbol, entry.source
+                )));
+            }
+            if !symbols.insert(entry.symbol.clone()) {
+                return Err(HarnessError::Build(format!(
+                    "duplicate harness entry `{}`",
+                    entry.symbol
+                )));
+            }
+        }
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (name, path) in &canonical_sources {
+            name.hash(&mut hasher);
+            path.hash(&mut hasher);
+        }
+        entries.hash(&mut hasher);
         let id = format!("{:016x}", hasher.finish());
         let root = self.target.join("harnesses").join(&id);
         let source_dir = root.join("src");
@@ -82,7 +147,10 @@ strip = false
             serde_json::to_string(&wire_repr.to_string_lossy()).expect("path serializes")
         );
         write(&root.join("Cargo.toml"), &manifest)?;
-        write(&source_dir.join("main.rs"), &main_source(&role, entry))?;
+        write(
+            &source_dir.join("main.rs"),
+            &main_source(&canonical_sources, entries),
+        )?;
 
         let build_target = self.target.join("build");
         let output = Command::new("cargo")
@@ -126,9 +194,37 @@ strip = false
                     .is_file()
                     .then(|| executable.with_extension("pdb"))
             });
-        Ok(Harness {
+        Ok(HarnessSet {
             executable,
             debug_info,
+            entries: symbols,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HarnessSet {
+    executable: PathBuf,
+    debug_info: Option<PathBuf>,
+    entries: BTreeSet<String>,
+}
+
+impl HarnessSet {
+    #[must_use]
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    pub fn entry(&self, symbol: &str) -> Result<Harness, HarnessError> {
+        if !self.entries.contains(symbol) {
+            return Err(HarnessError::Build(format!(
+                "harness has no entry `{symbol}`"
+            )));
+        }
+        Ok(Harness {
+            executable: self.executable.clone(),
+            debug_info: self.debug_info.clone(),
+            symbol: symbol.to_owned(),
         })
     }
 }
@@ -137,6 +233,7 @@ strip = false
 pub struct Harness {
     executable: PathBuf,
     debug_info: Option<PathBuf>,
+    symbol: String,
 }
 
 impl Harness {
@@ -150,8 +247,13 @@ impl Harness {
         self.debug_info.as_deref()
     }
 
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
     pub fn check(&self, seeds: &[i64]) -> Result<Vec<(i64, u64)>, HarnessError> {
-        let mut arguments = vec!["check".to_owned()];
+        let mut arguments = vec!["check".to_owned(), self.symbol.clone()];
         arguments.extend(seeds.iter().map(ToString::to_string));
         let output = self.run(&arguments)?;
         output
@@ -174,6 +276,7 @@ impl Harness {
     pub fn sample(&self, seed: i64, warmup: u64, iterations: u64) -> Result<Sample, HarnessError> {
         let output = self.run(&[
             "sample".to_owned(),
+            self.symbol.clone(),
             seed.to_string(),
             warmup.to_string(),
             iterations.to_string(),
@@ -231,59 +334,91 @@ struct CargoDiagnostic {
     rendered: Option<String>,
 }
 
-fn main_source(role: &Path, entry: &str) -> String {
-    let role = format!("{:?}", role.to_string_lossy());
-    format!(
-        r###"#![allow(unsafe_code)]
-#[path = {role}]
-mod implementation;
+fn main_source(sources: &BTreeMap<String, PathBuf>, entries: &[HarnessEntry]) -> String {
+    let mut output = String::from("#![allow(unsafe_code)]\n\n");
+    for (name, path) in sources {
+        let path = format!("{:?}", path.to_string_lossy());
+        writeln!(output, "#[path = {path}]\nmod {name};\n")
+            .expect("writing to a String is infallible");
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        writeln!(
+            output,
+            "#[unsafe(no_mangle)]\n#[inline(never)]\npub extern \"C\" fn {}(seed: u64) -> u64 {{\n    {}::{}(seed)\n}}\n",
+            entry.symbol, entry.source, entry.function
+        )
+        .expect("writing to a String is infallible");
+        writeln!(
+            output,
+            "#[cfg(target_os = \"windows\")]\n#[used]\n#[unsafe(link_section = \".drectve\")]\nstatic EXPORT_{index}: [u8; b\" /EXPORT:{}\".len()] = *b\" /EXPORT:{}\";\n",
+            entry.symbol, entry.symbol
+        )
+        .expect("writing to a String is infallible");
+    }
+    output.push_str(
+        r#"
+fn check(
+    arguments: impl Iterator<Item = String>,
+    measure: impl Fn(u64) -> u64,
+) {
+    for seed in arguments {
+        let signed: i64 = seed.parse().unwrap();
+        println!("result {signed} {}", measure(signed as u64));
+    }
+}
 
-#[unsafe(no_mangle)]
-#[inline(never)]
-pub extern "C" fn measure_entry(seed: u64) -> u64 {{
-    implementation::{entry}(seed)
-}}
+fn sample(
+    mut arguments: impl Iterator<Item = String>,
+    measure: impl Fn(u64) -> u64,
+) {
+    let signed: i64 = arguments.next().unwrap().parse().unwrap();
+    let warmup: u64 = arguments.next().unwrap().parse().unwrap();
+    let iterations: u64 = arguments.next().unwrap().parse().unwrap();
+    assert!(arguments.next().is_none());
+    let mut seed = signed as u64;
+    let mut digest = 0u64;
+    for _ in 0..warmup {
+        seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        digest ^= std::hint::black_box(measure(std::hint::black_box(seed)));
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        digest ^= std::hint::black_box(measure(std::hint::black_box(seed)));
+    }
+    let elapsed = start.elapsed().as_nanos();
+    std::hint::black_box(digest);
+    println!("sample {elapsed} {iterations} {digest}");
+}
 
-#[cfg(target_os = "windows")]
-#[used]
-#[unsafe(link_section = ".drectve")]
-static EXPORT_MEASURE_ENTRY: [u8; b" /EXPORT:measure_entry".len()] =
-    *b" /EXPORT:measure_entry";
-
-fn main() {{
+fn main() {
     let mut arguments = std::env::args().skip(1);
-    match arguments.next().as_deref() {{
-        Some("check") => {{
-            for seed in arguments {{
-                let signed: i64 = seed.parse().unwrap();
-                println!("result {{signed}} {{}}", measure_entry(signed as u64));
-            }}
-        }}
-        Some("sample") => {{
-            let signed: i64 = arguments.next().unwrap().parse().unwrap();
-            let warmup: u64 = arguments.next().unwrap().parse().unwrap();
-            let iterations: u64 = arguments.next().unwrap().parse().unwrap();
-            assert!(arguments.next().is_none());
-            let mut seed = signed as u64;
-            let mut digest = 0u64;
-            for _ in 0..warmup {{
-                seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-                digest ^= std::hint::black_box(measure_entry(std::hint::black_box(seed)));
-            }}
-            let start = std::time::Instant::now();
-            for _ in 0..iterations {{
-                seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-                digest ^= std::hint::black_box(measure_entry(std::hint::black_box(seed)));
-            }}
-            let elapsed = start.elapsed().as_nanos();
-            std::hint::black_box(digest);
-            println!("sample {{elapsed}} {{iterations}} {{digest}}");
-        }}
-        _ => panic!("expected check or sample"),
-    }}
-}}
-"###
-    )
+    let command = arguments.next();
+    let entry = arguments.next();
+    match (command.as_deref(), entry.as_deref()) {
+"#,
+    );
+    for entry in entries {
+        writeln!(
+            output,
+            "        (Some(\"check\"), Some(\"{}\")) => check(arguments, |seed| {}(seed)),",
+            entry.symbol, entry.symbol
+        )
+        .expect("writing to a String is infallible");
+        writeln!(
+            output,
+            "        (Some(\"sample\"), Some(\"{}\")) => sample(arguments, |seed| {}(seed)),",
+            entry.symbol, entry.symbol
+        )
+        .expect("writing to a String is infallible");
+    }
+    output.push_str(
+        r#"        _ => panic!("expected check or sample and a known entry"),
+    }
+}
+"#,
+    );
+    output
 }
 
 fn canonical(path: &Path) -> Result<PathBuf, HarnessError> {

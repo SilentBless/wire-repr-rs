@@ -469,9 +469,11 @@ selections, fixed and dynamic computed fields, fixed and variable homogeneous vi
 heterogeneous cursors, all eight compact recursive geometry forms plus replay, recursive pair and
 demand continuations, progressive recursive object/array/demand builds, and fixed,
 borrowed-growable, owned-growable, and callback-driven output. Each covers read and write paths
-where applicable. Pinned Rizin 0.9.1 analyzes final linked ELF, Mach-O, and PE consumers through an
-exported `measure_entry`; Windows builds additionally load their generated PDB. Artifact evidence
-keeps named linker calls distinct from unresolved indirect dispatch.
+where applicable. Each role compiles once per workload and exports one stable measurement entry
+per case, so compilation is amortized without linking generated, idiomatic, and best-safe roles
+into one consumer. Pinned Rizin 0.9.1 analyzes the final linked ELF, Mach-O, and PE role artifacts;
+Windows builds additionally load their generated PDB. Artifact evidence keeps named linker calls
+distinct from unresolved indirect dispatch.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
 IR may explain an optimization result but is not treated as a latency oracle. State and
 artifact-size probes remain isolated from measured hot-path implementations.

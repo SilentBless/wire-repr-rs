@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
+
 use wire_repr_measure::measure::artifact::Analyzer;
-use wire_repr_measure::measure::harness::HarnessBuilder;
+use wire_repr_measure::measure::harness::{HarnessBuilder, HarnessEntry};
 
 #[test]
-fn builds_and_executes_an_isolated_role_harness() {
+fn builds_one_harness_for_multiple_sources_and_entries() {
     let root = std::env::temp_dir().join(format!(
         "wire-repr-measure-harness-{}-{}",
         std::process::id(),
@@ -12,9 +14,9 @@ fn builds_and_executes_an_isolated_role_harness() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let role = root.join("generated.rs");
+    let generated = root.join("generated.rs");
     std::fs::write(
-        &role,
+        &generated,
         r#"
 fn rotate(seed: u64) -> u64 { seed.rotate_left(7) }
 #[unsafe(no_mangle)]
@@ -27,30 +29,49 @@ pub fn decode(seed: u64) -> u64 { tail_helper(rotate, seed) }
 "#,
     )
     .unwrap();
+    let idiomatic = root.join("idiomatic.rs");
+    std::fs::write(
+        &idiomatic,
+        "pub fn decode(seed: u64) -> u64 { seed.wrapping_add(5) }\n",
+    )
+    .unwrap();
 
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap();
+    let sources = BTreeMap::from([
+        ("generated".to_owned(), generated),
+        ("idiomatic".to_owned(), idiomatic),
+    ]);
+    let entries = [
+        HarnessEntry::new("measure_entry_generated_decode", "generated", "decode"),
+        HarnessEntry::new("measure_entry_idiomatic_decode", "idiomatic", "decode"),
+    ];
     let harness = HarnessBuilder::new(workspace, root.join("target"), "1.91.0")
-        .build(&role, "decode")
+        .build(&sources, &entries)
         .unwrap();
+    let generated = harness.entry("measure_entry_generated_decode").unwrap();
+    let idiomatic = harness.entry("measure_entry_idiomatic_decode").unwrap();
 
-    assert_eq!(harness.check(&[0, 1, -1]).unwrap()[1], (1, 128));
-    let sample = harness.sample(1, 10, 100).unwrap();
+    assert_eq!(generated.check(&[0, 1, -1]).unwrap()[1], (1, 128));
+    assert_eq!(idiomatic.check(&[0, 1, -1]).unwrap()[1], (1, 6));
+    let sample = generated.sample(1, 10, 100).unwrap();
     assert_eq!(sample.iterations, 100);
     assert!(sample.elapsed_ns > 0);
-    assert!(harness.executable().is_file());
+    assert_eq!(generated.executable(), idiomatic.executable());
     #[cfg(target_os = "windows")]
-    assert!(harness.debug_info().is_some());
-    let metrics = Analyzer::open(harness.executable())
-        .unwrap()
-        .analyze("measure_entry")
-        .unwrap();
+    assert!(generated.debug_info().is_some());
+    let analyzer = Analyzer::open(generated.executable()).unwrap();
+    let metrics = analyzer.analyze(generated.symbol()).unwrap();
     assert!(metrics.transitive_indirect_calls > 0);
     #[cfg(not(target_os = "windows"))]
     assert!(metrics.transitive_allocation_symbols > 0);
+    assert_eq!(
+        analyzer.analyze(idiomatic.symbol()).unwrap().indirect_calls,
+        0
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::formula::FormulaEngine;
 use crate::measure::artifact::{Analyzer, ArtifactError, Metrics as ArtifactMetrics};
-use crate::measure::harness::{Harness, HarnessBuilder, HarnessError};
+use crate::measure::harness::{Harness, HarnessBuilder, HarnessEntry, HarnessError, HarnessSet};
 use crate::measure::runtime::{RuntimeError, calibration_next, interleaved_roles, summarize};
 use crate::policy::{Finding, PolicyError, evaluate};
 use crate::report::{CaseReport, Report, RoleReport, RunSummary, WorkloadReport};
@@ -66,29 +66,74 @@ pub fn run(options: &Options) -> Result<Report, EngineError> {
         {
             continue;
         }
-        let mut probe_metrics: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
-        for probe in &workload.probes {
-            let harness = builder.build(&probe.source, &probe.config.entry)?;
-            let value = harness.check(&[0])?[0].1 as f64;
-            probe_metrics
-                .entry(probe.config.role.clone())
-                .or_default()
-                .insert(probe.config.name.clone(), value);
+        let selected_cases = workload
+            .config
+            .cases
+            .iter()
+            .filter(|case| {
+                let identity = format!("{}/{}", workload.config.name, case.name);
+                options
+                    .filter
+                    .as_ref()
+                    .is_none_or(|filter| identity.contains(filter))
+            })
+            .collect::<Vec<_>>();
+        if selected_cases.is_empty() {
+            continue;
         }
-        let mut cases = Vec::new();
-        for case in &workload.config.cases {
-            let identity = format!("{}/{}", workload.config.name, case.name);
-            if options
-                .filter
-                .as_ref()
-                .is_some_and(|filter| !identity.contains(filter))
-            {
-                continue;
+
+        let mut probe_metrics: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+        if !workload.probes.is_empty() {
+            let mut sources = BTreeMap::new();
+            let mut entries = Vec::with_capacity(workload.probes.len());
+            let mut probes = Vec::with_capacity(workload.probes.len());
+            for (index, probe) in workload.probes.iter().enumerate() {
+                let source_name = format!("metric_probe_{index}");
+                sources.insert(source_name.clone(), probe.source.clone());
+                let symbol = format!("measure_probe_{index}_{}", probe.config.name);
+                entries.push(HarnessEntry::new(&symbol, source_name, &probe.config.entry));
+                probes.push((probe, symbol));
             }
+            let harnesses = builder.build(&sources, &entries)?;
+            for (probe, symbol) in probes {
+                let harness = harnesses.entry(&symbol)?;
+                let value = harness.check(&[0])?[0].1 as f64;
+                probe_metrics
+                    .entry(probe.config.role.clone())
+                    .or_default()
+                    .insert(probe.config.name.clone(), value);
+            }
+        }
+
+        let mut role_harnesses = BTreeMap::new();
+        for (role, source) in &workload.roles {
+            let sources = BTreeMap::from([("implementation".to_owned(), source.clone())]);
+            let entries = selected_cases
+                .iter()
+                .map(|case| {
+                    HarnessEntry::new(case_symbol(role, &case.name), "implementation", &case.entry)
+                })
+                .collect::<Vec<_>>();
+            let harnesses = builder.build(&sources, &entries)?;
+            let analyzer = Analyzer::open(harnesses.executable())?;
+            role_harnesses.insert(
+                role.clone(),
+                WorkloadRole {
+                    harnesses,
+                    analyzer,
+                },
+            );
+        }
+
+        let mut cases = Vec::with_capacity(selected_cases.len());
+        for case in selected_cases {
             let mut states = BTreeMap::new();
-            for (role, source) in &workload.roles {
-                let harness = builder.build(source, &case.entry)?;
-                let artifact = Analyzer::open(harness.executable())?.analyze("measure_entry")?;
+            for role in workload.roles.keys() {
+                let role_harness = &role_harnesses[role];
+                let harness = role_harness
+                    .harnesses
+                    .entry(&case_symbol(role, &case.name))?;
+                let artifact = role_harness.analyzer.analyze(harness.symbol())?;
                 states.insert(
                     role.clone(),
                     RoleState {
@@ -176,12 +221,10 @@ pub fn run(options: &Options) -> Result<Report, EngineError> {
                 findings: evaluation.findings,
             });
         }
-        if !cases.is_empty() {
-            workload_reports.push(WorkloadReport {
-                name: workload.config.name,
-                cases,
-            });
-        }
+        workload_reports.push(WorkloadReport {
+            name: workload.config.name,
+            cases,
+        });
     }
     if workload_reports.is_empty() {
         return Err(EngineError::EmptySelection);
@@ -211,9 +254,18 @@ pub fn run(options: &Options) -> Result<Report, EngineError> {
     })
 }
 
+struct WorkloadRole {
+    harnesses: HarnessSet,
+    analyzer: Analyzer,
+}
+
 struct RoleState {
     harness: Harness,
     report: RoleReport,
+}
+
+fn case_symbol(role: &str, case: &str) -> String {
+    format!("measure_entry_{role}_{case}")
 }
 
 fn flatten(roles: &BTreeMap<String, RoleReport>) -> BTreeMap<String, f64> {

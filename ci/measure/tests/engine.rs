@@ -44,11 +44,20 @@ unit = "%"
 name = "no dispatch"
 level = "error"
 assert = "generated_artifact_indirect_calls == 0"
+[[cases]]
+name = "encode"
+entry = "encode"
+seeds = [0, 1, -1]
+[cases.runtime]
+samples = 3
+target_ms = 1
+warmup = 10
 "#,
     )
     .unwrap();
     let role = r#"
 pub fn decode(seed: u64) -> u64 { seed.rotate_left(7) }
+pub fn encode(seed: u64) -> u64 { seed.rotate_right(3) }
 "#;
     std::fs::write(zone.join("generated.rs"), role).unwrap();
     std::fs::write(zone.join("idiomatic.rs"), role).unwrap();
@@ -78,11 +87,16 @@ pub fn decode(seed: u64) -> u64 { seed.rotate_left(7) }
     assert_eq!(report.summary.errors, 0);
     assert_eq!(report.workloads[0].name, "fixed/foo");
     let case = &report.workloads[0].cases[0];
+    assert_eq!(report.workloads[0].cases.len(), 2);
     assert!(case.equivalent);
     assert!(case.roles["generated"].artifact.is_some());
     assert!(case.roles["generated"].runtime.is_some());
     assert_eq!(case.roles["generated"].custom["state_bytes"], 8.0);
     assert_eq!(case.formulas[0].name, "gap");
 
+    let harnesses = std::fs::read_dir(root.join("target/harness/harnesses"))
+        .unwrap()
+        .count();
+    assert_eq!(harnesses, 4);
     std::fs::remove_dir_all(root).unwrap();
 }
