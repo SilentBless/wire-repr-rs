@@ -2,7 +2,7 @@
 
 All notable public changes to `wire-repr` are recorded here.
 
-## [1.0.0] - 2026-08-28
+## [1.0.0] - 2026-08-29
 
 The first stable release of `wire-repr`.
 
@@ -34,8 +34,8 @@ The first stable release of `wire-repr`.
 - `no_std`, no allocation inside wire-repr, no runtime dispatch, and no Cargo features.
 - Generated, idiomatic handwritten, and best-safe comparison workloads for every shipped layout
   class.
-- Behavioral, compile-failure, protocol, structural-fuzz, documentation, package, MSRV, and
-  cross-target release checks.
+- Behavioral, compile-failure, protocol, coverage-guided fuzzing, documentation, package, MSRV,
+  and cross-target release checks.
 - Executable DNS, NTP, Telegram MTProto, and recursive expression-VM showcases exercise real
   network bytes, computed fields, schema validators, runtime collections, and recursive writers.
 
