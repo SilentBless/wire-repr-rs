@@ -72,6 +72,7 @@ pub fn decode(seed: u64) -> u64 { tail_helper(rotate, seed) }
         analyzer.analyze(idiomatic.symbol()).unwrap().indirect_calls,
         0
     );
+    drop(analyzer);
 
     std::fs::remove_dir_all(root).unwrap();
 }
