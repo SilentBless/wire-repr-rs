@@ -228,6 +228,8 @@ separating named linker calls from unresolved dispatch before runtime samples ar
 The core remains featureless and allocation-free; optional application storage appears only through
 caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/ARCHITECTURE.md)
 for the generated-state, recursion, and measurement invariants.
+Ongoing repository and API work is ordered in
+[`ROADMAP.md`](https://github.com/SilentBless/wire-repr-rs/blob/master/ROADMAP.md).
 
 ## ⚠️ Errors and incomplete input
 
