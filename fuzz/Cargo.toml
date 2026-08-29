@@ -1,0 +1,44 @@
+[package]
+name = "wire-repr-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+thiserror = "2"
+wire-repr = { path = "../wire-repr" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "view_compound"
+path = "fuzz_targets/view_compound.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "builder_roundtrip"
+path = "fuzz_targets/builder_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "recursive"
+path = "fuzz_targets/recursive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sequence_cursor"
+path = "fuzz_targets/sequence_cursor.rs"
+test = false
+doc = false
+bench = false

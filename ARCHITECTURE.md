@@ -484,15 +484,15 @@ identity, typestate failures, manual capability composition, partial-output fail
 growth adapters, and generated/handwritten equivalence. Across a recursive repetition boundary,
 generated structural kinds and absolute offsets remain finite, but schema-specific constant,
 conversion, validator, or manual-leaf sources flatten to `RecursiveError::Child { offset }` rather
-than retaining an infinitely recursive concrete source type. Fuzzing extends the same invariants to
-controller overflow, count bombs, non-progress items, dependency cycles, malformed deferred
-ranges, and iteration termination.
-
-Protocol fixtures exercise generic MTProto TL composition and an IPv4 header with nominal
+Coverage-guided fuzzing extends the same invariants across one compound controller/selection
+schema, progressive fixed-versus-owned writer equivalence against a handwritten byte oracle,
+recursive `get`/iteration range equivalence, and failure-atomic sequences and cursors. Reviewed
+seed inputs are committed; evolving coverage corpora stay local, while minimized failures become
+regressions. Pull requests run bounded smoke sessions and a scheduled workflow performs deeper
+runs. Protocol fixtures exercise generic MTProto TL composition and an IPv4 header with nominal
 bitfields plus a computed Internet checksum. Public examples additionally execute live DNS and NTP
 round trips, a typed Telegram `req_pq_multi → resPQ` bootstrap, and a computed/validated recursive
-expression VM. Deterministic structural fuzz cases cover controller bombs, malformed dynamic
-ranges, collection termination, and failure-atomic sequence movement.
+expression VM.
 
 ## 13. Explicit non-goals
 

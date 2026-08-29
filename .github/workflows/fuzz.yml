@@ -1,0 +1,50 @@
+name: Fuzz
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '120' || '20' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned nightly
+        run: rustup toolchain install nightly-2026-08-01 --profile minimal --component rustfmt --component clippy
+      - name: Install cargo-fuzz 0.13.2
+        run: cargo +nightly-2026-08-01 install cargo-fuzz --version 0.13.2 --locked
+      - name: Check fuzz harness
+        working-directory: fuzz
+        run: |
+          cargo +nightly-2026-08-01 fmt -- --check
+          cargo +nightly-2026-08-01 clippy --all-targets -- -D warnings
+      - name: Fuzz public read and write contracts
+        working-directory: fuzz
+        run: |
+          for target in view_compound builder_roundtrip recursive sequence_cursor; do
+            cargo +nightly-2026-08-01 fuzz run "$target" -- \
+              -max_total_time="$FUZZ_SECONDS" \
+              -max_len=512 \
+              -timeout=5 \
+              -rss_limit_mb=2048
+          done
+      - name: Upload minimized failures
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+          retention-days: 7

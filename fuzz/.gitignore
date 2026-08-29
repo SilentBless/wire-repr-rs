@@ -1,0 +1,22 @@
+target/
+artifacts/
+coverage/
+
+# Keep only reviewed seed inputs; libFuzzer's evolving corpus stays local.
+corpus/*
+!corpus/view_compound/
+!corpus/builder_roundtrip/
+!corpus/recursive/
+!corpus/sequence_cursor/
+corpus/view_compound/*
+!corpus/view_compound/minimal
+!corpus/view_compound/present
+corpus/builder_roundtrip/*
+!corpus/builder_roundtrip/basic
+corpus/recursive/*
+!corpus/recursive/leaf
+!corpus/recursive/array
+!corpus/recursive/nested
+corpus/sequence_cursor/*
+!corpus/sequence_cursor/valid
+!corpus/sequence_cursor/truncated

@@ -265,6 +265,16 @@ python3 ci/check-fail-fast.py
 cargo +1.91.0 run -p wire-repr-measure --release -- run
 ```
 
+Coverage-guided fuzz targets live under `fuzz/` for compound framing, progressive round trips,
+recursive access, and failure-atomic sequences/cursors. For a local smoke run:
+
+```text
+cargo +nightly-2026-08-01 fuzz run recursive -- -max_total_time=20 -max_len=512
+```
+
+Pull requests run all four targets for 20 seconds each. The scheduled workflow extends each target
+to 120 seconds without adding that cost to merge commits.
+
 ## 📄 License
 
 MIT © 2026 SilentBless. See the
