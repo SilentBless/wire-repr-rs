@@ -8,6 +8,17 @@ A schema describes physical representation rather than a decoded semantic object
 byte order, widths, field order, framing, selectors, controllers, geometry, and exact represented
 ranges. Protocol and application semantics remain in consumer code.
 
+## Installation
+
+```toml
+[dependencies]
+wire-repr = "1"
+thiserror = { version = "2", default-features = false }
+```
+
+Generated nominal error types use `thiserror`'s derive contract, so schema crates declare it
+directly. Both dependencies remain `no_std`.
+
 ## Quick start
 
 ```
@@ -51,14 +62,14 @@ setter is generated. Constants are validated and exposed on views, then emitted 
 
 The repository includes live network examples with no application credentials:
 
-- [DNS over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/dns.rs)
+- [DNS over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/dns.rs)
   builds a query and frames the returned datagram.
-- [NTPv4 over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ntp.rs)
+- [NTPv4 over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/ntp.rs)
   validates real server timestamps and calculates the observed clock offset.
-- [Telegram MTProto over TCP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/telegram.rs)
+- [Telegram MTProto over TCP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/telegram.rs)
   performs `req_pq_multi → resPQ` against DC2 with typed TL views, computed request fields, schema
   validators, bounded transport reads, and a runtime fingerprint array.
-- The [recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
+- The [recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/expression_vm.rs)
   compiles an expression, patches a physical digest, validates the framed program, and evaluates
   retained recursive child views.
 
@@ -200,7 +211,7 @@ Callbacks with arguments use the generated `WireView` to resolve exact fields an
 zero-argument callback needs no view and remains available to a `WireBuilder`-only schema.
 
 The
-[expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs)
+[expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/expression_vm.rs)
 uses `exclude(self)` to compute an FNV-1a digest over dynamic bytecode, then verifies the stored
 value through a schema validator.
 
@@ -235,7 +246,7 @@ encoded plan, allocation, dynamic dispatch, or hidden depth stack. Exact recursi
 copied directly.
 
 See the runnable
-[recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs).
+[recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/expression_vm.rs).
 
 ## Manual capabilities
 

@@ -421,8 +421,9 @@ and never recomputes it. A fallible callback may leave partial unpublished outpu
 
 ## 10. Errors and incomplete input
 
-Generated read and build errors are nominal field-site enums derived with `thiserror`. Nested
-errors retain their concrete source types. Read errors carry absolute root-input offsets.
+Generated read and build errors are nominal field-site enums derived with the schema crate's direct
+`thiserror` dependency. Nested errors retain their concrete source types. Read errors carry
+absolute root-input offsets.
 
 Incomplete contiguous input returns:
 

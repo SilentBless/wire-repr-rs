@@ -35,9 +35,11 @@ the derives generate an immutable view and an output-owning typestate writer.
 ```toml
 [dependencies]
 wire-repr = "1"
+thiserror = { version = "2", default-features = false }
 ```
 
-The crate has no Cargo features.
+`thiserror` supplies the nominal generated error derives; schema crates declare it directly. Both
+dependencies are `no_std`. `wire-repr` itself has no Cargo features.
 
 ```rust
 use wire_repr::{WireBuilder, WireView, wire};
@@ -130,17 +132,17 @@ cargo run -p wire-repr --example telegram
 cargo run -p wire-repr --example expression_vm
 ```
 
-- **[DNS over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/dns.rs).**
+- **[DNS over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/dns.rs).**
   Builds a query, uses the system resolver, frames the response, and prints flags and section
   counts.
-- **[NTPv4 over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/ntp.rs).**
+- **[NTPv4 over UDP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/ntp.rs).**
   Builds a client packet, validates server timestamps and synchronization state, unfolds NTP eras,
   and calculates the observed clock offset.
-- **[Telegram MTProto over TCP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/telegram.rs).**
+- **[Telegram MTProto over TCP](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/telegram.rs).**
   Connects to DC2 and performs `req_pq_multi → resPQ`. The transport marker is a constant, both
   lengths are derived, `message_id` and `nonce:int128` are computed, and the response uses typed TL
   views plus schema validators and a runtime fingerprint array.
-- **[Recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/wire-repr/examples/expression_vm.rs).**
+- **[Recursive expression VM](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/wire-repr/examples/expression_vm.rs).**
   Compiles `(20 + 22) * -2`, wraps the recursive bytecode in a computed FNV-1a digest, validates it,
   and evaluates retained child views.
 
@@ -224,7 +226,7 @@ separating named linker calls from unresolved dispatch before runtime samples ar
 > the release package by checksum. `WIRE_REPR_RIZIN` may point to another executable location.
 
 The core remains featureless and allocation-free; optional application storage appears only through
-caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/ARCHITECTURE.md)
+caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/ARCHITECTURE.md)
 for the generated-state, recursion, and measurement invariants.
 
 ## ⚠️ Errors and incomplete input
@@ -278,4 +280,4 @@ to 120 seconds without adding that cost to merge commits.
 ## 📄 License
 
 MIT © 2026 SilentBless. See the
-[license](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.0/LICENSE).
+[license](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.1/LICENSE).
