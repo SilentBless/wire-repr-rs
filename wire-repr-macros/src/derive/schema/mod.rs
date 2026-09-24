@@ -2,6 +2,7 @@ mod bitfield;
 mod builder;
 mod computed;
 mod enumeration;
+mod geometry;
 mod model;
 mod recursive;
 mod recursive_demand;
@@ -9,8 +10,11 @@ mod recursive_demand_writer;
 mod recursive_object;
 mod recursive_writer;
 mod view;
+mod view_fields;
+mod write_fields;
 mod writer;
 
+use geometry::{builder_offset, builder_optional_size, view_offset, view_optional_size};
 use std::collections::BTreeSet;
 
 use proc_macro2::{Span, TokenStream, TokenTree};
@@ -200,48 +204,6 @@ fn snake(identifier: &syn::Ident) -> String {
         }
     }
     output
-}
-fn view_offset(offset: &model::LayoutOffset, runtime: &TokenStream) -> TokenStream {
-    let parts = offset.terms.iter().map(|term| match term {
-        model::SizeTerm::Fixed(width) => quote!(Some(#width)),
-        model::SizeTerm::Expr(width) => quote!(Some(#width)),
-        model::SizeTerm::Scaled(len, width) => quote!((#len as usize).checked_mul(#width)),
-        model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireView>::FIXED_SIZE),
-        model::SizeTerm::Dynamic => quote!(None),
-    });
-    quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
-}
-fn builder_offset(offset: &model::LayoutOffset, runtime: &TokenStream) -> TokenStream {
-    let parts = offset.terms.iter().map(|term| match term {
-        model::SizeTerm::Fixed(width) => quote!(Some(#width)),
-        model::SizeTerm::Expr(width) => quote!(Some(#width)),
-        model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE),
-        model::SizeTerm::Scaled(len, width) => quote!((#len as usize).checked_mul(#width)),
-        model::SizeTerm::Dynamic => quote!(None),
-    });
-    quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
-}
-
-fn view_optional_size(schema: &model::Schema, runtime: &TokenStream) -> TokenStream {
-    let parts = schema.size_terms().into_iter().map(|term| match term {
-        model::SizeTerm::Fixed(width) => quote!(Some(#width)),
-        model::SizeTerm::Expr(width) => quote!(Some(#width)),
-        model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireView>::FIXED_SIZE),
-        model::SizeTerm::Scaled(len, width) => quote!((#len as usize).checked_mul(#width)),
-        model::SizeTerm::Dynamic => quote!(None),
-    });
-    quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
-}
-
-fn builder_optional_size(schema: &model::Schema, runtime: &TokenStream) -> TokenStream {
-    let parts = schema.size_terms().into_iter().map(|term| match term {
-        model::SizeTerm::Fixed(width) => quote!(Some(#width)),
-        model::SizeTerm::Expr(width) => quote!(Some(#width)),
-        model::SizeTerm::Nested(ty) => quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE),
-        model::SizeTerm::Scaled(len, width) => quote!((#len as usize).checked_mul(#width)),
-        model::SizeTerm::Dynamic => quote!(None),
-    });
-    quote!(#runtime::__private::checked_optional_sum([#(#parts),*]))
 }
 
 fn scalar_type_tokens(ty: model::ScalarType) -> TokenStream {

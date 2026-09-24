@@ -518,3 +518,37 @@ The production core does not provide:
 
 The source API may be broad and convenient. Unused convenience must disappear after
 monomorphization, and used paths must remain comparable to ordinary handwritten safe Rust.
+
+## 14. Internal ownership
+
+The macro's shared field model is a compilation boundary, not a runtime schema or a general
+interpreter. Keep each decision with its owner:
+
+| Concern | Owner |
+| --- | --- |
+| `#[wire(...)]` syntax and type-shape recognition | `wire-repr-macros/src/derive/schema/model/attributes.rs` |
+| Field kind, physical order, placement terms and spans | `schema/model.rs` and `schema/model/normalization.rs` |
+| Dependency roles, controller eligibility, computed order and rejection diagnostics | `schema/model/validation.rs` |
+| Fixed-width capability expressions and statically known offsets | `schema/geometry.rs` |
+| Framing, retained views and physical field routes | `schema/view.rs` and `schema/view_fields.rs`; runtime `wire-repr/src/schema.rs` and `schema/selection.rs` |
+| Counted arrays, homogeneous sequences and heterogeneous cursors | Runtime `schema/array.rs` and `schema/sequence.rs` |
+| Write slots, conversions and conditional choice names | `schema/write_fields.rs`; detached and progressive emission stay in `schema/builder.rs` and `schema/writer.rs` |
+| Computed expression arguments and patches for both writers | `schema/computed.rs`; the output cursor and partial-write behavior stay in runtime `output.rs` |
+| Recursive body grammar and bounded geometry | Macro `schema/recursive*.rs` and runtime `recursive.rs` / `recursive/geometry/` |
+
+Enums and nominal bitfields still have specialized macro entry paths in `schema/enumeration.rs`
+and `schema/bitfield.rs`. They reuse the same read/write capabilities; their distinct selector and
+bit-range rules do not become a generic struct grammar.
+
+To add a representation rule: parse its spelling once, normalize its physical role, then prove
+its dependencies and boundary in the model before generating code. Account separately for
+leading versus exact framing, detached versus progressive writing, and any recursive continuation
+the rule admits. A dynamic offset can be calculable at runtime without being statically known;
+do not remove a rejection until both reading and writing preserve the information needed to
+compute and patch it. Ambiguous boundaries remain rejected.
+
+Verify the observable contract at its boundary: a behavior/regression fixture and a compile-fail
+case where ambiguity remains, the standalone `ci/downstream` consumer, and a workload with the
+existing generated/idiomatic/best-safe oracle when the rule adds a representation class. Internal
+refactors must preserve published names, method signatures, typed errors, generated typestate,
+exact bytes, `no_std`, and the allocation-free runtime even when code is moved between modules.

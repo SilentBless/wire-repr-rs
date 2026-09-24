@@ -4,6 +4,7 @@ use syn::{GenericParam, TypeParam};
 
 use super::model::Schema;
 use super::recursive::RecursiveSlot;
+use super::recursive_demand::{ScalarBase, scalar_position};
 
 pub(super) fn render(
     schema: &Schema,
@@ -31,51 +32,36 @@ pub(super) fn render(
     let scalar_encode = super::to_bytes_method(scalar.endian);
     let scalar_name = &schema.fields[demand.scalar].name;
     let scalar_layout = &schema.fields[demand.scalar].layout;
-    let scalar_pad = scalar_layout
-        .pad_before
-        .as_ref()
-        .map(|pad| quote!(#pad))
-        .unwrap_or_else(|| quote!(0usize));
-    let scalar_align = scalar_layout.align_before.as_ref();
-    let writer_layout = if let Some(align) = scalar_align {
+    let scalar_error = quote!(
+        #runtime::WriteError::Schema(
+            #runtime::__private::RecursiveWriteError::Layout {
+                field: stringify!(#scalar_name),
+            }
+        )
+    );
+    let writer_layout = if scalar_layout.align_before.is_some() {
+        let relative = scalar_position(
+            ScalarBase::Checked(quote!(self.output.position().checked_sub(self.body_start))),
+            &format_ident!("relative"),
+            scalar_layout,
+            runtime,
+            &scalar_error,
+        );
         quote! {
-            let mut relative = self
-                .output
-                .position()
-                .checked_sub(self.body_start)
-                .and_then(|offset| offset.checked_add(#scalar_pad))
-                .ok_or(#runtime::WriteError::Schema(
-                    #runtime::__private::RecursiveWriteError::Layout {
-                        field: stringify!(#scalar_name),
-                    },
-                ))?;
-            relative = #runtime::__private::checked_align(relative, #align).ok_or(
-                #runtime::WriteError::Schema(
-                    #runtime::__private::RecursiveWriteError::Layout {
-                        field: stringify!(#scalar_name),
-                    },
-                ),
-            )?;
-            let position = self.body_start.checked_add(relative).ok_or(
-                #runtime::WriteError::Schema(
-                    #runtime::__private::RecursiveWriteError::Layout {
-                        field: stringify!(#scalar_name),
-                    },
-                ),
-            )?;
+            #relative
+            let position = self.body_start.checked_add(relative).ok_or(#scalar_error)?;
         }
     } else {
+        let position = scalar_position(
+            ScalarBase::Exact(quote!(self.output.position())),
+            &format_ident!("position"),
+            scalar_layout,
+            runtime,
+            &scalar_error,
+        );
         quote! {
             let _ = self.body_start;
-            let position = self
-                .output
-                .position()
-                .checked_add(#scalar_pad)
-                .ok_or(#runtime::WriteError::Schema(
-                    #runtime::__private::RecursiveWriteError::Layout {
-                        field: stringify!(#scalar_name),
-                    },
-                ))?;
+            #position
         }
     };
     let controller_name = &schema.fields[demand.controller].name;

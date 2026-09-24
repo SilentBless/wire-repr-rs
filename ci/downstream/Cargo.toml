@@ -1,0 +1,11 @@
+[package]
+name = "wire-repr-downstream"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wire-repr = { path = "../../wire-repr" }
+thiserror = { version = "2", default-features = false }
+
+[workspace]

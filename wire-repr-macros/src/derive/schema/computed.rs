@@ -1,8 +1,9 @@
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
+use syn::ext::IdentExt;
 use syn::{Expr, ExprCall, ExprPath, Ident, Member};
 
-use super::model::Computed;
+use super::model::{Computed, FieldKind, Schema};
 
 pub(super) fn requires_view(computed: &Computed) -> bool {
     !matches!(&computed.expression, Expr::Call(call) if call.args.is_empty())
@@ -147,4 +148,104 @@ fn simple_ident(path: &ExprPath) -> syn::Result<&Ident> {
         ));
     }
     Ok(&path.path.segments[0].ident)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PatchWriter<'a> {
+    Detached { start: &'a Ident },
+    Progressive,
+}
+
+pub(super) fn render_patches(
+    schema: &Schema,
+    runtime: &TokenStream,
+    self_type: &TokenStream,
+    error: &Ident,
+    writer: PatchWriter<'_>,
+) -> Vec<TokenStream> {
+    schema
+        .computed_fields()
+        .filter_map(|field| {
+            let computed = field.kind.computed()?;
+            let FieldKind::Scalar(scalar) = &field.kind else {
+                unreachable!("computed destination is scalar")
+            };
+            let name = &field.name;
+            let field_name = name.unraw().to_string();
+            let offset = super::builder_offset(&field.offset, runtime);
+            let view = super::private_ident(
+                schema,
+                &format!("{}_computed_view", name.unraw()),
+            );
+            let semantic = super::private_ident(
+                schema,
+                &format!("{}_computed_value", name.unraw()),
+            );
+            let value_ty = super::value_type_tokens(&scalar.value_type);
+            let wire_ty = super::scalar_type_tokens(scalar.wire_type);
+            let encode = super::to_bytes_method(scalar.endian);
+            let layout_error = quote!(
+                #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #field_name })
+                )
+            );
+            let call = render_call(computed, &view, name, runtime)
+                .expect("validated computed callback expression");
+            let calculate = if computed.error.is_some() {
+                let variant = computed_error_ident(name);
+                quote!(#call.map_err(|error| #runtime::WriteError::Schema(
+                    #error::#variant(error)
+                ))?)
+            } else {
+                call
+            };
+            let view_binding = if !requires_view(computed) {
+                TokenStream::new()
+            } else {
+                match writer {
+                    PatchWriter::Detached { start } => quote! {
+                        let bytes = writer.bytes_from(#start).ok_or_else(|| { #layout_error })?;
+                        let #view = <#self_type as #runtime::__private::WireSelect>::select_view(bytes)
+                            .map_err(|_| #layout_error)?;
+                    },
+                    PatchWriter::Progressive => quote! {
+                        let #view = <#self_type as #runtime::__private::WireSelect>::select_view(
+                            self.writer.as_bytes(),
+                        )
+                        .map_err(|_| #layout_error)?;
+                    },
+                }
+            };
+            let encoded = if scalar.value_type.is_converted() {
+                let conversion =
+                    super::write_fields::convert_to_wire(scalar, &semantic, &wire_ty);
+                quote!(#conversion.ok_or_else(|| #layout_error)?)
+            } else {
+                quote!(#semantic)
+            };
+            let patch = match writer {
+                PatchWriter::Detached { start } => quote! {
+                    let relative = #offset.ok_or_else(|| #layout_error)?;
+                    let offset = #start.checked_add(relative).ok_or_else(|| { #layout_error })?;
+                    writer.patch_at(offset, &encoded.#encode())?;
+                },
+                PatchWriter::Progressive => quote! {
+                    let offset = #offset.ok_or_else(|| #layout_error)?;
+                    self.writer.write_at(offset, &encoded.#encode())?;
+                },
+            };
+            Some(quote! {
+                let #semantic: #value_ty = {
+                    #view_binding
+                    #calculate
+                };
+                let encoded: #wire_ty = #encoded;
+                #patch
+            })
+        })
+        .collect()
+}
+
+pub(super) fn computed_error_ident(field: &syn::Ident) -> syn::Ident {
+    format_ident!("{}Computed", super::pascal(field))
 }

@@ -42,68 +42,44 @@ pub(super) fn render(
     let scalar_decode = super::from_bytes_method(scalar.endian);
     let scalar_width = scalar.width();
     let scalar_layout = &schema.fields[demand.scalar].layout;
-    let scalar_pad = scalar_layout
-        .pad_before
-        .as_ref()
-        .map(|pad| quote!(#pad))
-        .unwrap_or_else(|| quote!(0usize));
-    let scalar_align = scalar_layout.align_before.as_ref();
-    let needs_body_start = scalar_align.is_some();
-    let resume_layout = if let Some(align) = scalar_align {
+    let needs_body_start = scalar_layout.align_before.is_some();
+    let scalar_error = quote!(
+        #runtime::__private::RecursiveError::Layout(
+            #runtime::LayoutError { field: stringify!(#scalar_name) }
+        )
+    );
+    let resume_layout = if needs_body_start {
+        let relative = scalar_position(
+            ScalarBase::Checked(quote!(bytes_end.checked_sub(continuation.body_start()))),
+            &format_ident!("scalar_relative"),
+            scalar_layout,
+            runtime,
+            &scalar_error,
+        );
         quote! {
-            let bytes_end = absolute_offset.checked_add(extent).ok_or(
-                #runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field: stringify!(#scalar_name) },
-                ),
-            )?;
-            let mut scalar_relative = bytes_end
-                .checked_sub(continuation.body_start())
-                .and_then(|offset| offset.checked_add(#scalar_pad))
-                .ok_or(#runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field: stringify!(#scalar_name) },
-                ))?;
-            scalar_relative = #runtime::__private::checked_align(scalar_relative, #align)
-                .ok_or(#runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field: stringify!(#scalar_name) },
-                ))?;
+            let bytes_end = absolute_offset.checked_add(extent).ok_or(#scalar_error)?;
+            #relative
             let scalar_absolute = continuation
                 .body_start()
                 .checked_add(scalar_relative)
-                .ok_or(#runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field: stringify!(#scalar_name) },
-                ))?;
+                .ok_or(#scalar_error)?;
         }
     } else {
-        quote! {
-            let scalar_absolute = absolute_offset
-                .checked_add(extent)
-                .and_then(|offset| offset.checked_add(#scalar_pad))
-                .ok_or(#runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field: stringify!(#scalar_name) },
-                ))?;
-        }
+        scalar_position(
+            ScalarBase::Checked(quote!(absolute_offset.checked_add(extent))),
+            &format_ident!("scalar_absolute"),
+            scalar_layout,
+            runtime,
+            &scalar_error,
+        )
     };
-    let frame_layout = if let Some(align) = scalar_align {
-        quote! {
-            let mut scalar_start = bytes_end.checked_add(#scalar_pad).ok_or(
-                #runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field: stringify!(#scalar_name) },
-                ),
-            )?;
-            scalar_start = #runtime::__private::checked_align(scalar_start, #align)
-                .ok_or(#runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field: stringify!(#scalar_name) },
-                ))?;
-        }
-    } else {
-        quote! {
-            let scalar_start = bytes_end.checked_add(#scalar_pad).ok_or(
-                #runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field: stringify!(#scalar_name) },
-                ),
-            )?;
-        }
-    };
+    let frame_layout = scalar_position(
+        ScalarBase::Exact(quote!(bytes_end)),
+        &format_ident!("scalar_start"),
+        scalar_layout,
+        runtime,
+        &scalar_error,
+    );
     let body_start_parameter = needs_body_start.then(|| quote!(, body_start: usize));
     let body_start_argument = needs_body_start.then(|| quote!(, absolute_offset));
     let body_start_extra = needs_body_start.then(|| quote!(+ ::core::mem::size_of::<usize>()));
@@ -622,4 +598,40 @@ fn type_is_parameter(ty: &syn::Type, parameter: &Ident) -> bool {
         && path.path.segments.len() == 1
         && path.path.segments[0].ident == *parameter
         && matches!(path.path.segments[0].arguments, syn::PathArguments::None)
+}
+
+pub(super) enum ScalarBase {
+    Exact(TokenStream),
+    Checked(TokenStream),
+}
+
+pub(super) fn scalar_position(
+    base: ScalarBase,
+    output: &Ident,
+    layout: &super::model::FieldLayout,
+    runtime: &TokenStream,
+    error: &TokenStream,
+) -> TokenStream {
+    let pad = layout
+        .pad_before
+        .as_ref()
+        .map(|pad| quote!(#pad))
+        .unwrap_or_else(|| quote!(0usize));
+    let start = match base {
+        ScalarBase::Exact(base) => quote!(#base.checked_add(#pad)),
+        ScalarBase::Checked(base) => {
+            quote!(#base.and_then(|offset| offset.checked_add(#pad)))
+        }
+    };
+    let mutable = layout.align_before.as_ref().map(|_| quote!(mut));
+    let aligned = layout.align_before.as_ref().map(|align| {
+        quote! {
+            #output = #runtime::__private::checked_align(#output, #align)
+                .ok_or(#error)?;
+        }
+    });
+    quote! {
+        let #mutable #output = #start.ok_or(#error)?;
+        #aligned
+    }
 }

@@ -5,7 +5,11 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, Generics, TypeParam, parse_quote};
 
-use super::model::{FieldKind, Position, Scalar, Schema, ValueType};
+use super::model::{FieldKind, Position, Schema};
+use super::write_fields::{
+    Slot, SlotKind, choice_final_ident, choice_start_ident, choice_state_ident, choice_trait_ident,
+    convert_to_wire, slots, unique_build_variant,
+};
 use super::{
     builder_optional_size, fresh_field_ident, fresh_type_ident, pascal, private_ident,
     scalar_type_tokens, to_bytes_method, value_type_tokens,
@@ -108,103 +112,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         #(#setters)*
         #complete
     })
-}
-
-pub(super) struct Slot {
-    pub(super) field: syn::Ident,
-    pub(super) state: syn::Ident,
-    pub(super) kind: SlotKind,
-}
-
-pub(super) enum SlotKind {
-    Value(TokenStream),
-    RawBytes,
-    Array(Box<syn::Type>),
-    Choice(syn::Ident),
-    Nested(Box<syn::Type>),
-}
-
-pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
-    let mut used = schema.generics.clone();
-    let mut slots = Vec::new();
-    for field in &schema.fields {
-        if field.kind.constant().is_some()
-            || field.kind.computed().is_some()
-            || schema.is_length_controller(&field.name)
-            || schema.is_count_controller(&field.name)
-            || schema.is_presence_controller(&field.name)
-            || schema.is_bit_controller(&field.name)
-            || field.layout.condition.is_some()
-        {
-            continue;
-        }
-        let state = fresh_type_ident(&used, &format!("{}State", pascal(&field.name)));
-        used.params
-            .push(GenericParam::Type(TypeParam::from(state.clone())));
-        let kind = match &field.kind {
-            FieldKind::Scalar(scalar) => SlotKind::Value(value_type_tokens(&scalar.value_type)),
-            FieldKind::Bytes(_) => {
-                let ty = &field.ty;
-                SlotKind::Value(quote!(#ty))
-            }
-            FieldKind::ScalarArray(_) => {
-                let ty = &field.ty;
-                SlotKind::Value(quote!(#ty))
-            }
-            FieldKind::RawBytes(_) => SlotKind::RawBytes,
-            FieldKind::Array(array) => SlotKind::Array(Box::new(array.item.clone())),
-            FieldKind::Flag(_) => SlotKind::Choice(field.name.clone()),
-            FieldKind::BitProjection(_) => {
-                let ty = &field.ty;
-                SlotKind::Value(quote!(#ty))
-            }
-            FieldKind::Nested(nested) => SlotKind::Nested(Box::new(nested.ty.clone())),
-            FieldKind::Recursive(_) => {
-                unreachable!("recursive builder is rejected before rendering")
-            }
-        };
-        slots.push(Slot {
-            field: field.name.clone(),
-            state,
-            kind,
-        });
-    }
-    slots
-}
-pub(super) fn choice_trait_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
-    let index = schema
-        .fields
-        .iter()
-        .position(|field| field.name == *flag)
-        .expect("flag belongs to schema");
-    format_ident!("__WireRepr{}Choice{index}Value", schema.name.unraw())
-}
-
-pub(super) fn choice_start_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
-    let index = schema
-        .fields
-        .iter()
-        .position(|field| field.name == *flag)
-        .expect("flag belongs to schema");
-    format_ident!("__WireRepr{}Choice{index}", schema.name.unraw())
-}
-
-fn choice_state_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
-    let index = schema
-        .fields
-        .iter()
-        .position(|field| field.name == *flag)
-        .expect("flag belongs to schema");
-    format_ident!("__WireRepr{}Choice{index}State", schema.name.unraw())
-}
-
-pub(super) fn choice_final_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
-    let index = schema
-        .fields
-        .iter()
-        .position(|field| field.name == *flag)
-        .expect("flag belongs to schema");
-    format_ident!("__WireRepr{}Choice{index}Final", schema.name.unraw())
 }
 
 fn render_choice_groups(schema: &Schema, runtime: &TokenStream) -> TokenStream {
@@ -1096,7 +1003,7 @@ fn render_complete(
         .filter_map(|field| {
             let computed = field.kind.computed()?;
             let source = computed.error.as_ref()?;
-            let variant = computed_error_ident(&field.name);
+            let variant = super::computed::computed_error_ident(&field.name);
             let field_name = field.name.to_string();
             let message = format!("computed field `{field_name}` failed: {{0}}");
             Some(quote! {
@@ -1182,72 +1089,15 @@ fn render_complete(
         quote!(#error<#(#nested_error_types),*>)
     };
 
-    let computed_patches = schema
-        .computed_fields()
-        .filter_map(|field| {
-            let computed = field.kind.computed()?;
-            let FieldKind::Scalar(scalar) = &field.kind else {
-                unreachable!("computed destination is scalar")
-            };
-            let name = &field.name;
-            let field_name = name.unraw().to_string();
-            let relative = super::builder_offset(&field.offset, runtime);
-            let view = private_ident(schema, &format!("{}_computed_view", name.unraw()));
-            let semantic = private_ident(schema, &format!("{}_computed_value", name.unraw()));
-            let value_ty = value_type_tokens(&scalar.value_type);
-            let wire_ty = scalar_type_tokens(scalar.wire_type);
-            let encode = to_bytes_method(scalar.endian);
-            let call = super::computed::render_call(computed, &view, name, runtime)
-                .expect("validated computed callback expression");
-            let calculate = if computed.error.is_some() {
-                let variant = computed_error_ident(name);
-                quote!(#call.map_err(|error| #runtime::WriteError::Schema(
-                #error::#variant(error)
-            ))?)
-            } else {
-                call
-            };
-            let view_binding = if !super::computed::requires_view(computed) {
-                quote!()
-            } else {
-                quote! {
-                    let bytes = writer.bytes_from(#schema_start).ok_or_else(|| {
-                        #runtime::WriteError::Schema(
-                            #error::Layout(#runtime::LayoutError { field: #field_name }),
-                        )
-                    })?;
-                    let #view = <#self_type as #runtime::__private::WireSelect>::select_view(bytes)
-                        .map_err(|_| #runtime::WriteError::Schema(
-                            #error::Layout(#runtime::LayoutError { field: #field_name }),
-                        ))?;
-                }
-            };
-            let encoded = if scalar.value_type.is_converted() {
-                let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
-                quote!(#conversion.ok_or_else(|| #runtime::WriteError::Schema(
-                #error::Layout(#runtime::LayoutError { field: #field_name }),
-            ))?)
-            } else {
-                quote!(#semantic)
-            };
-            Some(quote! {
-                let #semantic: #value_ty = {
-                    #view_binding
-                    #calculate
-                };
-                let encoded: #wire_ty = #encoded;
-                let relative = #relative.ok_or_else(|| #runtime::WriteError::Schema(
-                    #error::Layout(#runtime::LayoutError { field: #field_name }),
-                ))?;
-                let offset = #schema_start.checked_add(relative).ok_or_else(|| {
-                    #runtime::WriteError::Schema(
-                        #error::Layout(#runtime::LayoutError { field: #field_name }),
-                    )
-                })?;
-                writer.patch_at(offset, &encoded.#encode())?;
-            })
-        })
-        .collect::<Vec<_>>();
+    let computed_patches = super::computed::render_patches(
+        schema,
+        runtime,
+        &self_type,
+        error,
+        super::computed::PatchWriter::Detached {
+            start: &schema_start,
+        },
+    );
     quote! {
         #error_declaration
 
@@ -1391,37 +1241,6 @@ fn builder_type(
         quote!(#builder<#(#arguments),*>)
     }
 }
-pub(super) fn unique_build_variant(used: &mut BTreeSet<String>, base: &str) -> syn::Ident {
-    if used.insert(base.to_owned()) {
-        return format_ident!("{base}");
-    }
-    for suffix in 2usize.. {
-        let candidate = format!("{base}{suffix}");
-        if used.insert(candidate.clone()) {
-            return format_ident!("{candidate}");
-        }
-    }
-    unreachable!("usize suffix space cannot be exhausted by generated variants")
-}
-
-pub(super) fn convert_to_wire(
-    scalar: &Scalar,
-    value: &syn::Ident,
-    wire_type: &TokenStream,
-) -> TokenStream {
-    match &scalar.value_type {
-        ValueType::Scalar(_) => quote!(Some(#value)),
-        ValueType::Usize | ValueType::Isize | ValueType::Custom(_) => {
-            quote!(<#wire_type>::try_from(#value).ok())
-        }
-        ValueType::Bool => quote!(Some(if #value {
-            1 as #wire_type
-        } else {
-            0 as #wire_type
-        })),
-        ValueType::Char => quote!(<#wire_type>::try_from(u32::from(#value)).ok()),
-    }
-}
 
 fn render_bit_controller_source(
     schema: &Schema,
@@ -1476,8 +1295,4 @@ fn render_bit_controller_source(
         #(#parts)*
         raw
     }}
-}
-
-pub(super) fn computed_error_ident(field: &syn::Ident) -> syn::Ident {
-    format_ident!("{}Computed", pascal(field))
 }

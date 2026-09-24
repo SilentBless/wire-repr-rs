@@ -5,11 +5,11 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, TypeParam, parse_quote};
 
-use super::builder::{
-    Slot, SlotKind, choice_start_ident, choice_trait_ident, convert_to_wire, slots,
-    unique_build_variant,
-};
 use super::model::{DynamicExtent, FieldKind, LayoutOffset, Position, Schema, SizeTerm};
+use super::write_fields::{
+    Slot, SlotKind, choice_final_ident, choice_start_ident, choice_trait_ident, convert_to_wire,
+    slots, unique_build_variant,
+};
 use super::{
     builder_offset, builder_optional_size, fresh_field_ident, fresh_type_ident, pascal,
     private_ident, scalar_type_tokens, to_bytes_method, value_type_tokens,
@@ -161,7 +161,7 @@ fn render_setters(
                     SlotKind::RawBytes => quote!(#runtime::__private::Set<#raw_bytes>),
                     SlotKind::Array(_) => quote!(#runtime::__private::Set<()>),
                     SlotKind::Choice(flag) => {
-                        let final_value = super::builder::choice_final_ident(schema, flag);
+                        let final_value = choice_final_ident(schema, flag);
                         quote!(#runtime::__private::Set<#final_value>)
                     }
                     SlotKind::Nested(_) => quote!(#runtime::__private::Set<#child_builder>),
@@ -567,7 +567,7 @@ fn render_setters(
                 let schema_error =
                     writer_error_type(schema, &error_name, has_conversions, None, runtime);
                 let start = choice_start_ident(schema, flag);
-                let final_value = super::builder::choice_final_ident(schema, flag);
+                let final_value = choice_final_ident(schema, flag);
                 let choice_trait = choice_trait_ident(schema, flag);
                 let patch =
                     render_presence_patch(schema, flag, quote!(present), &error_name, runtime);
@@ -768,7 +768,7 @@ fn render_finish(
                 complete_states.push(quote!(#runtime::__private::Set<()>));
             }
             SlotKind::Choice(flag) => {
-                let final_value = super::builder::choice_final_ident(schema, flag);
+                let final_value = choice_final_ident(schema, flag);
                 complete_states.push(quote!(#runtime::__private::Set<#final_value>));
             }
             SlotKind::Nested(ty) => {
@@ -904,64 +904,13 @@ fn render_finish(
             })
         })
         .collect::<Vec<_>>();
-    let computed_patches = schema
-        .computed_fields()
-        .filter_map(|field| {
-            let computed = field.kind.computed()?;
-            let FieldKind::Scalar(scalar) = &field.kind else {
-                unreachable!("computed destination is scalar")
-            };
-            let name = &field.name;
-            let field_name = name.unraw().to_string();
-            let offset = builder_offset(&field.offset, runtime);
-            let view = private_ident(schema, &format!("{}_computed_view", name.unraw()));
-            let semantic = private_ident(schema, &format!("{}_computed_value", name.unraw()));
-            let value_ty = value_type_tokens(&scalar.value_type);
-            let wire_ty = scalar_type_tokens(scalar.wire_type);
-            let encode = to_bytes_method(scalar.endian);
-            let call = super::computed::render_call(computed, &view, name, runtime)
-                .expect("validated computed callback expression");
-            let calculate = if computed.error.is_some() {
-                let variant = super::builder::computed_error_ident(name);
-                quote!(#call.map_err(|error| #runtime::WriteError::Schema(
-                #error_name::#variant(error)
-            ))?)
-            } else {
-                call
-            };
-            let view_binding = if !super::computed::requires_view(computed) {
-                quote!()
-            } else {
-                quote! {
-                    let #view = <#self_type as #runtime::__private::WireSelect>::select_view(
-                        self.writer.as_bytes(),
-                    )
-                    .map_err(|_| #runtime::WriteError::Schema(
-                        #error_name::Layout(#runtime::LayoutError { field: #field_name }),
-                    ))?;
-                }
-            };
-            let encoded = if scalar.value_type.is_converted() {
-                let conversion = super::builder::convert_to_wire(scalar, &semantic, &wire_ty);
-                quote!(#conversion.ok_or_else(|| #runtime::WriteError::Schema(
-                #error_name::Layout(#runtime::LayoutError { field: #field_name }),
-            ))?)
-            } else {
-                quote!(#semantic)
-            };
-            Some(quote! {
-                let #semantic: #value_ty = {
-                    #view_binding
-                    #calculate
-                };
-                let encoded: #wire_ty = #encoded;
-                let offset = #offset.ok_or_else(|| #runtime::WriteError::Schema(
-                    #error_name::Layout(#runtime::LayoutError { field: #field_name }),
-                ))?;
-                self.writer.write_at(offset, &encoded.#encode())?;
-            })
-        })
-        .collect::<Vec<_>>();
+    let computed_patches = super::computed::render_patches(
+        schema,
+        runtime,
+        &self_type,
+        &error_name,
+        super::computed::PatchWriter::Progressive,
+    );
     let ensure_total = if schema.has_explicit_geometry() {
         TokenStream::new()
     } else if schema

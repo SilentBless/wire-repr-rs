@@ -22,11 +22,15 @@ jobs:
           tar -xJf "$RUNNER_TEMP/rizin.tar.xz" -C "$RUNNER_TEMP/rizin"
           echo "$RUNNER_TEMP/rizin/bin" >> "$GITHUB_PATH"
       - name: Format
-        run: cargo +1.91.0 fmt --all -- --check
+        run: |
+          cargo +1.91.0 fmt --all -- --check
+          cargo +1.91.0 fmt --manifest-path ci/downstream/Cargo.toml -- --check
       - name: Check
         run: cargo +1.91.0 check --workspace --all-targets
       - name: Test
         run: cargo +1.91.0 test --workspace --all-targets
+      - name: Run standalone downstream consumer
+        run: CARGO_TARGET_DIR=target cargo +1.91.0 run --manifest-path ci/downstream/Cargo.toml
       - name: Documentation tests
         run: cargo +1.91.0 test -p wire-repr --doc
       - name: Test CI tools

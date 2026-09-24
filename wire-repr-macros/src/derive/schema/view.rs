@@ -6,6 +6,7 @@ use syn::ext::IdentExt;
 use syn::{GenericParam, Generics, LifetimeParam, TypeParam, parse_quote};
 
 use super::model::{DynamicExtent, FieldKind, Position, Scalar, ScalarType, Schema, ValueType};
+use super::view_fields::render_wire_fields;
 use super::{
     fresh_field_ident, fresh_schema_lifetime, from_bytes_method, pascal, private_ident,
     scalar_type_tokens, value_type_tokens, view_offset, view_optional_size,
@@ -566,6 +567,30 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         TokenStream::new()
     };
 
+    let range_body = quote!(match index {
+        #(#range_arms)*
+        _ => None,
+    });
+    let retained_fields = render_wire_fields(
+        quote!(unsafe impl #retained_impl #runtime::__private::WireFields
+            for #retained_type #retained_where),
+        runtime,
+        &self_type,
+        &root_fields_type,
+        &range_body,
+        quote!(&self.descriptor),
+        true,
+    );
+    let projected_fields = render_wire_fields(
+        quote!(unsafe impl #projected_impl #runtime::__private::WireFields
+            for #projected_type #projected_where),
+        runtime,
+        &self_type,
+        &root_fields_type,
+        &range_body,
+        quote!(self.descriptor),
+        true,
+    );
     Ok(quote! {
         #error_declaration
         #descriptor_declaration
@@ -634,41 +659,8 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
 
             #(#retained_methods)*
         }
+        #retained_fields
 
-        // SAFETY: this retained view owns the exact input/state pair supplied to route resolution.
-        #[allow(unsafe_code)]
-        unsafe impl #retained_impl #runtime::__private::WireFields
-            for #retained_type #retained_where
-        {
-            type Fields = #root_fields_type;
-            type SelectionRoot = #self_type;
-
-            #[inline(always)]
-            fn fields(&self) -> Self::Fields {
-                // SAFETY: the generated root prefix matches this view's SelectionRoot.
-                unsafe {
-                    <#self_type as #runtime::__private::WireFieldSchema>::fields::<
-                        #runtime::__private::FieldRouteEnd<#self_type>
-                    >()
-                }
-            }
-
-            #[inline(always)]
-            fn field_range(&self, index: usize) -> Option<::core::ops::Range<usize>> {
-                match index {
-                    #(#range_arms)*
-                    _ => None,
-                }
-            }
-
-            unsafe fn resolve_field_route<Route>(&self) -> Option<::core::ops::Range<usize>>
-            where
-                Route: #runtime::__private::FieldRoute<Root = Self::SelectionRoot>,
-            {
-                // SAFETY: this view owns the exact input and descriptor passed to the route.
-                unsafe { Route::resolve::<#self_type>(self.as_ref(), &self.descriptor) }
-            }
-        }
 
         impl #projected_impl #trait_path for #projected_type #projected_where {
             #[inline(always)]
@@ -678,41 +670,8 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
 
             #(#projected_methods)*
         }
+        #projected_fields
 
-        // SAFETY: this projected view borrows the exact input/state pair supplied to route resolution.
-        #[allow(unsafe_code)]
-        unsafe impl #projected_impl #runtime::__private::WireFields
-            for #projected_type #projected_where
-        {
-            type Fields = #root_fields_type;
-            type SelectionRoot = #self_type;
-
-            #[inline(always)]
-            fn fields(&self) -> Self::Fields {
-                // SAFETY: the generated root prefix matches this view's SelectionRoot.
-                unsafe {
-                    <#self_type as #runtime::__private::WireFieldSchema>::fields::<
-                        #runtime::__private::FieldRouteEnd<#self_type>
-                    >()
-                }
-            }
-
-            #[inline(always)]
-            fn field_range(&self, index: usize) -> Option<::core::ops::Range<usize>> {
-                match index {
-                    #(#range_arms)*
-                    _ => None,
-                }
-            }
-
-            unsafe fn resolve_field_route<Route>(&self) -> Option<::core::ops::Range<usize>>
-            where
-                Route: #runtime::__private::FieldRoute<Root = Self::SelectionRoot>,
-            {
-                // SAFETY: this view borrows the exact input and descriptor passed to the route.
-                unsafe { Route::resolve::<#self_type>(self.as_ref(), self.descriptor) }
-            }
-        }
 
 
         impl #common_impl #runtime::ExactWire<#self_type>
