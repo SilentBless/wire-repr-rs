@@ -4,7 +4,7 @@ use super::attributes::{
     FieldAttributes, array_item_type, fixed_scalar_array, is_raw_bytes, primitive_name,
     recursive_item_type,
 };
-use super::validation::validate_unsigned_controller;
+use super::controller::validate_unsigned_controller;
 use super::{
     ArrayField, BitProjection, Computed, DynamicExtent, Endian, Field, FieldKind, FieldLayout,
     FixedBytes, FixedScalarArray, FlagField, LayoutOffset, NestedField, Position, RawBytes,

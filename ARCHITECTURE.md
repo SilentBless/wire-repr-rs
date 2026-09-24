@@ -528,8 +528,9 @@ interpreter. Keep each decision with its owner:
 | --- | --- |
 | `#[wire(...)]` syntax and type-shape recognition | `wire-repr-macros/src/derive/schema/model/attributes.rs` |
 | Field kind, physical order, placement terms and spans | `schema/model.rs` and `schema/model/normalization.rs` |
-| Dependency roles, controller eligibility, computed order and rejection diagnostics | `schema/model/validation.rs` |
-| Fixed-width capability expressions and statically known offsets | `schema/geometry.rs` |
+| Controller eligibility shared by normalization and policy | `schema/model/controller.rs` |
+| Dependency roles, computed order and rejection diagnostics | `schema/model/validation.rs` |
+| Fixed-width capability expressions, static offsets and recursive scalar placement | `schema/geometry.rs` |
 | Framing, retained views and physical field routes | `schema/view.rs` and `schema/view_fields.rs`; runtime `wire-repr/src/schema.rs` and `schema/selection.rs` |
 | Counted arrays, homogeneous sequences and heterogeneous cursors | Runtime `schema/array.rs` and `schema/sequence.rs` |
 | Write slots, conversions and conditional choice names | `schema/write_fields.rs`; detached and progressive emission stay in `schema/builder.rs` and `schema/writer.rs` |

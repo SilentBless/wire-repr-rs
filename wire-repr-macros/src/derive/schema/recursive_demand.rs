@@ -2,6 +2,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{GenericParam, Ident};
 
+use super::geometry::{ScalarBase, scalar_position};
 use super::model::{DynamicExtent, FieldKind, Schema};
 
 pub(super) fn render(
@@ -598,40 +599,4 @@ fn type_is_parameter(ty: &syn::Type, parameter: &Ident) -> bool {
         && path.path.segments.len() == 1
         && path.path.segments[0].ident == *parameter
         && matches!(path.path.segments[0].arguments, syn::PathArguments::None)
-}
-
-pub(super) enum ScalarBase {
-    Exact(TokenStream),
-    Checked(TokenStream),
-}
-
-pub(super) fn scalar_position(
-    base: ScalarBase,
-    output: &Ident,
-    layout: &super::model::FieldLayout,
-    runtime: &TokenStream,
-    error: &TokenStream,
-) -> TokenStream {
-    let pad = layout
-        .pad_before
-        .as_ref()
-        .map(|pad| quote!(#pad))
-        .unwrap_or_else(|| quote!(0usize));
-    let start = match base {
-        ScalarBase::Exact(base) => quote!(#base.checked_add(#pad)),
-        ScalarBase::Checked(base) => {
-            quote!(#base.and_then(|offset| offset.checked_add(#pad)))
-        }
-    };
-    let mutable = layout.align_before.as_ref().map(|_| quote!(mut));
-    let aligned = layout.align_before.as_ref().map(|align| {
-        quote! {
-            #output = #runtime::__private::checked_align(#output, #align)
-                .ok_or(#error)?;
-        }
-    });
-    quote! {
-        let #mutable #output = #start.ok_or(#error)?;
-        #aligned
-    }
 }

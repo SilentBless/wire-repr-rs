@@ -1,4 +1,5 @@
 mod attributes;
+mod controller;
 mod normalization;
 mod validation;
 

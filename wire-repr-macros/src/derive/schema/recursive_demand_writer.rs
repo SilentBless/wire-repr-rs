@@ -2,9 +2,9 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{GenericParam, TypeParam};
 
+use super::geometry::{ScalarBase, scalar_position};
 use super::model::Schema;
 use super::recursive::RecursiveSlot;
-use super::recursive_demand::{ScalarBase, scalar_position};
 
 pub(super) fn render(
     schema: &Schema,

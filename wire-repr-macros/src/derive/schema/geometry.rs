@@ -1,5 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::Ident;
 
 use super::model::{LayoutOffset, Schema, SizeTerm};
 
@@ -37,4 +38,39 @@ pub(super) fn view_optional_size(schema: &Schema, runtime: &TokenStream) -> Toke
 
 pub(super) fn builder_optional_size(schema: &Schema, runtime: &TokenStream) -> TokenStream {
     optional_size(&schema.size_terms(), runtime, Capability::Builder)
+}
+pub(super) enum ScalarBase {
+    Exact(TokenStream),
+    Checked(TokenStream),
+}
+
+pub(super) fn scalar_position(
+    base: ScalarBase,
+    output: &Ident,
+    layout: &super::model::FieldLayout,
+    runtime: &TokenStream,
+    error: &TokenStream,
+) -> TokenStream {
+    let pad = layout
+        .pad_before
+        .as_ref()
+        .map(|pad| quote!(#pad))
+        .unwrap_or_else(|| quote!(0usize));
+    let start = match base {
+        ScalarBase::Exact(base) => quote!(#base.checked_add(#pad)),
+        ScalarBase::Checked(base) => {
+            quote!(#base.and_then(|offset| offset.checked_add(#pad)))
+        }
+    };
+    let mutable = layout.align_before.as_ref().map(|_| quote!(mut));
+    let aligned = layout.align_before.as_ref().map(|align| {
+        quote! {
+            #output = #runtime::__private::checked_align(#output, #align)
+                .ok_or(#error)?;
+        }
+    });
+    quote! {
+        let #mutable #output = #start.ok_or(#error)?;
+        #aligned
+    }
 }
