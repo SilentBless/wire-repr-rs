@@ -276,50 +276,57 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
         .collect::<Vec<_>>();
 
     let frame_offset = format_ident!("__wire_repr_frame_offset");
-    let frame_arms = known
-        .iter()
-        .zip(&error_variant_names)
-        .map(|(variant, error_variant)| {
-            let variant_name = &variant.name;
-            let value = variant.value.as_ref().expect("known variant has value");
-            if variant.unit {
-                quote! {
-                    value if value == { let selector: #selector_ty = #value; selector } => {
-                        #runtime::Frame::new(#state::#variant_name(()), #selector_width)
-                    }
-                }
-            } else {
-                let body = &variant.body;
-                quote! {
-                    value if value == { let selector: #selector_ty = #value; selector } => {
-                        let body_offset = #frame_offset
-                            .checked_add(#selector_width)
-                            .ok_or(#runtime::LayoutError {
-                                field: stringify!(#variant_name),
-                            })?;
-                        let frame = <#body as #runtime::WireView>::frame(
-                            &input[#selector_width..],
-                            body_offset,
-                        )
-                        .map_err(#view_error::#error_variant)?;
-                        let (state, body_consumed) = frame.into_parts();
-                        if body_consumed > input.len() - #selector_width {
-                            return Err(#view_error::InvalidFrame(#runtime::InvalidFrameExtent {
-                                offset: body_offset,
-                                consumed: body_consumed,
-                                available: input.len() - #selector_width,
-                            }));
+    let render_frame_arms =
+        |exact: bool| {
+            known
+            .iter()
+            .zip(&error_variant_names)
+            .map(|(variant, error_variant)| {
+                let variant_name = &variant.name;
+                let value = variant.value.as_ref().expect("known variant has value");
+                if variant.unit {
+                    quote! {
+                        value if value == { let selector: #selector_ty = #value; selector } => {
+                            #runtime::Frame::new(#state::#variant_name(()), #selector_width)
                         }
-                        let consumed = #selector_width
-                            .checked_add(body_consumed)
-                            .ok_or(#runtime::LayoutError {
-                                field: stringify!(#variant_name),
-                            })?;
-                        #runtime::Frame::new(#state::#variant_name(state), consumed)
+                    }
+                } else {
+                    let body = &variant.body;
+                    let frame_method = if exact { quote!(frame_exact) } else { quote!(frame) };
+                    quote! {
+                        value if value == { let selector: #selector_ty = #value; selector } => {
+                            let body_offset = #frame_offset
+                                .checked_add(#selector_width)
+                                .ok_or(#runtime::LayoutError {
+                                    field: stringify!(#variant_name),
+                                })?;
+                            let frame = <#body as #runtime::WireView>::#frame_method(
+                                &input[#selector_width..],
+                                body_offset,
+                            )
+                            .map_err(#view_error::#error_variant)?;
+                            let (state, body_consumed) = frame.into_parts();
+                            if body_consumed > input.len() - #selector_width {
+                                return Err(#view_error::InvalidFrame(#runtime::InvalidFrameExtent {
+                                    offset: body_offset,
+                                    consumed: body_consumed,
+                                    available: input.len() - #selector_width,
+                                }));
+                            }
+                            let consumed = #selector_width
+                                .checked_add(body_consumed)
+                                .ok_or(#runtime::LayoutError {
+                                    field: stringify!(#variant_name),
+                                })?;
+                            #runtime::Frame::new(#state::#variant_name(state), consumed)
+                        }
                     }
                 }
-            }
-        });
+            })
+            .collect::<Vec<_>>()
+        };
+    let frame_arms = render_frame_arms(false);
+    let exact_arms = render_frame_arms(true);
     let unknown_frame = if schema.unknown().is_some() {
         quote!(value => #runtime::Frame::new(#state::Unknown(value), input.len()),)
     } else {
@@ -330,6 +337,32 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
                     offset: #frame_offset,
                 });
             }
+        }
+    };
+    let exact_frame = quote! {
+        #[inline]
+        fn frame_exact(
+            input: &[u8],
+            #frame_offset: usize,
+        ) -> Result<#runtime::Frame<Self::State>, Self::Error> {
+            if #duplicate_selector {
+                return Err(#view_error::DuplicateSelector);
+            }
+            if input.len() < #selector_width {
+                return Err(#view_error::NeedMore(#runtime::NeedMore {
+                    offset: #frame_offset.saturating_add(input.len()),
+                    additional_at_least: #selector_width - input.len(),
+                }));
+            }
+            let selector = #selector_ty::#decode(
+                input[..#selector_width]
+                    .try_into()
+                    .expect("selector width checked"),
+            );
+            Ok(match selector {
+                #(#exact_arms)*
+                #unknown_frame
+            })
         }
     };
 
@@ -752,6 +785,7 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
                     #unknown_frame
                 })
             }
+            #exact_frame
 
             #[inline(always)]
             unsafe fn from_validated_parts<#view_lifetime>(
@@ -825,7 +859,7 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
                 input: #backing,
             ) -> Result<Self::Root<#backing>, Self::Error> {
                 let bytes = input.as_ref();
-                let frame = <Self as #runtime::WireView>::frame(bytes, 0)?;
+                let frame = <Self as #runtime::WireView>::frame_exact(bytes, 0)?;
                 let (state, consumed) = frame.into_parts();
                 if consumed > bytes.len() {
                     return Err(#view_error::InvalidFrame(#runtime::InvalidFrameExtent {
@@ -884,7 +918,7 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
                 input: #backing,
             ) -> Result<impl #trait_path + #runtime::ExactWire<Self>, #error_type> {
                 let bytes = input.as_ref();
-                let frame = <Self as #runtime::WireView>::frame(bytes, 0)?;
+                let frame = <Self as #runtime::WireView>::frame_exact(bytes, 0)?;
                 let (state, consumed) = frame.into_parts();
                 if consumed > bytes.len() {
                     return Err(#view_error::InvalidFrame(#runtime::InvalidFrameExtent {

@@ -1,6 +1,6 @@
 # Roadmap
 
-`wire-repr` 1.0.2 is the stable baseline. Work below is ordered by risk reduction, not novelty.
+`wire-repr` 1.0.3 is the stable baseline. Work below is ordered by risk reduction, not novelty.
 Every change preserves `no_std`, no hidden allocation, exact represented ranges, ordinary retained
 `AsRef<[u8]>` backing, progressive output ownership, and generated-versus-handwritten evidence.
 

@@ -223,9 +223,10 @@ Syntactically fixed schemas expose prevalidated [`FixedViews`], an infallible
 input.
 
 Views yielded by these facades borrow the original input rather than the facade or cursor, so they
-may coexist. A framing failure or `NeedMore` never advances the position. Terminal `rest`, terminal
-arrays, and unknown enum bodies do not claim a leading extent and therefore cannot be consumed
-ambiguously through these helpers.
+may coexist. A framing failure or `NeedMore` never advances the position. A terminal counted array
+has a leading extent when its items do: prefix framing locates the counted boundary, including a
+zero count. An exact standalone view retains deferred terminal-item validation. Terminal `rest`
+and unknown enum bodies cannot be consumed ambiguously through these helpers.
 
 ## Recursive schemas
 

@@ -256,9 +256,11 @@ The product concepts are distinct:
 For a syntactically fixed struct or nominal bitfield, `views` prevalidates the complete input and
 returns an infallible `ExactSizeIterator`. Closed enums and variable structs with a leading-extent
 capability return a facade whose `next` is `Result<Option<View>, Error>`.
-Direct `rest`, terminal arrays, and unknown enum bodies expose no helpers. A terminal child or
-closed enum whose transitive body lacks a leading extent returns `SequenceError::Unavailable`
-before consuming input.
+Direct `rest` and unknown enum bodies expose no helpers. A terminal counted array has a leading
+extent when each item does: prefix framing traverses its count to locate the following field, while
+exact root framing keeps terminal-item validation deferred. A zero count consumes no item bytes.
+A terminal child or closed enum whose transitive body lacks a leading extent returns
+`SequenceError::Unavailable` before consuming input.
 
 Cursor usage is schema-led:
 

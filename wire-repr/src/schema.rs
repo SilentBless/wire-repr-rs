@@ -35,10 +35,10 @@ impl<S> Frame<S> {
 ///
 /// # Safety
 ///
-/// `State` must be owned and reference-free. `frame` must report an extent within `input` and
-/// return geometry that remains memory-safe for any immutable span of that exact consumed length.
-/// State may retain validated logical values, but it must not make unchecked semantic assumptions
-/// about later input bytes.
+/// `State` must be owned and reference-free. Both framing methods must report an extent within
+/// `input` and return geometry that remains memory-safe for any immutable span of that exact
+/// consumed length. State may retain validated logical values, but it must not make unchecked
+/// semantic assumptions about later input bytes.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not provide the WireView capability",
     label = "this field requires a derived or manual WireView implementation"
@@ -57,18 +57,31 @@ pub unsafe trait WireView: Sized {
     /// Exact width when every representation has one compile-time width.
     const FIXED_SIZE: Option<usize>;
 
-    /// Whether framing can determine one leading representation without consuming the suffix.
+    /// Whether `frame` can determine one leading representation without consuming the suffix.
     const LEADING_EXTENT: bool = Self::FIXED_SIZE.is_some();
 
-    /// Frames one leading representation.
+    /// Frames one leading representation when `LEADING_EXTENT` is true.
+    ///
+    /// Schemas without a leading extent may use the supplied span as an exact boundary.
     fn frame(input: &[u8], absolute_offset: usize) -> Result<Frame<Self::State>, Self::Error>;
+
+    /// Frames an exact supplied span; terminal collection items may remain deferred.
+    ///
+    /// Override when `frame` must scan those items to delimit a prefix. The default suits
+    /// schemas whose leading and exact framing are identical.
+    fn frame_exact(
+        input: &[u8],
+        absolute_offset: usize,
+    ) -> Result<Frame<Self::State>, Self::Error> {
+        Self::frame(input, absolute_offset)
+    }
 
     /// Reconstructs a child view from geometry established by framing.
     ///
     /// # Safety
     ///
-    /// `state` must come from a successful `frame` whose consumed length equals `input.len()`.
-    /// The address and byte contents need not match the slice originally supplied to `frame`.
+    /// `state` must come from a successful `frame` or `frame_exact` whose consumed length equals
+    /// `input.len()`. The address and byte contents need not match the original framed slice.
     unsafe fn from_validated_parts<'view>(
         input: &'view [u8],
         state: &'view Self::State,
@@ -572,7 +585,11 @@ impl<'input, T: WireView> Iterator for ArrayIter<'input, T> {
             Some(width) if width != 0 => available.get(..width).unwrap_or(available),
             _ => available,
         };
-        let frame = match T::frame(frame_input, absolute) {
+        let frame = match if T::LEADING_EXTENT {
+            T::frame(frame_input, absolute)
+        } else {
+            T::frame_exact(frame_input, absolute)
+        } {
             Ok(frame) => frame,
             Err(source) => {
                 let index = self.index;
@@ -652,8 +669,12 @@ fn frame_array_items<T: WireView>(
                 consumed: usize::MAX,
                 available: available.len(),
             })?;
-        let frame =
-            T::frame(available, absolute).map_err(|source| ArrayError::Item { index, source })?;
+        let frame = if T::LEADING_EXTENT {
+            T::frame(available, absolute)
+        } else {
+            T::frame_exact(available, absolute)
+        }
+        .map_err(|source| ArrayError::Item { index, source })?;
         let (_, consumed) = frame.into_parts();
         if consumed == 0 {
             return Err(ArrayError::NonProgress {

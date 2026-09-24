@@ -267,12 +267,16 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         &frame_input,
         &frame_offset,
         runtime,
+        false,
     );
     let leading_extent = match schema.fields.last().map(|field| &field.kind) {
         Some(FieldKind::RawBytes(super::model::RawBytes {
             extent: super::model::DynamicExtent::Rest,
-        }))
-        | Some(FieldKind::Array(_)) => quote!(false),
+        })) => quote!(false),
+        Some(FieldKind::Array(array)) => {
+            let item = &array.item;
+            quote!(<#item as #runtime::WireView>::LEADING_EXTENT)
+        }
         Some(FieldKind::Nested(super::model::NestedField {
             terminal: true,
             extent: None,
@@ -305,6 +309,35 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         }
     } else {
         quote!(0usize)
+    };
+    let exact_frame = if matches!(
+        schema.fields.last().map(|field| &field.kind),
+        Some(FieldKind::Array(_))
+    ) || matches!(
+        schema.fields.last().map(|field| &field.kind),
+        Some(FieldKind::Nested(nested)) if nested.terminal && nested.extent.is_none()
+    ) {
+        let exact_steps = render_frame_steps(
+            schema,
+            &error,
+            &error_names,
+            &frame_input,
+            &frame_offset,
+            runtime,
+            true,
+        );
+        quote! {
+            #[inline]
+            fn frame_exact(
+                #frame_input: &[u8],
+                #frame_offset: usize,
+            ) -> Result<#runtime::Frame<Self::State>, Self::Error> {
+                #(#exact_steps)*
+                Ok(#runtime::Frame::new(#descriptor_value, #consumed))
+            }
+        }
+    } else {
+        TokenStream::new()
     };
 
     let trait_methods = render_trait_methods(schema, runtime);
@@ -710,6 +743,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 #(#frame_steps)*
                 Ok(#runtime::Frame::new(#descriptor_value, #consumed))
             }
+            #exact_frame
 
             #[inline(always)]
             unsafe fn from_validated_parts<#view_lifetime>(
@@ -766,7 +800,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             ) -> Result<Self::Root<#backing>, Self::Error> {
                 let #current_input = #view_input.as_ref();
                 let #input_length = #current_input.len();
-                let #frame_result = <Self as #runtime::WireView>::frame(#current_input, 0)?;
+                let #frame_result = <Self as #runtime::WireView>::frame_exact(#current_input, 0)?;
                 let (#framed_descriptor, #framed_consumed) = #frame_result.into_parts();
                 if #framed_consumed > #input_length {
                     return Err(#error::InvalidFrame(#runtime::InvalidFrameExtent {
@@ -795,7 +829,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             ) -> Result<Self::Root<#backing>, Self::Error> {
                 let #current_input = #view_input.as_ref();
                 let #input_length = #current_input.len();
-                let #frame_result = <Self as #runtime::WireView>::frame(#current_input, 0)?;
+                let #frame_result = <Self as #runtime::WireView>::frame_exact(#current_input, 0)?;
                 let (#framed_descriptor, #framed_consumed) = #frame_result.into_parts();
                 if #framed_consumed > #input_length {
                     return Err(#error::InvalidFrame(#runtime::InvalidFrameExtent {
@@ -854,7 +888,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             ) -> Result<impl #trait_path + #runtime::ExactWire<Self>, #error_type> {
                 let #current_input = #view_input.as_ref();
                 let #input_length = #current_input.len();
-                let #frame_result = <Self as #runtime::WireView>::frame(#current_input, 0)?;
+                let #frame_result = <Self as #runtime::WireView>::frame_exact(#current_input, 0)?;
                 let (#framed_descriptor, #framed_consumed) = #frame_result.into_parts();
                 if #framed_consumed > #input_length {
                     return Err(#error::InvalidFrame(#runtime::InvalidFrameExtent {
@@ -886,7 +920,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             ) -> Result<impl #trait_path + #runtime::ExactWire<Self>, #error_type> {
                 let #current_input = #view_input.as_ref();
                 let #input_length = #current_input.len();
-                let #frame_result = <Self as #runtime::WireView>::frame(#current_input, 0)?;
+                let #frame_result = <Self as #runtime::WireView>::frame_exact(#current_input, 0)?;
                 let (#framed_descriptor, #framed_consumed) = #frame_result.into_parts();
                 if #framed_consumed > #input_length {
                     return Err(#error::InvalidFrame(#runtime::InvalidFrameExtent {
@@ -1407,6 +1441,7 @@ fn render_frame_steps(
     frame_input: &syn::Ident,
     frame_offset: &syn::Ident,
     runtime: &TokenStream,
+    exact: bool,
 ) -> Vec<TokenStream> {
     if schema.has_explicit_geometry() {
         return render_explicit_frame_steps(
@@ -1416,6 +1451,7 @@ fn render_frame_steps(
             frame_input,
             frame_offset,
             runtime,
+            exact,
         );
     }
     let mut steps = Vec::new();
@@ -1562,6 +1598,11 @@ fn render_frame_steps(
                 let shortage = &names.shortage;
                 let variant = names.nested.as_ref().expect("nested error variant");
                 let extent = names.extent.as_ref().expect("nested extent variant");
+                let frame_method = if exact && nested.terminal {
+                    quote!(frame_exact)
+                } else {
+                    quote!(frame)
+                };
                 let fixed_check = if nested.terminal {
                     TokenStream::new()
                 } else {
@@ -1586,7 +1627,7 @@ fn render_frame_steps(
                             additional_at_least: #offset.saturating_sub(#frame_input.len()),
                         })
                     })?;
-                    let #child_frame = <#ty as #runtime::WireView>::frame(
+                    let #child_frame = <#ty as #runtime::WireView>::#frame_method(
                         #available,
                         #absolute,
                     )
@@ -1620,6 +1661,7 @@ fn render_explicit_frame_steps(
     frame_input: &syn::Ident,
     frame_offset: &syn::Ident,
     runtime: &TokenStream,
+    exact: bool,
 ) -> Vec<TokenStream> {
     let cursor = private_ident(schema, "geometry_cursor");
     let input_end = private_ident(schema, "geometry_input_end");
@@ -1886,7 +1928,7 @@ fn render_explicit_frame_steps(
                 let controller =
                     private_ident(schema, &format!("controller_{}", array.controller.unraw()));
                 let variant = names.nested.as_ref().expect("array error variant");
-                if index + 1 == schema.fields.len() {
+                if index + 1 == schema.fields.len() && exact {
                     steps.push(quote! {
                         #frame_input.get(#start..).ok_or_else(|| {
                             #error::#variant(#runtime::ArrayError::NeedMore(
@@ -1900,6 +1942,11 @@ fn render_explicit_frame_steps(
                         let #end = #frame_input.len();
                     });
                 } else {
+                    let leading = quote! {
+                        if #controller != 0 && !<#item as #runtime::WireView>::LEADING_EXTENT {
+                            return Err(#error::LayoutUnavailable { field: #field_name });
+                        }
+                    };
                     steps.push(quote! {
                         let available = #frame_input.get(#start..).ok_or_else(|| {
                             #error::#variant(#runtime::ArrayError::NeedMore(
@@ -1910,6 +1957,7 @@ fn render_explicit_frame_steps(
                                 },
                             ))
                         })?;
+                        #leading
                         let consumed = #runtime::__private::frame_array_extent::<#item>(
                             available,
                             #controller,
@@ -1934,6 +1982,11 @@ fn render_explicit_frame_steps(
                 let declared = nested.extent.as_ref().map(|controller| {
                     private_ident(schema, &format!("controller_{}", controller.unraw()))
                 });
+                let frame_method = if nested.extent.is_some() || (exact && nested.terminal) {
+                    quote!(frame_exact)
+                } else {
+                    quote!(frame)
+                };
                 let prepare_end = if let Some(declared) = &declared {
                     quote! {
                         let #end = #start.checked_add(#declared)
@@ -1985,7 +2038,7 @@ fn render_explicit_frame_steps(
                 };
                 steps.push(quote! {
                     #prepare_end
-                    let #child_frame = <#ty as #runtime::WireView>::frame(#available, #absolute)
+                    let #child_frame = <#ty as #runtime::WireView>::#frame_method(#available, #absolute)
                         .map_err(#error::#variant)?;
                     let (#child_state, #child_consumed) = #child_frame.into_parts();
                     if #child_consumed > #available.len() {

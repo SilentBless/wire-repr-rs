@@ -772,7 +772,7 @@ impl Schema {
             self.fields.last().map(|field| &field.kind),
             Some(FieldKind::RawBytes(RawBytes {
                 extent: DynamicExtent::Rest,
-            })) | Some(FieldKind::Array(_))
+            }))
         )
     }
 

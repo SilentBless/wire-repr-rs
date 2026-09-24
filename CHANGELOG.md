@@ -2,6 +2,13 @@
 
 All notable public changes to `wire-repr` are recorded here.
 
+## [Unreleased]
+
+## [1.0.3] - 2026-09-24
+
+- Delimit nested variable-width counted arrays before following fields, including zero-count
+  arrays, without eagerly validating terminal arrays in exact views.
+
 ## [1.0.2] - 2026-09-24
 
 - Allow counted arrays whose physical count field follows dynamic byte geometry.
@@ -49,6 +56,8 @@ The first stable release of `wire-repr`.
 - Executable DNS, NTP, Telegram MTProto, and recursive expression-VM showcases exercise real
   network bytes, computed fields, schema validators, runtime collections, and recursive writers.
 
+[Unreleased]: https://github.com/SilentBless/wire-repr-rs/compare/v1.0.3...master
 [1.0.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.0
 [1.0.1]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.1
 [1.0.2]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.2
+[1.0.3]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.3

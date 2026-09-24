@@ -247,6 +247,294 @@ struct PlacedTerminal<T> {
     items: wire_repr::wire::Array<T>,
 }
 
+#[derive(WireView)]
+struct Attribute {
+    length: u8,
+    #[wire(bytes = length)]
+    data: wire_repr::wire::Bytes,
+}
+
+#[derive(WireView)]
+struct Method {
+    attributes_count: u8,
+    #[wire(counted_by = attributes_count)]
+    attributes: wire_repr::wire::Array<Attribute>,
+}
+
+#[derive(WireView)]
+struct Class {
+    methods_count: u8,
+    #[wire(counted_by = methods_count)]
+    methods: wire_repr::wire::Array<Method>,
+    tail: u8,
+}
+
+#[derive(WireView)]
+struct MethodWithCode {
+    code_length: u8,
+    #[wire(bytes = code_length)]
+    code: wire_repr::wire::Bytes,
+    attributes_count: u8,
+    #[wire(counted_by = attributes_count)]
+    attributes: wire_repr::wire::Array<Attribute>,
+}
+
+#[derive(WireView)]
+struct ClassWithCode {
+    methods_count: u8,
+    #[wire(counted_by = methods_count)]
+    methods: wire_repr::wire::Array<MethodWithCode>,
+    tail: u8,
+}
+
+#[derive(WireView)]
+struct MethodWrapper {
+    method: Method,
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum MethodChoice {
+    #[wire(value = 1)]
+    Present(Method),
+    #[wire(value = 2)]
+    Empty,
+}
+
+#[derive(WireView)]
+#[wire(selector = u8)]
+enum OpenMethodChoice {
+    #[wire(value = 1)]
+    Present(Method),
+    #[wire(unknown)]
+    Unknown(wire_repr::wire::Bytes),
+}
+
+#[derive(WireView)]
+struct UnboundedAttribute {
+    #[wire(rest)]
+    data: wire_repr::wire::Bytes,
+}
+
+#[derive(WireView)]
+struct UnboundedMethod {
+    attributes_count: u8,
+    #[wire(counted_by = attributes_count)]
+    attributes: wire_repr::wire::Array<UnboundedAttribute>,
+}
+
+#[derive(WireView)]
+struct UnboundedClass {
+    methods_count: u8,
+    #[wire(counted_by = methods_count)]
+    methods: wire_repr::wire::Array<UnboundedMethod>,
+    tail: u8,
+}
+
+#[test]
+fn nested_counted_arrays_stop_before_following_fields() -> TestResult {
+    assert_eq!(
+        <Method as wire_repr::WireView>::frame(&[0, 0x2a], 0)?
+            .into_parts()
+            .1,
+        1,
+    );
+    let view = Class::view([1, 0, 0x2a])?;
+    assert_eq!(view.tail(), 42);
+    let mut methods = view.methods().iter();
+    let method = methods.next().transpose()?.expect("one method");
+    assert_eq!(method.as_bytes(), &[0]);
+    assert_eq!(method.view().attributes_count(), 0);
+    assert!(method.view().attributes().iter().next().is_none());
+    assert!(methods.next().is_none());
+
+    let view = Class::view([2, 2, 1, 0xaa, 2, 0xbb, 0xcc, 1, 0, 0x2a])?;
+    assert_eq!(view.tail(), 42);
+    let mut methods = view.methods().iter();
+    let first = methods.next().transpose()?.expect("first method");
+    assert_eq!(first.as_bytes(), &[2, 1, 0xaa, 2, 0xbb, 0xcc]);
+    let first_view = first.view();
+    let mut attributes = first_view.attributes().iter();
+    assert_eq!(
+        attributes
+            .next()
+            .transpose()?
+            .expect("first attribute")
+            .view()
+            .data(),
+        [0xaa]
+    );
+    assert_eq!(
+        attributes
+            .next()
+            .transpose()?
+            .expect("second attribute")
+            .view()
+            .data(),
+        [0xbb, 0xcc],
+    );
+    assert!(attributes.next().is_none());
+    let second = methods.next().transpose()?.expect("second method");
+    assert_eq!(second.as_bytes(), &[1, 0]);
+    assert_eq!(
+        second
+            .view()
+            .attributes()
+            .iter()
+            .next()
+            .transpose()?
+            .expect("empty attribute")
+            .view()
+            .data(),
+        [],
+    );
+    assert!(methods.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn counted_prefix_after_dynamic_bytes_preserves_outer_tail() -> TestResult {
+    let view = ClassWithCode::view([1, 2, 0xa1, 0xa2, 0, 42])?;
+    assert_eq!(view.tail(), 42);
+    let method = view.methods().iter().next().transpose()?.expect("method");
+    assert_eq!(method.as_bytes(), [2, 0xa1, 0xa2, 0]);
+    assert_eq!(method.view().code(), [0xa1, 0xa2]);
+
+    let view = ClassWithCode::view([1, 2, 0xa1, 0xa2, 1, 0, 42])?;
+    assert_eq!(view.tail(), 42);
+    assert_eq!(
+        view.methods()
+            .iter()
+            .next()
+            .transpose()?
+            .expect("method")
+            .as_bytes(),
+        [2, 0xa1, 0xa2, 1, 0],
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_array_prefix_capability_propagates_through_structs_and_enums() -> TestResult {
+    let mut methods = Method::views(&[0, 1, 0])?;
+    assert_eq!(methods.next()?.expect("first method").as_bytes(), [0]);
+    assert_eq!(methods.next()?.expect("second method").as_bytes(), [1, 0]);
+    assert!(methods.next()?.is_none());
+
+    let wrapper = MethodWrapper::view([0, 0x2a])?;
+    assert_eq!(wrapper.method().attributes_count(), 0);
+    let choice = MethodChoice::view([1, 0, 0x2a])?;
+    assert!(matches!(
+        choice.variant(),
+        MethodChoiceVariant::Present(method) if method.attributes_count() == 0
+    ));
+    let open = OpenMethodChoice::view([1, 0, 0x2a])?;
+    assert!(matches!(
+        open.variant(),
+        OpenMethodChoiceVariant::Present(method) if method.attributes_count() == 0
+    ));
+
+    let mut wrappers = MethodWrapper::views(&[0, 0])?;
+    assert_eq!(
+        wrappers.next()?.expect("first").method().attributes_count(),
+        0
+    );
+    assert_eq!(
+        wrappers
+            .next()?
+            .expect("second")
+            .method()
+            .attributes_count(),
+        0
+    );
+    assert!(wrappers.next()?.is_none());
+
+    let mut choices = MethodChoice::views(&[1, 0, 2])?;
+    let first = choices.next()?.expect("first choice");
+    match first.variant() {
+        MethodChoiceVariant::Present(method) => assert_eq!(method.attributes_count(), 0),
+        MethodChoiceVariant::Empty => panic!("expected method"),
+    }
+    assert!(matches!(
+        choices.next()?.expect("second choice").variant(),
+        MethodChoiceVariant::Empty
+    ));
+    assert!(choices.next()?.is_none());
+    Ok(())
+}
+
+#[test]
+fn nested_array_shortages_keep_absolute_offsets_without_eager_root_validation() -> TestResult {
+    let error = match Class::view([1, 1, 2, 0xaa]) {
+        Ok(_) => panic!("truncated nested attribute unexpectedly framed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        ClassViewError::Methods(wire_repr::ArrayError::Item {
+            index: 0,
+            source: MethodViewError::Attributes(wire_repr::ArrayError::Item {
+                index: 0,
+                source: AttributeViewError::Data(wire_repr::NeedMore {
+                    offset: 4,
+                    additional_at_least: 1,
+                }),
+            }),
+        })
+    ));
+    let error = match Class::view([1, 1, 0]) {
+        Ok(_) => panic!("missing tail unexpectedly framed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        ClassViewError::Tail(wire_repr::NeedMore {
+            offset: 3,
+            additional_at_least: 1,
+        })
+    ));
+    let error = match Class::view([1, 0, 0x2a, 99]) {
+        Ok(_) => panic!("trailing bytes unexpectedly accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        ClassViewError::Trailing(wire_repr::TrailingBytes {
+            offset: 3,
+            trailing: 1,
+        })
+    ));
+
+    let method = Method::view([1, 2, 0xaa])?;
+    assert!(matches!(
+        method.attributes().iter().next(),
+        Some(Err(wire_repr::ArrayError::Item { index: 0, .. }))
+    ));
+    let method = Method::view([0, 0x2a])?;
+    assert!(matches!(
+        method.attributes().iter().next(),
+        Some(Err(wire_repr::ArrayError::Trailing {
+            offset: 1,
+            trailing: 1
+        }))
+    ));
+    Ok(())
+}
+
+#[test]
+fn nonleading_items_never_claim_a_following_field() -> TestResult {
+    assert_eq!(UnboundedClass::view([0, 0x2a])?.tail(), 42);
+    let error = match UnboundedClass::view([1, 1, 7, 0x2a]) {
+        Ok(_) => panic!("nonleading item unexpectedly framed before tail"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        UnboundedClassViewError::LayoutUnavailable { field: "methods" }
+    ));
+    Ok(())
+}
+
 #[test]
 fn ordinary_generic_array_writer_keeps_placement_geometry() -> TestResult {
     let mut output = [0xff; 12];

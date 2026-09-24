@@ -194,6 +194,11 @@ exception_count: u16,
 exceptions: wire::Array<ExceptionHandler>,
 ```
 
+Counted arrays can themselves contain variable-width items ending in counted arrays. When the item
+type can determine its leading extent, framing walks just enough items to locate the following
+field; a zero count consumes no bytes. A standalone exact view of a terminal array still defers
+item validation until iteration or exact copying.
+
 `ArrayView` retains a range and authoritative count—not item offsets. Iteration advances one cursor;
 writers accept arbitrary `IntoIterator` sources through `try_extend`. A validated source array can
 be forwarded as one exact range:
@@ -240,7 +245,7 @@ separating named linker calls from unresolved dispatch before runtime samples ar
 > the release package by checksum. `WIRE_REPR_RIZIN` may point to another executable location.
 
 The core remains featureless and allocation-free; optional application storage appears only through
-caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.2/ARCHITECTURE.md)
+caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.3/ARCHITECTURE.md)
 for the generated-state, recursion, and measurement invariants.
 Ongoing repository and API work is ordered in
 [`ROADMAP.md`](https://github.com/SilentBless/wire-repr-rs/blob/master/ROADMAP.md).
@@ -296,4 +301,4 @@ to 120 seconds without adding that cost to merge commits.
 ## 📄 License
 
 MIT © 2026 SilentBless. See the
-[license](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.2/LICENSE).
+[license](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.3/LICENSE).
