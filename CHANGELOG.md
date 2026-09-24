@@ -2,6 +2,12 @@
 
 All notable public changes to `wire-repr` are recorded here.
 
+## [1.0.2] - 2026-09-24
+
+- Allow counted arrays whose physical count field follows dynamic byte geometry.
+  Progressive writers patch the count at its computed position; terminal arrays
+  retain their existing deferred item validation.
+
 ## [1.0.1] - 2026-08-29
 
 - Documented the direct `thiserror` dependency used by nominal generated error types.
@@ -45,3 +51,4 @@ The first stable release of `wire-repr`.
 
 [1.0.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.0
 [1.0.1]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.1
+[1.0.2]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.2

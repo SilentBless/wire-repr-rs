@@ -977,7 +977,7 @@ fn validate_bit_projection(
             "bit projection controller must be physically earlier",
         ));
     }
-    validate_unsigned_controller(fields, fields.len(), controller, "bit projection")?;
+    validate_unsigned_controller(fields, fields.len(), controller, "bit projection", false)?;
     let controller_field = fields
         .iter()
         .find(|field| field.name == *controller)
@@ -1233,7 +1233,7 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
     let mut length_controllers = BTreeSet::new();
     for (index, controller) in &length_roles {
         length_controllers.insert(controller.to_string());
-        validate_unsigned_controller(fields, *index, controller, "byte length")?;
+        validate_unsigned_controller(fields, *index, controller, "byte length", false)?;
     }
     for (index, field) in fields.iter().enumerate() {
         if let Some(Position::Field(controller)) = &field.layout.position {
@@ -1245,7 +1245,7 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
                     ),
                 ));
             }
-            validate_unsigned_controller(fields, index, controller, "field position")?;
+            validate_unsigned_controller(fields, index, controller, "field position", false)?;
         }
     }
     Ok(())
@@ -1303,7 +1303,7 @@ fn validate_arrays(fields: &[Field]) -> syn::Result<()> {
             ));
         }
 
-        validate_unsigned_controller(fields, index, &array.controller, "item count")?;
+        validate_unsigned_controller(fields, index, &array.controller, "item count", true)?;
     }
     Ok(())
 }
@@ -1488,6 +1488,7 @@ fn validate_unsigned_controller(
     dependent_index: usize,
     controller: &Ident,
     role: &str,
+    allow_dynamic_offset: bool,
 ) -> syn::Result<()> {
     let Some(controller_index) = fields.iter().position(|field| field.name == *controller) else {
         return Err(syn::Error::new_spanned(
@@ -1506,11 +1507,12 @@ fn validate_unsigned_controller(
         || controller_field.layout.align_before.is_some()
         || controller_field.layout.position.is_some()
         || controller_field.layout.condition.is_some()
-        || controller_field
-            .offset
-            .terms
-            .iter()
-            .any(|term| matches!(term, SizeTerm::Dynamic))
+        || (!allow_dynamic_offset
+            && controller_field
+                .offset
+                .terms
+                .iter()
+                .any(|term| matches!(term, SizeTerm::Dynamic)))
     {
         return Err(syn::Error::new_spanned(
             controller,

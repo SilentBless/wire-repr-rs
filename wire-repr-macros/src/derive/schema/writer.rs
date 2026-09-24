@@ -25,6 +25,13 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
     let original_arguments = generic_arguments(&schema.generics);
     let state_markers = slots.iter().map(|slot| &slot.state).collect::<Vec<_>>();
     let bit_controller_states = bit_controller_states(schema);
+    let dynamic_count_offsets = dynamic_count_offsets(schema);
+    let count_offset_fields = dynamic_count_offsets
+        .iter()
+        .map(|(_, state)| quote!(#state: usize,));
+    let count_offset_initializers = dynamic_count_offsets
+        .iter()
+        .map(|(_, state)| quote!(#state: 0,));
     let bit_controller_fields = bit_controller_states
         .iter()
         .map(|(_, state, ty)| quote!(#state: #ty,));
@@ -83,6 +90,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
         #vis struct #writer_name #writer_declaration_generics #writer_declaration_where {
             writer: #runtime::Writer<#output>,
             #(#bit_controller_fields)*
+            #(#count_offset_fields)*
             #marker: ::core::marker::PhantomData<
                 fn() -> (#self_type, #(#state_markers,)*)
             >,
@@ -95,6 +103,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
                 #writer_name {
                     writer: #runtime::Writer::new(output),
                     #(#bit_controller_initializers)*
+                    #(#count_offset_initializers)*
                     #marker: ::core::marker::PhantomData,
                 }
             }
@@ -119,6 +128,7 @@ fn render_setters(
     let (conversion_names, nested_names) = writer_error_names(schema);
     let has_conversions = conversion_names.iter().any(Option::is_some);
     let bit_controller_states = bit_controller_states(schema);
+    let dynamic_count_offsets = dynamic_count_offsets(schema);
     let mut rendered = Vec::new();
 
     for (target_index, target) in slots.iter().enumerate() {
@@ -195,8 +205,8 @@ fn render_setters(
                 let #offset_local = #offset.expect("validated fixed layout offset");
             )
         };
-        let pending_constants = if schema.has_explicit_geometry() {
-            render_pending_constants(
+        let pending_fields = if schema.has_explicit_geometry() {
+            render_pending_fields(
                 schema,
                 physical_index,
                 slots,
@@ -210,10 +220,14 @@ fn render_setters(
         let bit_controller_assignments = bit_controller_states
             .iter()
             .map(|(_, state, _)| quote!(#state: self.#state,));
+        let count_offset_assignments = dynamic_count_offsets
+            .iter()
+            .map(|(_, state)| quote!(#state: self.#state,));
         let assignments = quote! {
             #writer_name {
                 writer: self.writer,
                 #(#bit_controller_assignments)*
+                #(#count_offset_assignments)*
                 #marker: ::core::marker::PhantomData,
             }
         };
@@ -262,7 +276,7 @@ fn render_setters(
                                 <#output as #runtime::Output>::GrowError,
                             >,
                         > {
-                            #pending_constants
+                            #pending_fields
                             #offset_binding
                             #write
                             Ok(#assignments)
@@ -288,7 +302,7 @@ fn render_setters(
                                 <#output as #runtime::Output>::GrowError,
                             >,
                         > {
-                            #pending_constants
+                            #pending_fields
                             #offset_binding
                             self.writer.write_at(#offset_local, &#value)?;
                             Ok(#assignments)
@@ -317,7 +331,7 @@ fn render_setters(
                                 <#output as #runtime::Output>::GrowError,
                             >,
                         > {
-                            #pending_constants
+                            #pending_fields
                             #offset_binding
                             for (index, element) in #value.into_iter().enumerate() {
                                 let element_offset = index
@@ -375,10 +389,14 @@ fn render_setters(
                             quote!(#state: self.#state,)
                         }
                     });
+                let returned_count_offsets = dynamic_count_offsets
+                    .iter()
+                    .map(|(_, state)| quote!(#state: self.#state,));
                 let returned = quote! {
                     #writer_name {
                         writer: self.writer,
                         #(#returned_controller_assignments)*
+                        #(#returned_count_offsets)*
                         #marker: ::core::marker::PhantomData,
                     }
                 };
@@ -397,7 +415,7 @@ fn render_setters(
                                 <#output as #runtime::Output>::GrowError,
                             >,
                         > {
-                            #pending_constants
+                            #pending_fields
                             let part = #part;
                             if part > #mask {
                                 return Err(#runtime::WriteError::Schema(
@@ -455,7 +473,7 @@ fn render_setters(
                         where
                             #raw_bytes: AsRef<[u8]>,
                         {
-                            #pending_constants
+                            #pending_fields
                             #offset_binding
                             let bytes = #value.as_ref();
                             #patch
@@ -517,7 +535,7 @@ fn render_setters(
                                 >,
                             >,
                         {
-                            #pending_constants
+                            #pending_fields
                             #offset_binding
                             let count = {
                                 let #array_writer =
@@ -573,7 +591,7 @@ fn render_setters(
                         where
                             #build_fn: FnOnce(#start) -> #final_value,
                         {
-                            #pending_constants
+                            #pending_fields
                             #offset_binding
                             let choice = choose(#start);
                             let present =
@@ -657,7 +675,7 @@ fn render_setters(
                                 <#ty as #runtime::WireBuilder>::Builder,
                             ) -> #child_builder,
                         {
-                            #pending_constants
+                            #pending_fields
                             #offset_binding
                             let child_length = {
                                 let mut #child_writer = #create_child;
@@ -1088,7 +1106,7 @@ fn writer_error_type_from_all(
         quote!(#error<#(#errors),*>)
     }
 }
-fn render_pending_constants(
+fn render_pending_fields(
     schema: &Schema,
     target_physical_index: usize,
     slots: &[Slot],
@@ -1114,6 +1132,27 @@ fn render_pending_constants(
         .iter()
         .enumerate()
         .filter_map(|(relative_index, field)| {
+            let dynamic_count = schema.is_count_controller(&field.name)
+                && field
+                    .offset
+                    .terms
+                    .iter()
+                    .any(|term| matches!(term, SizeTerm::Dynamic));
+            if dynamic_count {
+                let index = start + relative_index;
+                let offset = private_ident(schema, &format!("pending_count_{index}_offset"));
+                let state = private_ident(schema, &format!("{}_count_offset", field.name.unraw()));
+                let geometry = render_writer_start(schema, field, &offset, error, runtime);
+                let FieldKind::Scalar(scalar) = &field.kind else {
+                    unreachable!("validated count controller is scalar")
+                };
+                let width = scalar.width();
+                return Some(quote! {
+                    #geometry
+                    self.writer.write_at(#offset, &[0u8; #width])?;
+                    self.#state = #offset;
+                });
+            }
             let constant = field.kind.constant()?;
             let index = start + relative_index;
             let offset = private_ident(schema, &format!("pending_constant_{index}_offset"));
@@ -1366,7 +1405,17 @@ fn render_count_patch(
         unreachable!("validated item count controller is scalar")
     };
     let controller_name = controller.unraw().to_string();
-    let controller_offset = builder_offset(&controller_field.offset, runtime);
+    let controller_offset = if controller_field
+        .offset
+        .terms
+        .iter()
+        .any(|term| matches!(term, SizeTerm::Dynamic))
+    {
+        let state = private_ident(schema, &format!("{}_count_offset", controller.unraw()));
+        quote!(Some(self.#state))
+    } else {
+        builder_offset(&controller_field.offset, runtime)
+    };
     let wire_ty = scalar_type_tokens(scalar.wire_type);
     let encode = to_bytes_method(scalar.endian);
     quote! {
@@ -1543,6 +1592,27 @@ fn bit_controller_states(schema: &Schema) -> Vec<(syn::Ident, syn::Ident, TokenS
                 ),
                 scalar_type_tokens(scalar.wire_type),
             ))
+        })
+        .collect()
+}
+
+fn dynamic_count_offsets(schema: &Schema) -> Vec<(syn::Ident, syn::Ident)> {
+    schema
+        .fields
+        .iter()
+        .filter(|field| {
+            schema.is_count_controller(&field.name)
+                && field
+                    .offset
+                    .terms
+                    .iter()
+                    .any(|term| matches!(term, SizeTerm::Dynamic))
+        })
+        .map(|field| {
+            (
+                field.name.clone(),
+                private_ident(schema, &format!("{}_count_offset", field.name.unraw())),
+            )
         })
         .collect()
 }

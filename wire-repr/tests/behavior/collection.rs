@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use wire_repr::{WireBuilder, WireView};
+use wire_repr::{WireBuilder, WireView, select};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -23,6 +23,121 @@ struct Foo<T> {
     #[wire(counted_by = count)]
     items: wire_repr::wire::Array<T>,
     tail: u8,
+}
+
+#[derive(WireView, WireBuilder)]
+struct ExceptionHandler {
+    #[wire(be)]
+    start_pc: u16,
+    #[wire(be)]
+    end_pc: u16,
+}
+
+#[derive(WireView, WireBuilder)]
+struct Code {
+    #[wire(be)]
+    code_length: u32,
+    #[wire(bytes = code_length)]
+    instructions: wire_repr::wire::Bytes,
+    #[wire(be)]
+    exception_count: u16,
+    #[wire(counted_by = exception_count)]
+    exceptions: wire_repr::wire::Array<ExceptionHandler>,
+}
+
+#[derive(WireView, WireBuilder)]
+struct CodeWithTail {
+    #[wire(be)]
+    code_length: u32,
+    #[wire(bytes = code_length)]
+    instructions: wire_repr::wire::Bytes,
+    #[wire(be)]
+    exception_count: u16,
+    marker: u8,
+    #[wire(counted_by = exception_count)]
+    exceptions: wire_repr::wire::Array<ExceptionHandler>,
+    tail: u8,
+}
+
+#[test]
+fn counted_array_after_dynamic_bytes_round_trips() -> TestResult {
+    let input = [0, 0, 0, 2, 0xaa, 0xbb, 0, 1, 0, 3, 0, 5];
+    let view = Code::view(input)?;
+    assert_eq!(view.code_length(), 2);
+    assert_eq!(view.instructions(), [0xaa, 0xbb]);
+    assert_eq!(view.exception_count(), 1);
+    let handler = view
+        .exceptions()
+        .iter()
+        .next()
+        .transpose()?
+        .expect("handler");
+    assert_eq!(handler.view().start_pc(), 3);
+    assert_eq!(handler.view().end_pc(), 5);
+
+    let selected = select(&view).include(|fields| fields.exception_count | fields.exceptions);
+    assert_eq!(selected.bytes().collect::<Vec<_>>(), input[6..]);
+
+    let mut output = [0u8; 12];
+    Code::builder(&mut output[..])
+        .instructions([0xaa, 0xbb])?
+        .exceptions(|items| items.item(|item| item.start_pc(3).end_pc(5)))?
+        .finish()?;
+    assert_eq!(output, input);
+    Ok(())
+}
+
+#[test]
+fn dynamic_count_controller_before_intervening_fields_and_tail() -> TestResult {
+    let input = [0, 0, 0, 1, 0xaa, 0, 1, 9, 0, 3, 0, 5, 7];
+    let view = CodeWithTail::view(input)?;
+    assert_eq!(view.exception_count(), 1);
+    assert_eq!(view.marker(), 9);
+    assert_eq!(view.tail(), 7);
+    assert_eq!(
+        view.exceptions()
+            .iter()
+            .next()
+            .transpose()?
+            .expect("handler")
+            .view()
+            .end_pc(),
+        5
+    );
+
+    let mut output = [0u8; 13];
+    CodeWithTail::builder(&mut output[..])
+        .instructions([0xaa])?
+        .marker(9)?
+        .exceptions(|items| items.copy_from(view.exceptions()))?
+        .tail(7)?
+        .finish()?;
+    assert_eq!(output, input);
+
+    let error = match CodeWithTail::view(&input[..6]) {
+        Ok(_) => panic!("truncated dynamic count unexpectedly framed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        CodeWithTailViewError::ExceptionCount(wire_repr::NeedMore {
+            offset: 6,
+            additional_at_least: 1,
+        })
+    ));
+
+    let error = match CodeWithTail::view(&input[..11]) {
+        Ok(_) => panic!("truncated array unexpectedly framed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        CodeWithTailViewError::Exceptions(wire_repr::ArrayError::NeedMore(wire_repr::NeedMore {
+            offset: 11,
+            additional_at_least: 1,
+        }))
+    ));
+    Ok(())
 }
 
 #[test]

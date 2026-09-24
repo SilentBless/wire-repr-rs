@@ -186,8 +186,10 @@ length, conditional presence, and computed values derive or patch their controll
 Controller setters are omitted.
 
 The shipped dependency vertical accepts top-level byte-length and presence controllers with fixed
-sequential geometry. Multiple payloads may share one byte-length controller, but their write
-lengths must agree. A controller cannot simultaneously control placement. Nested controller paths,
+sequential geometry. Count controllers may also follow dynamic sequential geometry: framing
+locates them with the input cursor, and progressive writers retain their physical offset for a
+later count patch. Multiple payloads may share one byte-length controller, but their write lengths
+must agree. A controller cannot simultaneously control placement. Nested controller paths,
 cross-role dependencies, and non-scalar conditional bodies extend the same DAG in later verticals.
 
 Controller paths may be nested but must identify physically earlier values for one-pass framing.
