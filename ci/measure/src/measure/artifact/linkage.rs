@@ -31,29 +31,23 @@ impl<'a> CachedLinkage<'a> {
     }
 
     pub(super) fn observe(&mut self, operation: &'a Operation, linkage: bool) {
-        if operation.esil.is_empty() {
+        if operation.esil.is_empty() || matches!(operation.kind.as_str(), "unk" | "ill") {
             self.clear();
+            return;
+        }
+        if operation.kind.ends_with("call") {
+            if !linkage && self.source(operation).is_none() {
+                self.clear();
+            }
             return;
         }
         let mut previous = "";
         for token in operation.esil.split(',') {
-            if matches!(
-                token,
-                "=" | ":="
-                    | "+="
-                    | "-="
-                    | "*="
-                    | "/="
-                    | "%="
-                    | "&="
-                    | "|="
-                    | "^="
-                    | "<<="
-                    | ">>="
-                    | ">>>="
-            ) && let Some(index) = REGISTERS
-                .iter()
-                .position(|aliases| aliases.contains(&previous))
+            if token.ends_with('=')
+                && !matches!(token, "==" | "!=" | "<=" | ">=")
+                && let Some(index) = REGISTERS
+                    .iter()
+                    .position(|aliases| aliases.contains(&previous))
             {
                 self.sources[index] = None;
             }
@@ -81,6 +75,37 @@ mod tests {
             "esil": esil,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn reads_preserve_imports_but_unlisted_assignments_discard_them() {
+        let load = operation("mov", "mov rbx, qword [reloc.memcpy]", "0x1000,[8],rbx,=");
+        let call = operation("rcall", "call rbx", "rbx,rip,8,rsp,-=,rsp,=[],rip,=");
+        let read = operation("mov", "mov rax, rbx", "rbx,rax,=");
+        let compare = operation("cmp", "cmp rax, rbx", "rbx,rax,==");
+        let update = operation("add", "inc rbx", "rbx,++=");
+        let mut cached = CachedLinkage::default();
+        cached.observe(&load, true);
+        cached.observe(&read, false);
+        cached.observe(&compare, false);
+        assert_eq!(cached.source(&call), Some(load.disasm.as_str()));
+        cached.observe(&update, false);
+        assert_eq!(cached.source(&call), None);
+    }
+
+    #[test]
+    fn opaque_nonempty_effects_and_unknown_calls_discard_provenance() {
+        let load = operation("mov", "mov rbx, qword [reloc.memcpy]", "0x1000,[8],rbx,=");
+        let known_call = operation("rcall", "call rbx", "rbx,rip,8,rsp,-=,rsp,=[],rip,=");
+        let unknown_effect = operation("unk", "opaque", "CUSTOM_EFFECT");
+        let unknown_call = operation("rcall", "call rax", "rax,rip,8,rsp,-=,rsp,=[],rip,=");
+        let mut cached = CachedLinkage::default();
+        cached.observe(&load, true);
+        cached.observe(&unknown_effect, false);
+        assert_eq!(cached.source(&known_call), None);
+        cached.observe(&load, true);
+        cached.observe(&unknown_call, false);
+        assert_eq!(cached.source(&known_call), None);
     }
 
     #[test]
