@@ -186,6 +186,13 @@ and does not retain item offsets.
 views can be copied without semantic reconstruction. [`ArrayWriter::copy_from`] forwards an already
 validated source array as one represented range and patches its authoritative count.
 
+Nested struct and enum-body closures receive detached builders. Their array setters accept
+`array.extend(source, |item, value| ...)`, retaining the `IntoIterator` source and callback by value
+without traversing them. The enclosing write consumes the source once and emits each item directly
+before patching the stored count. Detached setters remain infallible; item, count, and output
+errors propagate through the enclosing write. Borrowed sources must remain valid until that write.
+No item plans or hidden allocation are introduced, including for multiple nested array levels.
+
 ## Static enums and bitfields
 
 A static enum declares one physical selector with `#[wire(selector = Physical, endian)]`. Unit

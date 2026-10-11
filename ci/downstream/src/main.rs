@@ -22,6 +22,31 @@ struct Packet {
     tail: u8,
 }
 
+#[derive(WireView, WireBuilder)]
+pub struct Entry {
+    #[wire(be)]
+    key: i32,
+    #[wire(be)]
+    value: i32,
+}
+
+#[derive(WireView, WireBuilder)]
+pub struct Batch {
+    #[wire(be)]
+    count: u32,
+    #[wire(counted_by = count)]
+    entries: wire::Array<Entry>,
+    #[wire(as = u8)]
+    enabled: bool,
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u16, be)]
+pub enum Envelope {
+    #[wire(value = 0x3102)]
+    Batch(Batch),
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let expected = [1, 2, 1, 0xaa, 2, 0xbb, 0xcc, 0x2a];
     let view = Packet::view(expected)?;
@@ -90,5 +115,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             trailing: 1,
         })
     ));
+
+    let expected = [
+        0x31, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x11, 0xff, 0xff, 0xff, 0xe9, 0x00,
+        0x00, 0x00, 0x29, 0xff, 0xff, 0xff, 0xc5, 0x01,
+    ];
+    let mut output = Vec::new();
+    let written = Envelope::builder(&mut output)
+        .batch(|batch| {
+            batch
+                .entries(|entries| {
+                    entries.extend([(17, -23), (41, -59)], |entry, (key, value)| {
+                        entry.key(key).value(value)
+                    })
+                })
+                .enabled(true)
+        })?
+        .finish()?;
+    assert_eq!(written.as_bytes(), expected);
+
+    let envelope = Envelope::view(written.as_bytes())?;
+    let EnvelopeVariant::Batch(batch) = envelope.variant();
+    assert_eq!(batch.count(), 2);
+    assert!(batch.enabled());
+    assert_eq!(batch.entries().len(), 2);
+    let mut entries = batch.entries().iter();
+    let first = entries.next().transpose()?.expect("first entry");
+    assert_eq!((first.view().key(), first.view().value()), (17, -23));
+    let second = entries.next().transpose()?.expect("second entry");
+    assert_eq!((second.view().key(), second.view().value()), (41, -59));
+    assert!(entries.next().is_none());
     Ok(())
 }

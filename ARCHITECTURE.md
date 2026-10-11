@@ -336,6 +336,15 @@ packet.items(|items| {
 })?
 ```
 
+Detached child builders, including enum bodies, use `extend` rather than `try_extend` for counted
+arrays. A field slot retains one `IntoIterator` source and item callback by value, without invoking
+either. `WireWrite` consumes them once and streams each item through an isolated child span;
+count controllers retain their physical output offset for a patch after the array completes.
+This also covers controllers following dynamic geometry and arrays followed by further fields.
+Detached setters stay infallible, with typed item, count, and output errors reported by the enclosing
+write operation. No collection of item plans, repeated source traversal, allocation, or dynamic
+dispatch is introduced. The progressive array surface and recursive root construction are unchanged.
+
 Recursive roots use the same public `Root::builder(output)` entry point. Object body setters follow
 physical order and invoke root closures directly on the transferred cursor; counted bodies stream
 items and patch their stored count after the closure completes:
@@ -465,10 +474,11 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fifteen discovered zones and sixty-three cases: fixed scalars,
+The current mandatory corpus has fifteen discovered zones and sixty-four cases: fixed scalars,
 fixed primitive arrays, constants, built-in and generic `TryFrom` conversions, one generic nested
 child, a four-level compound generic lattice, fixed byte arrays with multiple nested children,
-dynamic geometry, conditional controllers, runtime collection decode/build/copy, static body and
+dynamic geometry, conditional controllers, runtime collection decode/build/copy and detached nested
+collection build, static body and
 unit enum decode/build/copy, nominal and inline bitfields, fragmented and nested physical
 selections, fixed and dynamic computed fields, fixed and variable homogeneous views,
 heterogeneous cursors, all eight compact recursive geometry forms plus replay, recursive pair and

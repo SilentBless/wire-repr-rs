@@ -4,6 +4,10 @@ use core::convert::Infallible;
 use core::fmt;
 use core::ops::Range;
 
+mod array_source;
+#[doc(hidden)]
+pub use array_source::{ArrayBuilder, ArraySource, WriteArray};
+
 /// A request to expose enough contiguous bytes for the next generated write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GrowthRequest {
@@ -608,18 +612,8 @@ where
     {
         let start = self.writer.position();
         let mut child = self.writer.child_at(start)?;
-        <T as crate::schema::WireWrite<Value>>::write(
-            build(<T as crate::schema::WireBuilder>::builder()),
-            &mut child,
-        )?;
+        self.count = child.array_item::<T, _, _>(self.count, build)?;
         child.finish()?;
-        if self.writer.position() == start {
-            return Err(OutputError::NonProgressItem { index: self.count }.into());
-        }
-        self.count = self
-            .count
-            .checked_add(1)
-            .ok_or(OutputError::LengthOverflow)?;
         Ok(self)
     }
 
@@ -732,6 +726,36 @@ pub struct ChildWriter<'writer, O> {
 }
 
 impl<O: Output> ChildWriter<'_, O> {
+    #[inline(always)]
+    fn array_item<T, Build, Value>(
+        &mut self,
+        count: usize,
+        build: Build,
+    ) -> Result<usize, WriteError<<T as crate::schema::WireWrite<Value>>::Error, O::GrowError>>
+    where
+        T: crate::schema::WireBuilder + crate::schema::WireWrite<Value>,
+        Build: FnOnce(<T as crate::schema::WireBuilder>::Builder) -> Value,
+    {
+        let start = self.cursor;
+        let mut child = ChildWriter {
+            writer: &mut *self.writer,
+            start,
+            cursor: start,
+            limit: self.limit,
+        };
+        <T as crate::schema::WireWrite<Value>>::write(
+            build(<T as crate::schema::WireBuilder>::builder()),
+            &mut child,
+        )?;
+        self.cursor = child.position();
+        if self.cursor == start {
+            return Err(OutputError::NonProgressItem { index: count }.into());
+        }
+        count
+            .checked_add(1)
+            .ok_or(OutputError::LengthOverflow.into())
+    }
+
     /// Current absolute output offset.
     #[must_use]
     pub const fn position(&self) -> usize {

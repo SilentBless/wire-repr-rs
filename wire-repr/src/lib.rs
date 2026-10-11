@@ -24,6 +24,7 @@ pub mod wire {
 }
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::output::{ArrayBuilder, ArraySource, WriteArray};
     pub use crate::recursive::{
         FlattenRecursiveError, RecursiveArrayView, RecursiveBody, RecursiveCursor, RecursiveDepth,
         RecursiveError, RecursiveFrame, RecursiveGeometry, RecursiveGeometryBuilder,

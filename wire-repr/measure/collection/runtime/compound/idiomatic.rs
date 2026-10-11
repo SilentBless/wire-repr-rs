@@ -26,6 +26,10 @@ pub fn build(seed: u64) -> u64 {
     hash(&build_input(seed))
 }
 
+pub fn nested_build(seed: u64) -> u64 {
+    hash(core::hint::black_box(&build_input(seed)))
+}
+
 pub fn copy(seed: u64) -> u64 {
     let source = opaque_input(seed);
     try_copy(source.as_slice()).unwrap_or(u64::MAX)

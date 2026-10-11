@@ -17,6 +17,11 @@ struct Foo<T> {
     tail: u8,
 }
 
+#[derive(WireBuilder)]
+struct Nested {
+    body: Foo<Bar>,
+}
+
 pub fn decode(seed: u64) -> u64 {
     try_decode(seed).unwrap_or(u64::MAX)
 }
@@ -57,6 +62,29 @@ fn try_build(seed: u64) -> Result<u64, ()> {
     }))?;
     let written = discard(discard(writer.tail((seed >> 32) as u8))?.finish())?;
     Ok(hash(written.as_bytes()))
+}
+
+pub fn nested_build(seed: u64) -> u64 {
+    try_nested_build(seed).unwrap_or(u64::MAX)
+}
+
+fn try_nested_build(seed: u64) -> Result<u64, ()> {
+    let first = [seed as u8];
+    let second = [(seed >> 8) as u8, (seed >> 16) as u8];
+    let third = [(seed >> 24) as u8];
+    let mut output = [0u8; 9];
+    let written = discard(
+        discard(Nested::builder(&mut output[..]).body(|body| {
+            body.items(|items| {
+                items.extend([&first[..], &second[..], &third[..]], |bar, bytes| {
+                    bar.body(bytes)
+                })
+            })
+            .tail((seed >> 32) as u8)
+        }))?
+        .finish(),
+    )?;
+    Ok(hash(core::hint::black_box(written.as_bytes())))
 }
 
 pub fn copy(seed: u64) -> u64 {

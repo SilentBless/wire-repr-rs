@@ -26,6 +26,294 @@ struct Foo<T> {
 }
 
 #[derive(WireView, WireBuilder)]
+pub struct Entry {
+    #[wire(be)]
+    key: i32,
+    #[wire(be)]
+    value: i32,
+}
+
+#[derive(WireView, WireBuilder)]
+pub struct Batch {
+    #[wire(be)]
+    count: u32,
+    #[wire(counted_by = count)]
+    entries: wire_repr::wire::Array<Entry>,
+    #[wire(as = u8)]
+    enabled: bool,
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u16, be)]
+pub enum Envelope {
+    #[wire(value = 0x3102)]
+    Batch(Batch),
+}
+
+const BATCH_BYTES: [u8; 23] = [
+    0x31, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x11, 0xff, 0xff, 0xff, 0xe9, 0x00, 0x00,
+    0x00, 0x29, 0xff, 0xff, 0xff, 0xc5, 0x01,
+];
+
+#[test]
+fn enum_body_streams_detached_entries_into_fixed_and_growing_outputs() -> TestResult {
+    let mut fixed = [0u8; 23];
+    let written = Envelope::builder(&mut fixed[..])
+        .batch(|batch| {
+            batch
+                .entries(|entries| {
+                    entries.extend([(17, -23), (41, -59)], |entry, (key, value)| {
+                        entry.key(key).value(value)
+                    })
+                })
+                .enabled(true)
+        })?
+        .finish()?;
+    assert_eq!(written.as_bytes(), BATCH_BYTES);
+    assert_eq!(fixed, BATCH_BYTES);
+
+    let view = Envelope::view(fixed)?;
+    let EnvelopeVariant::Batch(batch) = view.variant();
+    assert_eq!(batch.count(), 2);
+    assert!(batch.enabled());
+    assert_eq!(batch.entries().len(), 2);
+    let mut entries = batch.entries().iter();
+    let first = entries.next().transpose()?.expect("first entry");
+    assert_eq!((first.view().key(), first.view().value()), (17, -23));
+    let second = entries.next().transpose()?.expect("second entry");
+    assert_eq!((second.view().key(), second.view().value()), (41, -59));
+    assert!(entries.next().is_none());
+
+    let mut growing = Vec::new();
+    let written = Envelope::builder(&mut growing)
+        .batch(|batch| {
+            batch
+                .entries(|entries| {
+                    entries.extend([(17, -23), (41, -59)], |entry, (key, value)| {
+                        entry.key(key).value(value)
+                    })
+                })
+                .enabled(true)
+        })?
+        .finish()?;
+    assert_eq!(written.as_bytes(), BATCH_BYTES);
+    Ok(())
+}
+
+#[test]
+fn empty_detached_array_patches_zero_count_and_preserves_the_enum_body_tail() -> TestResult {
+    let mut output = [0xff; 7];
+    Envelope::builder(&mut output[..])
+        .batch(|batch| {
+            batch
+                .entries(|entries| {
+                    entries.extend(core::iter::empty::<(i32, i32)>(), |entry, (key, value)| {
+                        entry.key(key).value(value)
+                    })
+                })
+                .enabled(false)
+        })?
+        .finish()?;
+    assert_eq!(output, [0x31, 0x02, 0, 0, 0, 0, 0]);
+    let view = Envelope::view(output)?;
+    let EnvelopeVariant::Batch(batch) = view.variant();
+    assert_eq!(batch.count(), 0);
+    assert!(!batch.enabled());
+    assert!(batch.entries().is_empty());
+    assert!(batch.entries().iter().next().is_none());
+    Ok(())
+}
+
+#[test]
+fn detached_array_defers_into_iterator_and_mutable_item_callbacks_until_writing() -> TestResult {
+    use core::cell::Cell;
+
+    struct Source<'a> {
+        started: &'a Cell<usize>,
+    }
+
+    impl IntoIterator for Source<'_> {
+        type Item = (i32, i32);
+        type IntoIter = std::array::IntoIter<Self::Item, 2>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.started.set(self.started.get() + 1);
+            [(17, -23), (41, -59)].into_iter()
+        }
+    }
+
+    let started = Cell::new(0);
+    let mut built = 0;
+    let batch = <Batch as WireBuilder>::builder()
+        .entries(|entries| {
+            entries.extend(Source { started: &started }, |entry, (key, value)| {
+                built += 1;
+                entry.key(key).value(value)
+            })
+        })
+        .enabled(true);
+    assert_eq!(started.get(), 0);
+
+    let mut output = [0u8; 23];
+    Envelope::builder(&mut output[..])
+        .batch(|_| batch)?
+        .finish()?;
+    assert_eq!(started.get(), 1);
+    assert_eq!(built, 2);
+    assert_eq!(output, BATCH_BYTES);
+    Ok(())
+}
+
+#[test]
+fn detached_enum_array_reports_fixed_output_shortages_at_every_boundary() {
+    for available in 0..BATCH_BYTES.len() {
+        let mut output = [0x55; 23];
+        let error = match Envelope::builder(&mut output[..available]).batch(|batch| {
+            batch
+                .entries(|entries| {
+                    entries.extend([(17, -23), (41, -59)], |entry, (key, value)| {
+                        entry.key(key).value(value)
+                    })
+                })
+                .enabled(true)
+        }) {
+            Ok(_) => panic!("short output with {available} bytes unexpectedly accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            wire_repr::WriteError::Output(wire_repr::OutputError::NeedMore {
+                request,
+                available: reported,
+            }) if reported == available && request.minimum_len > available
+        ));
+        if available == 22 {
+            assert_eq!(&output[..22], &BATCH_BYTES[..22]);
+            assert_eq!(output[22], 0x55);
+        }
+    }
+}
+
+#[test]
+fn nested_detached_array_conversion_failure_keeps_field_sources_and_stops_streaming() {
+    #[derive(WireView, WireBuilder)]
+    struct CheckedItem {
+        #[wire(as = u8)]
+        value: usize,
+    }
+
+    let consumed = core::cell::Cell::new(0);
+    let source = [1usize, 256, 2].into_iter().inspect(|_| {
+        consumed.set(consumed.get() + 1);
+    });
+    let mut output = [0x55; 6];
+    let error = match Foo::<Foo<CheckedItem>>::builder(&mut output[..]).items(|items| {
+        items.item(|group| {
+            group
+                .items(|items| items.extend(source, |item, value| item.value(value)))
+                .tail(7)
+        })
+    }) {
+        Ok(_) => panic!("out-of-range detached array item unexpectedly wrote"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(FooWriteError::Items(FooWriteError::Items(
+            CheckedItemWriteError::ValueValue(_)
+        )))
+    ));
+    assert_eq!(consumed.get(), 2);
+    assert_eq!(output, [0, 0, 1, 0x55, 0x55, 0x55]);
+}
+
+#[test]
+fn detached_enum_array_count_overflow_keeps_the_variant_and_controller_field_source() {
+    let mut output = [0x55; 258];
+    let error = match MethodChoice::builder(&mut output[..]).present(|method| {
+        method.attributes(|attributes| attributes.extend(0..256, |attribute, _| attribute.data([])))
+    }) {
+        Ok(_) => panic!("unrepresentable detached array count unexpectedly wrote"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(MethodChoicePresentWriteError::Body(
+            MethodWriteError::Layout(wire_repr::LayoutError {
+                field: "attributes_count"
+            })
+        ))
+    ));
+    let mut expected = [0u8; 258];
+    expected[0] = 1;
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn nested_detached_array_rejects_a_zero_width_item_without_wrapping_the_output_error() {
+    #[derive(WireView, WireBuilder)]
+    struct EmptyItem {
+        bytes: [u8; 0],
+    }
+
+    let mut output = [0x55; 4];
+    let error = match Foo::<Foo<EmptyItem>>::builder(&mut output[..]).items(|items| {
+        items.item(|group| {
+            group
+                .items(|items| items.extend([[]], |item, bytes| item.bytes(bytes)))
+                .tail(7)
+        })
+    }) {
+        Ok(_) => panic!("zero-width detached array item unexpectedly wrote"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Output(wire_repr::OutputError::NonProgressItem { index: 0 })
+    ));
+    assert_eq!(output, [0, 0, 0x55, 0x55]);
+}
+
+#[test]
+fn detached_array_manual_items_receive_isolated_byte_spans() -> TestResult {
+    struct ChecksummedByte;
+
+    impl WireBuilder for ChecksummedByte {
+        type Builder = ();
+
+        fn builder() -> Self::Builder {}
+    }
+
+    impl wire_repr::WireWrite<u8> for ChecksummedByte {
+        type Error = core::convert::Infallible;
+
+        fn write<O: wire_repr::Output>(
+            value: u8,
+            writer: &mut wire_repr::ChildWriter<'_, O>,
+        ) -> Result<(), wire_repr::WriteError<Self::Error, O::GrowError>> {
+            writer.write(&[value])?;
+            let checksum = writer.as_bytes().iter().copied().fold(0, u8::wrapping_add);
+            writer.write(&[checksum])?;
+            Ok(())
+        }
+    }
+
+    let mut output = [0u8; 8];
+    Foo::<Foo<ChecksummedByte>>::builder(&mut output[..])
+        .items(|groups| {
+            groups.item(|group| {
+                group
+                    .items(|items| items.extend([3, 7], |(), value| value))
+                    .tail(9)
+            })
+        })?
+        .tail(10)?
+        .finish()?;
+    assert_eq!(output, [1, 2, 3, 3, 7, 7, 9, 10]);
+    Ok(())
+}
+
+#[derive(WireView, WireBuilder)]
 struct ExceptionHandler {
     #[wire(be)]
     start_pc: u16,
@@ -247,14 +535,14 @@ struct PlacedTerminal<T> {
     items: wire_repr::wire::Array<T>,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Attribute {
     length: u8,
     #[wire(bytes = length)]
     data: wire_repr::wire::Bytes,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct Method {
     attributes_count: u8,
     #[wire(counted_by = attributes_count)]
@@ -269,7 +557,7 @@ struct Class {
     tail: u8,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct MethodWithCode {
     code_length: u8,
     #[wire(bytes = code_length)]
@@ -279,7 +567,7 @@ struct MethodWithCode {
     attributes: wire_repr::wire::Array<Attribute>,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 struct ClassWithCode {
     methods_count: u8,
     #[wire(counted_by = methods_count)]
@@ -292,7 +580,7 @@ struct MethodWrapper {
     method: Method,
 }
 
-#[derive(WireView)]
+#[derive(WireView, WireBuilder)]
 #[wire(selector = u8)]
 enum MethodChoice {
     #[wire(value = 1)]
@@ -411,6 +699,72 @@ fn counted_prefix_after_dynamic_bytes_preserves_outer_tail() -> TestResult {
             .as_bytes(),
         [2, 0xa1, 0xa2, 1, 0],
     );
+    Ok(())
+}
+
+#[test]
+fn multiple_detached_array_levels_patch_counts_after_dynamic_data() -> TestResult {
+    let expected = [1, 2, 2, 0xa1, 0xa2, 2, 1, 0xaa, 2, 0xbb, 0xcc, 0, 0, 42, 99];
+    let mut output = [0u8; 15];
+    let attributes = [&[0xaa][..], &[0xbb, 0xcc][..]];
+    Foo::<ClassWithCode>::builder(&mut output[..])
+        .items(|classes| {
+            classes.item(|class| {
+                class
+                    .methods(|methods| {
+                        methods.extend(
+                            [(&[0xa1, 0xa2][..], &attributes[..]), (&[][..], &[][..])],
+                            |method, (code, data)| {
+                                method.code(code).attributes(|attributes| {
+                                    attributes.extend(data, |attribute, data| attribute.data(data))
+                                })
+                            },
+                        )
+                    })
+                    .tail(42)
+            })
+        })?
+        .tail(99)?
+        .finish()?;
+    assert_eq!(output, expected);
+
+    let outer = Foo::<ClassWithCode>::view(output)?;
+    assert_eq!(outer.count(), 1);
+    assert_eq!(outer.tail(), 99);
+    let class = outer.items().iter().next().transpose()?.expect("class");
+    let class = class.view();
+    assert_eq!(class.methods_count(), 2);
+    assert_eq!(class.tail(), 42);
+    let mut methods = class.methods().iter();
+    let first = methods.next().transpose()?.expect("first method");
+    let first = first.view();
+    assert_eq!(first.code(), [0xa1, 0xa2]);
+    assert_eq!(first.attributes_count(), 2);
+    let mut attributes = first.attributes().iter();
+    assert_eq!(
+        attributes
+            .next()
+            .transpose()?
+            .expect("first attribute")
+            .view()
+            .data(),
+        [0xaa]
+    );
+    assert_eq!(
+        attributes
+            .next()
+            .transpose()?
+            .expect("second attribute")
+            .view()
+            .data(),
+        [0xbb, 0xcc]
+    );
+    assert!(attributes.next().is_none());
+    let second = methods.next().transpose()?.expect("second method");
+    assert_eq!(second.as_bytes(), [0, 0]);
+    assert_eq!(second.view().attributes_count(), 0);
+    assert!(second.view().attributes().is_empty());
+    assert!(methods.next().is_none());
     Ok(())
 }
 

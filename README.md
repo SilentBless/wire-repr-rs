@@ -207,6 +207,29 @@ be forwarded as one exact range:
 packet.values(|values| values.copy_from(source.values()))?;
 ```
 
+Nested struct fields and enum bodies receive a detached builder. Its array setter uses `extend`
+to retain one `IntoIterator` source and item callback until the parent writes:
+
+```rust
+let packet = Envelope::builder(&mut output)
+    .batch(|batch| {
+        batch
+            .entries(|entries| {
+                entries.extend(source, |entry, (key, value)| {
+                    entry.key(key).value(value)
+                })
+            })
+            .enabled(true)
+    })?
+    .finish()?;
+```
+
+`extend` does not iterate or build items immediately. Writing consumes the source once, emits
+each item directly, and patches the stored count before following fields. It retains no item
+plans and performs no allocation of its own. Write failures propagate through the enclosing
+write operation; detached setters themselves remain infallible. Nested arrays use the same
+contract, including count fields after dynamic data.
+
 Computed callbacks may consume logical getters and fragmented physical selections:
 
 ```rust

@@ -330,7 +330,7 @@ fn render_setters(
                 returned_states.push(match &target.kind {
                     SlotKind::Value(ty) => quote!(#runtime::__private::Set<#ty>),
                     SlotKind::RawBytes => quote!(#runtime::__private::Set<#raw_bytes>),
-                    SlotKind::Array(_) => quote!(#runtime::__private::Set<()>),
+                    SlotKind::Array(_) => quote!(#runtime::__private::Set<#child_builder>),
                     SlotKind::Choice(flag) => {
                         let final_value = choice_final_ident(schema, flag);
                         quote!(#runtime::__private::Set<#final_value>)
@@ -391,7 +391,30 @@ fn render_setters(
                     }
                 });
             }
-            SlotKind::Array(_) => {}
+            SlotKind::Array(item) => {
+                rendered.push(quote! {
+                    impl #impl_params #current_builder #impl_where {
+                        #[doc = concat!("Defers the source for counted array field `", stringify!(#field), "`.")]
+                        #[inline(always)]
+                        #vis fn #field<#build_fn, #child_builder>(
+                            self,
+                            build: #build_fn,
+                        ) -> #returned_builder
+                        where
+                            #build_fn: FnOnce(
+                                #runtime::__private::ArrayBuilder<#item>,
+                            ) -> #child_builder,
+                            #child_builder: #runtime::__private::WriteArray<#item>,
+                        {
+                            let value = build(#runtime::__private::ArrayBuilder::new());
+                            #builder {
+                                #(#assignments)*
+                                #marker: ::core::marker::PhantomData,
+                            }
+                        }
+                    }
+                });
+            }
             SlotKind::Choice(flag) => {
                 let start = choice_start_ident(schema, flag);
                 let final_value = choice_final_ident(schema, flag);
@@ -457,6 +480,7 @@ fn render_complete(
     let mut impl_generics = schema.generics.clone();
     let mut complete_states = Vec::with_capacity(slots.len());
     let mut nested_builders = Vec::new();
+    let mut array_sources = Vec::new();
     let mut choice_values = Vec::new();
     for slot in slots {
         match &slot.kind {
@@ -475,8 +499,18 @@ fn render_complete(
                     .push(parse_quote!(#parameter: AsRef<[u8]>));
                 complete_states.push(quote!(#runtime::__private::Set<#parameter>));
             }
-            SlotKind::Array(_) => {
-                complete_states.push(quote!(#runtime::__private::Set<()>));
+            SlotKind::Array(item) => {
+                let parameter =
+                    fresh_type_ident(&impl_generics, &format!("{}Source", pascal(&slot.field)));
+                impl_generics
+                    .params
+                    .push(GenericParam::Type(TypeParam::from(parameter.clone())));
+                impl_generics
+                    .make_where_clause()
+                    .predicates
+                    .push(parse_quote!(#parameter: #runtime::__private::WriteArray<#item>));
+                complete_states.push(quote!(#runtime::__private::Set<#parameter>));
+                array_sources.push((slot.field.clone(), item.clone(), parameter));
             }
             SlotKind::Choice(flag) => {
                 let final_value = choice_final_ident(schema, flag);
@@ -671,12 +705,18 @@ fn render_complete(
                             quote!(0 as #value_ty)
                         }
                     };
+                    let count_offset = schema.is_count_controller(&field.name).then(|| {
+                        let offset =
+                            private_ident(schema, &format!("{}_count_offset", field.name.unraw()));
+                        quote!(let #offset = writer.position();)
+                    });
                     if let Some(variant) = conversion_variant {
                         let semantic = private_ident(schema, &format!("scalar_{index}_value"));
                         let encoded = private_ident(schema, &format!("scalar_{index}_encoded"));
                         let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
                         quote! {
                             #geometry
+                            #count_offset
                             let #semantic: #value_ty = #source;
                             let #encoded: #wire_ty = #conversion.ok_or_else(|| {
                                 #runtime::WriteError::Schema(#error::#variant(
@@ -693,6 +733,7 @@ fn render_complete(
                         quote! {
                             let #encoded: #wire_ty = #source;
                             #geometry
+                            #count_offset
                             writer.write(&#encoded.#encode())?;
                         }
                     }
@@ -793,7 +834,53 @@ fn render_complete(
                         writer.write(#build_value.#field_name.0.as_ref())?;
                     }
                 }
-                FieldKind::Array(_) => TokenStream::new(),
+                FieldKind::Array(array) => {
+                    let field_name = &field.name;
+                    let (_, item, parameter) = array_sources
+                        .iter()
+                        .find(|(name, _, _)| name == field_name)
+                        .expect("array field has one deferred source");
+                    let variant = nested_variant
+                        .as_ref()
+                        .expect("array field has one error variant");
+                    let controller = schema
+                        .fields
+                        .iter()
+                        .find(|field| field.name == array.controller)
+                        .expect("validated array controller exists");
+                    let FieldKind::Scalar(scalar) = &controller.kind else {
+                        unreachable!("validated count controller is scalar")
+                    };
+                    let wire_ty = scalar_type_tokens(scalar.wire_type);
+                    let encode = to_bytes_method(scalar.endian);
+                    let controller_name = controller.name.unraw().to_string();
+                    let offset = private_ident(
+                        schema,
+                        &format!("{}_count_offset", controller.name.unraw()),
+                    );
+                    quote! {
+                        #geometry
+                        let count = <#parameter as #runtime::__private::WriteArray<#item>>::write(
+                            #build_value.#field_name.0,
+                            writer,
+                        )
+                        .map_err(|error| match error {
+                            #runtime::WriteError::Schema(error) => {
+                                #runtime::WriteError::Schema(#error::#variant(error))
+                            }
+                            #runtime::WriteError::Output(error) => {
+                                #runtime::WriteError::Output(error)
+                            }
+                        })?;
+                        let count = <#wire_ty as ::core::convert::TryFrom<usize>>::try_from(count)
+                            .map_err(|_| #runtime::WriteError::Schema(
+                                #error::Layout(#runtime::LayoutError {
+                                    field: #controller_name,
+                                }),
+                            ))?;
+                        writer.patch_at(#offset, &count.#encode())?;
+                    }
+                }
                 FieldKind::BitProjection(_) => TokenStream::new(),
                 FieldKind::Flag(_) => TokenStream::new(),
                 FieldKind::Nested(nested) => {
@@ -1076,7 +1163,13 @@ fn render_complete(
                 .expect("nested field has one complete builder");
             quote!(<#ty as #runtime::WireWrite<#parameter>>::Error)
         }
-        FieldKind::Array(_) => quote!(::core::convert::Infallible),
+        FieldKind::Array(_) => {
+            let (_, item, parameter) = array_sources
+                .iter()
+                .find(|(name, _, _)| *name == field.name)
+                .expect("array field has one deferred source");
+            quote!(<#parameter as #runtime::__private::WriteArray<#item>>::Error)
+        }
         _ => unreachable!("error fields are nested schemas or arrays"),
     });
     let error_type = if error_fields.is_empty() {

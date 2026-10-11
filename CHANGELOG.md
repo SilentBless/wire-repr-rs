@@ -4,6 +4,10 @@ All notable public changes to `wire-repr` are recorded here.
 
 ## [Unreleased]
 
+- Support counted arrays in detached nested struct and enum-body builders through
+  `extend(source, callback)`. Sources stream once during writing without retaining item plans;
+  count fields are patched at their physical offsets, including after dynamic data.
+
 ## [1.0.3] - 2026-09-24
 
 - Delimit nested variable-width counted arrays before following fields, including zero-count
