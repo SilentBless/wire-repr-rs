@@ -14,6 +14,8 @@ All notable public changes to `wire-repr` are recorded here.
   hidden allocation or a larger-than-final fixed buffer.
 - Bound transitive artifact analysis by linked function extents, preventing non-returning panic
   branches from attributing a neighboring function's allocations and dispatch to the workload.
+- Recognize named linker calls cached in x86-64 callee-saved registers without misclassifying them
+  as runtime dispatch; unknown targets and lost provenance remain unresolved.
 
 ## [1.0.4] - 2026-10-11
 

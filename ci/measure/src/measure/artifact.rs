@@ -1,3 +1,5 @@
+mod linkage;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
@@ -8,6 +10,8 @@ use std::path::{Path, PathBuf};
 use rzpipe::{RzPipe, RzPipeSpawnOptions};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+use linkage::CachedLinkage;
 use thiserror::Error;
 
 const ALLOCATION_MARKERS: &[&str] = &[
@@ -96,6 +100,7 @@ pub enum ArtifactError {
 pub struct Analyzer {
     path: PathBuf,
     pipe: RefCell<RzPipe>,
+    x86_64: bool,
 }
 
 impl Analyzer {
@@ -122,10 +127,14 @@ impl Analyzer {
         if pdb.is_file() {
             command(&mut pipe, &format!("idp {}", command_path(&pdb)))?;
         }
-        Ok(Self {
+        let mut analyzer = Self {
             path: path.to_owned(),
             pipe: RefCell::new(pipe),
-        })
+            x86_64: false,
+        };
+        let information: BinaryInfo = analyzer.json("ij")?;
+        analyzer.x86_64 = information.bin.arch == "x86" && information.bin.bits == 64;
+        Ok(analyzer)
     }
 
     pub fn analyze(&self, symbol: &str) -> Result<Metrics, ArtifactError> {
@@ -230,6 +239,9 @@ impl Analyzer {
                 symbol: seek.clone(),
             })?;
         let body: FunctionBody = self.json(&format!("pdfj @ {seek}"))?;
+        let blocks: Vec<BlockInfo> = self.json(&format!("afbj @ {seek}"))?;
+        let block_starts: BTreeSet<_> = blocks.into_iter().map(|block| block.addr).collect();
+        let mut cached = CachedLinkage::default();
         let start = exact_size.map_or(information.offset, |_| address);
         let end = exact_size.map_or_else(
             || {
@@ -246,18 +258,23 @@ impl Analyzer {
             ..LocalMetrics::default()
         };
 
-        for operation in body.ops {
+        for operation in &body.ops {
             let Some(offset) = operation.offset else {
                 continue;
             };
             if !(start..end).contains(&offset) {
                 continue;
             }
+            if block_starts.contains(&offset) {
+                cached.clear();
+            }
             metrics.instructions += 1;
             if branch(&operation.kind) {
                 metrics.branches += 1;
             }
-            let linkage = linkage(&operation, imports);
+            let direct_linkage = linkage(operation, imports);
+            let cached_source = cached.source(operation);
+            let linkage = direct_linkage || cached_source.is_some();
             let call = operation.kind.ends_with("call");
             if call {
                 if linkage {
@@ -267,8 +284,9 @@ impl Analyzer {
                 } else {
                     metrics.indirect_calls += 1;
                 }
-                let panic = marker(&operation.disasm, PANIC_MARKERS);
-                let allocation = marker(&operation.disasm, ALLOCATION_MARKERS);
+                let target = cached_source.unwrap_or(&operation.disasm);
+                let panic = marker(target, PANIC_MARKERS);
+                let allocation = marker(target, ALLOCATION_MARKERS);
                 metrics.panic_paths += u64::from(panic);
                 metrics.allocation_symbols += u64::from(allocation);
                 if operation.kind == "call"
@@ -283,7 +301,7 @@ impl Analyzer {
                 }
             }
 
-            if unconditional_jump(&operation.kind) && !switch(&operation) {
+            if unconditional_jump(&operation.kind) && !switch(operation) {
                 let leaves_function = operation
                     .jump
                     .is_none_or(|target| !(start..end).contains(&target));
@@ -299,6 +317,11 @@ impl Analyzer {
                         metrics.callees.insert(target);
                     }
                 }
+            }
+            if self.x86_64 && !block_starts.is_empty() && !branch(&operation.kind) {
+                cached.observe(operation, direct_linkage);
+            } else {
+                cached.clear();
             }
         }
         Ok(metrics)
@@ -346,6 +369,24 @@ struct LocalMetrics {
 }
 
 #[derive(Deserialize)]
+struct BinaryInfo {
+    bin: ArchitectureInfo,
+}
+
+#[derive(Deserialize)]
+struct ArchitectureInfo {
+    #[serde(default)]
+    arch: String,
+    #[serde(default)]
+    bits: u64,
+}
+
+#[derive(Deserialize)]
+struct BlockInfo {
+    addr: u64,
+}
+
+#[derive(Deserialize)]
 struct SymbolInfo {
     name: String,
     vaddr: Option<u64>,
@@ -382,6 +423,8 @@ struct Operation {
     kind: String,
     #[serde(default)]
     disasm: String,
+    #[serde(default)]
+    esil: String,
     #[serde(default, deserialize_with = "nonnegative_u64")]
     jump: Option<u64>,
     #[serde(default, deserialize_with = "nonnegative_u64")]
@@ -550,6 +593,7 @@ mod tests {
             jump: None,
             ptr: Some(0x2000),
             flags: Vec::new(),
+            esil: String::new(),
         };
         let dynamic_call = Operation {
             offset: Some(0x1008),
@@ -558,6 +602,7 @@ mod tests {
             jump: None,
             ptr: None,
             flags: Vec::new(),
+            esil: String::new(),
         };
 
         assert!(linkage(&linker_call, &BTreeSet::new()));
@@ -569,6 +614,7 @@ mod tests {
             jump: None,
             ptr: None,
             flags: vec!["switch.0x1000".to_owned()],
+            esil: String::new(),
         };
         assert!(switch(&jump_table));
     }
