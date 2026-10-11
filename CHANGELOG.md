@@ -4,6 +4,8 @@ All notable public changes to `wire-repr` are recorded here.
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-10-11
+
 - Support counted arrays in detached nested struct and enum-body builders through
   `extend(source, callback)`. Sources stream once during writing without retaining item plans;
   count fields are patched at their physical offsets, including after dynamic data.
@@ -60,8 +62,9 @@ The first stable release of `wire-repr`.
 - Executable DNS, NTP, Telegram MTProto, and recursive expression-VM showcases exercise real
   network bytes, computed fields, schema validators, runtime collections, and recursive writers.
 
-[Unreleased]: https://github.com/SilentBless/wire-repr-rs/compare/v1.0.3...master
+[Unreleased]: https://github.com/SilentBless/wire-repr-rs/compare/v1.0.4...master
 [1.0.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.0
 [1.0.1]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.1
 [1.0.2]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.2
 [1.0.3]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.3
+[1.0.4]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.4

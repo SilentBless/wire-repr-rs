@@ -268,7 +268,7 @@ separating named linker calls from unresolved dispatch before runtime samples ar
 > the release package by checksum. `WIRE_REPR_RIZIN` may point to another executable location.
 
 The core remains featureless and allocation-free; optional application storage appears only through
-caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.3/ARCHITECTURE.md)
+caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.4/ARCHITECTURE.md)
 for the generated-state, recursion, and measurement invariants.
 Ongoing repository and API work is ordered in
 [`ROADMAP.md`](https://github.com/SilentBless/wire-repr-rs/blob/master/ROADMAP.md).
@@ -324,4 +324,4 @@ to 120 seconds without adding that cost to merge commits.
 ## 📄 License
 
 MIT © 2026 SilentBless. See the
-[license](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.3/LICENSE).
+[license](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.4/LICENSE).
