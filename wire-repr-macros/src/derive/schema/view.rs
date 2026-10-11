@@ -238,7 +238,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     let descriptor_geometry_values = retained_starts
         .iter()
         .chain(&retained_ends)
-        .map(|field| quote!(#field: #field,));
+        .map(|field| quote!(#field,));
     let descriptor_array_base_value = retained_array_base
         .iter()
         .map(|field| quote!(#field: #frame_offset,));
@@ -973,7 +973,11 @@ fn error_names(schema: &Schema) -> ErrorNames {
                 .constant()
                 .map(|_| unique_variant(&mut used, &format!("{base}Constant")));
             let conversion = match &field.kind {
-                FieldKind::Scalar(scalar) if scalar.value_type.is_converted() => {
+                FieldKind::Scalar(scalar)
+                    if scalar.value_type.is_converted()
+                        || (schema.is_count_controller(&field.name)
+                            && scalar.wire_type.is_signed_integer()) =>
+                {
                     Some(unique_variant(&mut used, &format!("{base}Value")))
                 }
                 FieldKind::Scalar(_)
@@ -1772,9 +1776,19 @@ fn render_explicit_frame_steps(
                 let controller_value = is_controller.then(|| {
                     let controller =
                         private_ident(schema, &format!("controller_{}", field.name.unraw()));
+                    let conversion_error = if scalar.wire_type.is_signed_integer() {
+                        let variant = names.conversion.as_ref().expect("signed count conversion");
+                        quote!(#error::#variant(#runtime::ScalarConversionError {
+                            offset: #absolute,
+                            from: stringify!(#wire_ty),
+                            to: "usize",
+                        }))
+                    } else {
+                        quote!(#error::LayoutUnavailable { field: #field_name })
+                    };
                     quote! {
                         let #controller = usize::try_from(#raw)
-                            .map_err(|_| #error::LayoutUnavailable { field: #field_name })?;
+                            .map_err(|_| #conversion_error)?;
                     }
                 });
                 let presence_controller_value =

@@ -36,7 +36,7 @@ pub struct Entry {
 #[derive(WireView, WireBuilder)]
 pub struct Batch {
     #[wire(be)]
-    count: u32,
+    count: i32,
     #[wire(counted_by = count)]
     entries: wire_repr::wire::Array<Entry>,
     #[wire(as = u8)]
@@ -74,7 +74,9 @@ fn enum_body_streams_detached_entries_into_fixed_and_growing_outputs() -> TestRe
 
     let view = Envelope::view(fixed)?;
     let EnvelopeVariant::Batch(batch) = view.variant();
-    assert_eq!(batch.count(), 2);
+    let count: i32 = batch.count();
+    assert_eq!(count, 2);
+    assert_eq!(view.as_bytes(), BATCH_BYTES);
     assert!(batch.enabled());
     assert_eq!(batch.entries().len(), 2);
     let mut entries = batch.entries().iter();
@@ -117,11 +119,485 @@ fn empty_detached_array_patches_zero_count_and_preserves_the_enum_body_tail() ->
     assert_eq!(output, [0x31, 0x02, 0, 0, 0, 0, 0]);
     let view = Envelope::view(output)?;
     let EnvelopeVariant::Batch(batch) = view.variant();
-    assert_eq!(batch.count(), 0);
+    let count: i32 = batch.count();
+    assert_eq!(count, 0);
+    assert_eq!(view.as_bytes(), [0x31, 0x02, 0, 0, 0, 0, 0]);
     assert!(!batch.enabled());
     assert!(batch.entries().is_empty());
     assert!(batch.entries().iter().next().is_none());
     Ok(())
+}
+
+#[test]
+fn signed_count_sequence_and_cursor_errors_keep_absolute_offsets_and_position() -> TestResult {
+    for count in [-1i32, i32::MIN] {
+        let mut input = [0u8; 9];
+        input[5..].copy_from_slice(&count.to_be_bytes());
+        let mut views = Batch::views(&input)?;
+        let first = views.next()?.expect("empty first batch");
+        assert_eq!(first.count(), 0);
+        assert!(matches!(
+            views.next(),
+            Err(wire_repr::SequenceError::Schema(
+                BatchViewError::CountValue(wire_repr::ScalarConversionError {
+                    offset: 5,
+                    from: "i32",
+                    to: "usize",
+                })
+            ))
+        ));
+        assert_eq!(views.position(), 5);
+        assert_eq!(views.remaining(), &input[5..]);
+
+        let (first, mut cursor) = Batch::cursor(&input)?;
+        assert_eq!(first.count(), 0);
+        assert!(matches!(
+            Batch::next(&mut cursor),
+            Err(wire_repr::SequenceError::Schema(
+                BatchViewError::CountValue(wire_repr::ScalarConversionError {
+                    offset: 5,
+                    from: "i32",
+                    to: "usize",
+                })
+            ))
+        ));
+        assert_eq!(cursor.position(), 5);
+        assert_eq!(cursor.remaining(), &input[5..]);
+    }
+    Ok(())
+}
+
+macro_rules! signed_count_cases {
+    ($module:ident, $logical:ty, $physical:ty, [$($attribute:meta),* $(,)?],
+        $positive_cases:expr, $negative_cases:expr) => {
+        mod $module {
+            use super::*;
+
+            #[derive(WireView, WireBuilder)]
+            pub(super) struct Counted {
+                marker: u8,
+                $(#[$attribute])*
+                count: $logical,
+                #[wire(counted_by = count)]
+                items: wire_repr::wire::Array<Bar>,
+                tail: u8,
+            }
+
+            #[derive(WireView, WireBuilder)]
+            #[wire(selector = u16, be)]
+            pub(super) enum Envelope {
+                #[wire(value = 0x6a04)]
+                Body(Counted),
+            }
+
+            #[test]
+            fn reads_and_patches_progressive_detached_and_copied_counts() -> TestResult {
+                let cases: &[(usize, &[u8])] = $positive_cases;
+                for &(count, prefix) in cases {
+                    let values = (0..count)
+                        .map(|index| 0x2100 + index as u16)
+                        .collect::<Vec<_>>();
+                    let mut expected = vec![0x91];
+                    expected.extend_from_slice(prefix);
+                    for value in &values {
+                        expected.extend_from_slice(&value.to_be_bytes());
+                    }
+                    expected.push(0xa7);
+
+                    let view = Counted::view(expected.as_slice())?;
+                    let decoded_count: $logical = view.count();
+                    assert_eq!(decoded_count, count as $logical);
+                    assert_eq!(view.marker(), 0x91);
+                    assert_eq!(view.tail(), 0xa7);
+                    assert_eq!(
+                        view.items()
+                            .iter()
+                            .map(|item| item.map(|item| item.view().value()))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        values
+                    );
+
+                    let mut output = vec![0xff; expected.len()];
+                    let written = Counted::builder(&mut output[..])
+                        .marker(0x91)?
+                        .items(|items| {
+                            items.try_extend(values.iter().copied(), |bar, value| bar.value(value))
+                        })?
+                        .tail(0xa7)?
+                        .finish()?;
+                    assert_eq!(written.as_bytes(), expected);
+
+                    let mut copied_expected = expected.clone();
+                    copied_expected[0] = 0x92;
+                    *copied_expected.last_mut().expect("tail") = 0x5c;
+                    let mut copied = vec![0xff; copied_expected.len()];
+                    let written = Counted::builder(&mut copied[..])
+                        .marker(0x92)?
+                        .items(|items| items.copy_from(view.items()))?
+                        .tail(0x5c)?
+                        .finish()?;
+                    assert_eq!(written.as_bytes(), copied_expected);
+
+                    let mut nested_expected = vec![0x6a, 0x04];
+                    nested_expected.extend_from_slice(&expected);
+                    let mut nested = vec![0xff; nested_expected.len()];
+                    let written = Envelope::builder(&mut nested[..])
+                        .body(|body| {
+                            body.marker(0x91)
+                                .items(|items| {
+                                    items.extend(values.iter().copied(), |bar, value| bar.value(value))
+                                })
+                                .tail(0xa7)
+                        })?
+                        .finish()?;
+                    assert_eq!(written.as_bytes(), nested_expected);
+                    let view = Envelope::view(written.as_bytes())?;
+                    let EnvelopeVariant::Body(body) = view.variant();
+                    let decoded_count: $logical = body.count();
+                    assert_eq!(decoded_count, count as $logical);
+                    assert_eq!(body.tail(), 0xa7);
+                }
+                Ok(())
+            }
+
+            #[test]
+            fn rejects_negative_counts_before_any_missing_item_even_unchecked() {
+                let cases: Vec<(Vec<u8>, &str)> = $negative_cases;
+                for (prefix, target) in cases {
+                    let mut input = vec![0x91];
+                    input.extend_from_slice(&prefix);
+                    for error in [
+                        Counted::view(&input).err().expect("negative count"),
+                        Counted::view_unchecked(&input)
+                            .err()
+                            .expect("unchecked negative count"),
+                    ] {
+                        assert!(matches!(
+                            error,
+                            CountedViewError::CountValue(wire_repr::ScalarConversionError {
+                                offset: 1,
+                                from,
+                                to,
+                            }) if from == stringify!($physical) && to == target
+                        ));
+                    }
+
+                    let mut nested = vec![0x6a, 0x04];
+                    nested.extend_from_slice(&input);
+                    for error in [
+                        Envelope::view(&nested).err().expect("nested negative count"),
+                        Envelope::view_unchecked(&nested)
+                            .err()
+                            .expect("unchecked nested negative count"),
+                    ] {
+                        assert!(matches!(
+                            error,
+                            EnvelopeViewError::VariantBody(CountedViewError::CountValue(
+                                wire_repr::ScalarConversionError {
+                                    offset: 3,
+                                    from,
+                                    to,
+                                }
+                            )) if from == stringify!($physical) && to == target
+                        ));
+                    }
+                }
+            }
+        }
+    };
+}
+
+macro_rules! fixed_signed_count_cases {
+    ($module:ident, $logical:ty, $physical:ty, $encode:ident, [$($attribute:meta),*]) => {
+        signed_count_cases!(
+            $module, $logical, $physical, [$($attribute),*],
+            &[(0, &(0 as $physical).$encode()), (2, &(2 as $physical).$encode())],
+            {
+                let minimum = <$logical>::MIN as $physical;
+                let mut cases = vec![
+                    ((-1 as $physical).$encode().to_vec(), "usize"),
+                    (minimum.$encode().to_vec(), "usize"),
+                ];
+                if minimum != <$physical>::MIN {
+                    cases.push((<$physical>::MIN.$encode().to_vec(), stringify!($logical)));
+                }
+                cases
+            }
+        );
+    };
+}
+
+fixed_signed_count_cases!(fixed_i8, i8, i8, to_be_bytes, []);
+fixed_signed_count_cases!(fixed_i16_be, i16, i16, to_be_bytes, [wire(be)]);
+fixed_signed_count_cases!(fixed_i16_le, i16, i16, to_le_bytes, [wire(le)]);
+fixed_signed_count_cases!(fixed_i32_be, i32, i32, to_be_bytes, [wire(be)]);
+fixed_signed_count_cases!(fixed_i32_le, i32, i32, to_le_bytes, [wire(le)]);
+fixed_signed_count_cases!(fixed_i64_be, i64, i64, to_be_bytes, [wire(be)]);
+fixed_signed_count_cases!(fixed_i64_le, i64, i64, to_le_bytes, [wire(le)]);
+fixed_signed_count_cases!(fixed_i128_be, i128, i128, to_be_bytes, [wire(be)]);
+fixed_signed_count_cases!(fixed_i128_le, i128, i128, to_le_bytes, [wire(le)]);
+fixed_signed_count_cases!(fixed_isize_i64_be, isize, i64, to_be_bytes, [wire(as = i64, be)]);
+fixed_signed_count_cases!(fixed_isize_i64_le, isize, i64, to_le_bytes, [wire(as = i64, le)]);
+fixed_signed_count_cases!(fixed_isize_i128_be, isize, i128, to_be_bytes, [wire(as = i128, be)]);
+fixed_signed_count_cases!(fixed_isize_i128_le, isize, i128, to_le_bytes, [wire(as = i128, le)]);
+
+macro_rules! variable_signed_count_cases {
+    ($module:ident, $logical:ty, $physical:ty, [$($attribute:meta),*],
+        $sleb_minimum:expr, $uleb_minimum:expr, $vu_minimum:expr) => {
+        mod $module {
+            use super::*;
+
+            signed_count_cases!(
+                sleb, $logical, $physical, [wire(sleb128), $($attribute),*],
+                &[(0, &[0x00]), (63, &[0x3f]), (64, &[0xc0, 0x00])],
+                vec![
+                    (vec![0x7f], "usize"),
+                    ($sleb_minimum.to_vec(), if <$logical>::try_from(<$physical>::MIN).is_ok() {
+                        "usize"
+                    } else {
+                        stringify!($logical)
+                    }),
+                ]
+            );
+            signed_count_cases!(
+                zigzag_uleb, $logical, $physical, [wire(uleb128, zigzag), $($attribute),*],
+                &[(0, &[0x00]), (63, &[0x7e]), (64, &[0x80, 0x01])],
+                vec![
+                    (vec![0x01], "usize"),
+                    ($uleb_minimum.to_vec(), if <$logical>::try_from(<$physical>::MIN).is_ok() {
+                        "usize"
+                    } else {
+                        stringify!($logical)
+                    }),
+                ]
+            );
+            signed_count_cases!(
+                zigzag_vu, $logical, $physical, [wire(vu128, zigzag), $($attribute),*],
+                &[(0, &[0x00]), (63, &[0x7e]), (64, &[0x80, 0x02])],
+                vec![
+                    (vec![0x01], "usize"),
+                    ($vu_minimum.to_vec(), if <$logical>::try_from(<$physical>::MIN).is_ok() {
+                        "usize"
+                    } else {
+                        stringify!($logical)
+                    }),
+                ]
+            );
+        }
+    };
+}
+
+variable_signed_count_cases!(
+    variable_i8,
+    i8,
+    i8,
+    [],
+    &[0x80, 0x7f],
+    &[0xff, 0x01],
+    &[0xbf, 0x03]
+);
+variable_signed_count_cases!(
+    variable_i16,
+    i16,
+    i16,
+    [],
+    &[0x80, 0x80, 0x7e],
+    &[0xff, 0xff, 0x03],
+    &[0xdf, 0xff, 0x07]
+);
+variable_signed_count_cases!(
+    variable_i32,
+    i32,
+    i32,
+    [],
+    &[0x80, 0x80, 0x80, 0x80, 0x78],
+    &[0xff, 0xff, 0xff, 0xff, 0x0f],
+    &[0xf3, 0xff, 0xff, 0xff, 0xff]
+);
+variable_signed_count_cases!(
+    variable_i64,
+    i64,
+    i64,
+    [],
+    &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f],
+    &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
+    &[0xf7, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+);
+variable_signed_count_cases!(
+    variable_i128,
+    i128,
+    i128,
+    [],
+    &[
+        0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+        0x80, 0x80, 0x80, 0x7e
+    ],
+    &[
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0x03
+    ],
+    &[0xff; 17]
+);
+variable_signed_count_cases!(
+    variable_isize_i64, isize, i64, [wire(as = i64)],
+    &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f],
+    &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
+    &[0xf7, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+);
+variable_signed_count_cases!(
+    variable_isize_i128, isize, i128, [wire(as = i128)],
+    &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+      0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7e],
+    &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x03],
+    &[0xff; 17]
+);
+
+#[test]
+fn i8_progressive_count_boundary_emits_every_item_and_preserves_the_tail() -> TestResult {
+    use fixed_i8::{Counted, CountedView, CountedWriteError};
+
+    let mut expected = vec![0x91, 0x7f];
+    for index in 0..127u16 {
+        expected.extend_from_slice(&(0x3100 + index).to_be_bytes());
+    }
+    expected.push(0xa7);
+    let mut output = vec![0xff; expected.len()];
+    let written = Counted::builder(&mut output[..])
+        .marker(0x91)?
+        .items(|items| items.try_extend(0..127u16, |bar, index| bar.value(0x3100 + index)))?
+        .tail(0xa7)?
+        .finish()?;
+    assert_eq!(written.as_bytes(), expected);
+    let view = Counted::view(written.as_bytes())?;
+    assert_eq!(view.tail(), 0xa7);
+    assert_eq!(
+        view.items()
+            .iter()
+            .last()
+            .transpose()?
+            .expect("last item")
+            .view()
+            .value(),
+        0x317e
+    );
+
+    let mut output = [0xff; 259];
+    let error = match Counted::builder(&mut output[..])
+        .marker(0x91)?
+        .items(|items| items.try_extend(0..128u16, |bar, index| bar.value(0x3100 + index)))
+    {
+        Ok(_) => panic!("128 items unexpectedly fit an i8 count"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(CountedWriteError::Layout(wire_repr::LayoutError {
+            field: "count"
+        }))
+    ));
+    let mut expected = vec![0x91, 0x00];
+    for index in 0..128u16 {
+        expected.extend_from_slice(&(0x3100 + index).to_be_bytes());
+    }
+    expected.push(0xff);
+    assert_eq!(output.as_slice(), expected);
+    Ok(())
+}
+
+#[test]
+fn i8_detached_count_boundary_emits_every_item_and_preserves_the_tail() -> TestResult {
+    use fixed_i8::{
+        CountedView, CountedWriteError, Envelope, EnvelopeBodyWriteError, EnvelopeVariant,
+        EnvelopeView,
+    };
+
+    let mut expected = vec![0x6a, 0x04, 0x91, 0x7f];
+    for index in 0..127u16 {
+        expected.extend_from_slice(&(0x3100 + index).to_be_bytes());
+    }
+    expected.push(0xa7);
+    let mut output = vec![0xff; expected.len()];
+    let written = Envelope::builder(&mut output[..])
+        .body(|body| {
+            body.marker(0x91)
+                .items(|items| items.extend(0..127u16, |bar, index| bar.value(0x3100 + index)))
+                .tail(0xa7)
+        })?
+        .finish()?;
+    assert_eq!(written.as_bytes(), expected);
+    let view = Envelope::view(written.as_bytes())?;
+    let EnvelopeVariant::Body(body) = view.variant();
+    assert_eq!(body.tail(), 0xa7);
+    assert_eq!(
+        body.items()
+            .iter()
+            .last()
+            .transpose()?
+            .expect("last item")
+            .view()
+            .value(),
+        0x317e
+    );
+
+    let mut output = [0xff; 261];
+    let error = match Envelope::builder(&mut output[..]).body(|body| {
+        body.marker(0x91)
+            .items(|items| items.extend(0..128u16, |bar, index| bar.value(0x3100 + index)))
+            .tail(0xa7)
+    }) {
+        Ok(_) => panic!("128 detached items unexpectedly fit an i8 count"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(EnvelopeBodyWriteError::Body(CountedWriteError::Layout(
+            wire_repr::LayoutError { field: "count" }
+        )))
+    ));
+    let mut expected = vec![0x6a, 0x04, 0x91, 0x00];
+    for index in 0..128u16 {
+        expected.extend_from_slice(&(0x3100 + index).to_be_bytes());
+    }
+    expected.push(0xff);
+    assert_eq!(output.as_slice(), expected);
+    Ok(())
+}
+
+#[test]
+fn isize_count_checks_the_logical_range_before_missing_array_geometry() {
+    use fixed_isize_i128_le::{Counted, CountedViewError, Envelope, EnvelopeViewError};
+
+    let count = isize::MAX as i128 + 1;
+    let mut input = vec![0x91];
+    input.extend_from_slice(&count.to_le_bytes());
+    for error in [
+        Counted::view(&input).err().expect("logical count overflow"),
+        Counted::view_unchecked(&input)
+            .err()
+            .expect("unchecked logical count overflow"),
+    ] {
+        assert!(matches!(
+            error,
+            CountedViewError::CountValue(wire_repr::ScalarConversionError {
+                offset: 1,
+                from: "i128",
+                to: "isize",
+            })
+        ));
+    }
+    let mut nested = vec![0x6a, 0x04];
+    nested.extend_from_slice(&input);
+    assert!(matches!(
+        Envelope::view(nested),
+        Err(EnvelopeViewError::VariantBody(
+            CountedViewError::CountValue(wire_repr::ScalarConversionError {
+                offset: 3,
+                from: "i128",
+                to: "isize",
+            })
+        ))
+    ));
 }
 
 #[test]
@@ -339,8 +815,8 @@ struct CodeWithTail {
     code_length: u32,
     #[wire(bytes = code_length)]
     instructions: wire_repr::wire::Bytes,
-    #[wire(be)]
-    exception_count: u16,
+    #[wire(le)]
+    exception_count: i32,
     marker: u8,
     #[wire(counted_by = exception_count)]
     exceptions: wire_repr::wire::Array<ExceptionHandler>,
@@ -377,9 +853,10 @@ fn counted_array_after_dynamic_bytes_round_trips() -> TestResult {
 
 #[test]
 fn dynamic_count_controller_before_intervening_fields_and_tail() -> TestResult {
-    let input = [0, 0, 0, 1, 0xaa, 0, 1, 9, 0, 3, 0, 5, 7];
+    let input = [0, 0, 0, 1, 0xaa, 1, 0, 0, 0, 9, 0, 3, 0, 5, 7];
     let view = CodeWithTail::view(input)?;
-    assert_eq!(view.exception_count(), 1);
+    let count: i32 = view.exception_count();
+    assert_eq!(count, 1);
     assert_eq!(view.marker(), 9);
     assert_eq!(view.tail(), 7);
     assert_eq!(
@@ -393,7 +870,7 @@ fn dynamic_count_controller_before_intervening_fields_and_tail() -> TestResult {
         5
     );
 
-    let mut output = [0u8; 13];
+    let mut output = [0u8; 15];
     CodeWithTail::builder(&mut output[..])
         .instructions([0xaa])?
         .marker(9)?
@@ -402,26 +879,61 @@ fn dynamic_count_controller_before_intervening_fields_and_tail() -> TestResult {
         .finish()?;
     assert_eq!(output, input);
 
+    let mut nested = [0u8; 17];
+    Foo::<CodeWithTail>::builder(&mut nested[..])
+        .items(|items| {
+            items.item(|code| {
+                code.instructions([0xaa])
+                    .marker(9)
+                    .exceptions(|exceptions| {
+                        exceptions.extend([(3, 5)], |handler, (start, end)| {
+                            handler.start_pc(start).end_pc(end)
+                        })
+                    })
+                    .tail(7)
+            })
+        })?
+        .tail(8)?
+        .finish()?;
+    assert_eq!(
+        nested,
+        [1, 0, 0, 0, 1, 0xaa, 1, 0, 0, 0, 9, 0, 3, 0, 5, 7, 8]
+    );
+
+    let mut negative = [0u8; 9];
+    negative[..5].copy_from_slice(&input[..5]);
+    negative[5..].copy_from_slice(&(-1i32).to_le_bytes());
+    assert!(matches!(
+        CodeWithTail::view(negative),
+        Err(CodeWithTailViewError::ExceptionCountValue(
+            wire_repr::ScalarConversionError {
+                offset: 5,
+                from: "i32",
+                to: "usize",
+            }
+        ))
+    ));
+
     let error = match CodeWithTail::view(&input[..6]) {
         Ok(_) => panic!("truncated dynamic count unexpectedly framed"),
         Err(error) => error,
     };
     assert!(matches!(
         error,
-        CodeWithTailViewError::ExceptionCount(wire_repr::NeedMore {
+        CodeWithTailViewError::ExceptionCountNeedMore(wire_repr::NeedMore {
             offset: 6,
-            additional_at_least: 1,
+            additional_at_least: 3,
         })
     ));
 
-    let error = match CodeWithTail::view(&input[..11]) {
+    let error = match CodeWithTail::view(&input[..13]) {
         Ok(_) => panic!("truncated array unexpectedly framed"),
         Err(error) => error,
     };
     assert!(matches!(
         error,
         CodeWithTailViewError::Exceptions(wire_repr::ArrayError::NeedMore(wire_repr::NeedMore {
-            offset: 11,
+            offset: 13,
             additional_at_least: 1,
         }))
     ));

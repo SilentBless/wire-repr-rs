@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use syn::{Expr, Ident, Member};
 
-use super::controller::validate_unsigned_controller;
+use super::controller::{ControllerRole, validate_controller};
 use super::{
     DynamicExtent, Field, FieldKind, NestedField, Position, RawBytes, ScalarEncoding, SizeTerm,
     ValueType,
@@ -340,11 +340,11 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
                 field.name == **controller
                     && matches!(&field.kind, FieldKind::Scalar(scalar) if scalar.is_variable())
             });
-        validate_unsigned_controller(
+        validate_controller(
             fields,
             *index,
             controller,
-            "byte length",
+            ControllerRole::ByteLength,
             variable_scalar_geometry,
         )?;
     }
@@ -358,7 +358,13 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
                     ),
                 ));
             }
-            validate_unsigned_controller(fields, index, controller, "field position", false)?;
+            validate_controller(
+                fields,
+                index,
+                controller,
+                ControllerRole::FieldPosition,
+                false,
+            )?;
         }
     }
     Ok(())
@@ -416,7 +422,13 @@ fn validate_arrays(fields: &[Field]) -> syn::Result<()> {
             ));
         }
 
-        validate_unsigned_controller(fields, index, &array.controller, "item count", true)?;
+        validate_controller(
+            fields,
+            index,
+            &array.controller,
+            ControllerRole::ItemCount,
+            true,
+        )?;
     }
     Ok(())
 }

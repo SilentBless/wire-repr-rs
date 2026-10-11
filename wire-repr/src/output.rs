@@ -6,6 +6,8 @@ use core::ops::Range;
 
 mod array_source;
 mod integer;
+#[cfg(test)]
+mod tests;
 #[doc(hidden)]
 pub use array_source::{ArrayBuilder, ArraySource, WriteArray};
 

@@ -187,6 +187,22 @@ Read controllers are authoritative. Write payload intent is authoritative: array
 length, conditional presence, and computed values derive or patch their controllers while writing.
 Controller setters are omitted.
 
+Count controllers accept unsigned integers, native `i8`, `i16`, `i32`, `i64`, and `i128`, and
+logical `isize` with an explicit signed `as = integer_type` representation. One-byte `i8` needs
+no endian marker; wider fixed representations require one. A negative count fails checked
+conversion from the physical signed type to `usize` at the controller's absolute offset before
+array geometry is visited. The field-site `CountValue(ScalarConversionError)` records that
+physical type and offset; physical-to-`isize` conversion can separately fail. `view_unchecked()`
+does not skip these structural checks. There are no null sentinels. Both writer paths check
+cardinality against the physical representation and logical type ranges before patching it.
+Byte-length, placement, and bit-projection controllers remain unsigned.
+
+The fixed recursive array grammar admits the same signed controllers and rejects negative counts
+before resuming any child. Its schema-specific conversion error follows the existing
+`RecursiveError::Child` boundary. Counted arrays retain their compact `u32` continuation and its
+existing count boundary even when the declared controller is wider; this does not expand the
+runtime grammar.
+
 Variable integer encodings remain a finite property of `FieldKind::Scalar`; they do not introduce
 wrapper schemas, codec registries, or a second framing model. Their exact endpoints participate in
 retained field geometry and physical selections. Checked logical conversions and constants use the
@@ -195,8 +211,10 @@ physical width, while fresh writing emits the shortest form. ULEB128/SLEB128 hav
 `ceil(bits / 7)` byte bound; VU128 follows the current prefix format and allows at most seventeen
 bytes, even for complete nonminimal values of a narrow integer.
 
-Unsigned primitive ULEB128/VU128 controllers derive length or count from payload intent. Writers
-retain actual controller offsets and values, reserve one byte for unknown prefixes, and expand
+Unsigned primitive ULEB128/VU128 controllers derive length or count from payload intent;
+SLEB128 and ZigZag-encoded signed controllers, including explicitly represented `isize`, may
+derive count only outside recursive body grammars. Writers retain actual controller offsets
+and values, reserve one byte for unknown prefixes, and expand
 deferred prefixes in reverse physical order before computed patches. Known detached raw-byte
 lengths encode directly. Expansion shifts only represented suffix bytes inside the caller's output,
 checks capacity and child limits before moving bytes, and requires no staging or hidden allocation.

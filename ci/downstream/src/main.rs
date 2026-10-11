@@ -33,7 +33,7 @@ pub struct Entry {
 #[derive(WireView, WireBuilder)]
 pub struct Batch {
     #[wire(be)]
-    count: u32,
+    count: i32,
     #[wire(counted_by = count)]
     entries: wire::Array<Entry>,
     #[wire(as = u8)]
@@ -45,6 +45,177 @@ pub struct Batch {
 pub enum Envelope {
     #[wire(value = 0x3102)]
     Batch(Batch),
+}
+
+#[derive(WireView, WireBuilder)]
+struct CountItem {
+    value: u8,
+}
+
+#[derive(WireView, WireBuilder)]
+struct SignedWidths {
+    #[wire(be)]
+    short_count: i16,
+    #[wire(counted_by = short_count)]
+    short_items: wire::Array<CountItem>,
+    #[wire(le)]
+    long_count: i64,
+    #[wire(counted_by = long_count)]
+    long_items: wire::Array<CountItem>,
+    #[wire(be)]
+    wide_count: i128,
+    #[wire(counted_by = wide_count)]
+    wide_items: wire::Array<CountItem>,
+    tail: u8,
+}
+
+#[derive(WireView, WireBuilder)]
+struct PointerBatch {
+    marker: u8,
+    #[wire(as = i128, le)]
+    count: isize,
+    #[wire(counted_by = count)]
+    items: wire::Array<CountItem>,
+    tail: u8,
+}
+
+#[derive(WireView, WireBuilder)]
+struct NarrowBatch {
+    count: i8,
+    #[wire(counted_by = count)]
+    items: wire::Array<CountItem>,
+    tail: u8,
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum NarrowEnvelope {
+    #[wire(value = 0x6d)]
+    Batch(NarrowBatch),
+}
+
+fn prove_signed_widths() -> Result<(), Box<dyn std::error::Error>> {
+    let mut expected = vec![0, 2, 0x31, 0x42];
+    expected.extend_from_slice(&1i64.to_le_bytes());
+    expected.push(0x53);
+    expected.extend_from_slice(&3i128.to_be_bytes());
+    expected.extend_from_slice(&[0x64, 0x75, 0x86, 0x97]);
+    let mut output = Vec::new();
+    let written = SignedWidths::builder(&mut output)
+        .short_items(|items| items.try_extend([0x31, 0x42], |item, value| item.value(value)))?
+        .long_items(|items| items.try_extend([0x53], |item, value| item.value(value)))?
+        .wide_items(|items| items.try_extend([0x64, 0x75, 0x86], |item, value| item.value(value)))?
+        .tail(0x97)?
+        .finish()?;
+    assert_eq!(written.as_bytes(), expected);
+    let view = SignedWidths::view(written.as_bytes())?;
+    assert_eq!(view.short_count(), 2i16);
+    assert_eq!(view.long_count(), 1i64);
+    assert_eq!(view.wide_count(), 3i128);
+    assert_eq!(view.tail(), 0x97);
+    for (items, expected) in [
+        (view.short_items(), &[0x31, 0x42][..]),
+        (view.long_items(), &[0x53][..]),
+        (view.wide_items(), &[0x64, 0x75, 0x86][..]),
+    ] {
+        let values = items
+            .iter()
+            .map(|item| item.map(|item| item.view().value()))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(values, expected);
+    }
+
+    let mut expected = vec![0xa8];
+    expected.extend_from_slice(&2i128.to_le_bytes());
+    expected.extend_from_slice(&[0xb9, 0xca, 0xdb]);
+    let mut output = [0; 20];
+    let written = PointerBatch::builder(&mut output[..])
+        .marker(0xa8)?
+        .items(|items| items.try_extend([0xb9, 0xca], |item, value| item.value(value)))?
+        .tail(0xdb)?
+        .finish()?;
+    assert_eq!(written.as_bytes(), expected);
+    let view = PointerBatch::view(written.as_bytes())?;
+    assert_eq!(view.count(), 2isize);
+    assert_eq!(view.items().len(), 2);
+    assert_eq!(view.tail(), 0xdb);
+    for (count, expected_target) in [(-1i128, "usize"), (i128::MIN, "isize")] {
+        let mut input = [0; 17];
+        input[0] = 0xa8;
+        input[1..].copy_from_slice(&count.to_le_bytes());
+        for error in [
+            PointerBatch::view(input).err().expect("negative count"),
+            PointerBatch::view_unchecked(input)
+                .err()
+                .expect("unchecked negative count"),
+        ] {
+            assert!(matches!(
+                error,
+                PointerBatchViewError::CountValue(wire_repr::ScalarConversionError {
+                    offset: 1,
+                    from: "i128",
+                    to,
+                }) if to == expected_target
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn prove_narrow_detached_count() -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = [0x55; 130];
+    let written = NarrowEnvelope::builder(&mut output[..])
+        .batch(|batch| {
+            batch
+                .items(|items| items.extend(0..127u8, |item, value| item.value(value)))
+                .tail(0xe1)
+        })?
+        .finish()?;
+    let mut expected = vec![0x6d, 0x7f];
+    expected.extend(0..127u8);
+    expected.push(0xe1);
+    assert_eq!(written.as_bytes(), expected);
+    let view = NarrowEnvelope::view(written.as_bytes())?;
+    let NarrowEnvelopeVariant::Batch(batch) = view.variant();
+    assert_eq!(batch.count(), 127i8);
+    assert_eq!(batch.tail(), 0xe1);
+    let values = batch
+        .items()
+        .iter()
+        .map(|item| item.map(|item| item.view().value()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(values, (0..127u8).collect::<Vec<_>>());
+
+    let mut output = [0x55; 131];
+    let error = match NarrowEnvelope::builder(&mut output[..]).batch(|batch| {
+        batch
+            .items(|items| items.extend(0..128u8, |item, value| item.value(value)))
+            .tail(0xe1)
+    }) {
+        Ok(_) => panic!("i8 count overflow was accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        wire_repr::WriteError::Schema(NarrowEnvelopeBatchWriteError::Body(
+            NarrowBatchWriteError::Layout(wire_repr::LayoutError { field: "count" })
+        ))
+    ));
+    let mut expected = vec![0x6d, 0];
+    expected.extend(0..128u8);
+    expected.push(0x55);
+    assert_eq!(output.as_slice(), expected);
+    assert!(matches!(
+        NarrowEnvelope::view([0x6d, 0xff]),
+        Err(NarrowEnvelopeViewError::VariantBatch(
+            NarrowBatchViewError::CountValue(wire_repr::ScalarConversionError {
+                offset: 1,
+                from: "i8",
+                to: "usize",
+            })
+        ))
+    ));
+    Ok(())
 }
 
 #[derive(WireView, WireBuilder)]
@@ -257,7 +428,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let envelope = Envelope::view(written.as_bytes())?;
     let EnvelopeVariant::Batch(batch) = envelope.variant();
-    assert_eq!(batch.count(), 2);
+    let count: i32 = batch.count();
+    assert_eq!(count, 2);
     assert!(batch.enabled());
     assert_eq!(batch.entries().len(), 2);
     let mut entries = batch.entries().iter();
@@ -266,7 +438,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let second = entries.next().transpose()?.expect("second entry");
     assert_eq!((second.view().key(), second.view().value()), (41, -59));
     assert!(entries.next().is_none());
+
+    for count in [-1i32, i32::MIN] {
+        let mut input = [0u8; 6];
+        input[..2].copy_from_slice(&[0x31, 0x02]);
+        input[2..].copy_from_slice(&count.to_be_bytes());
+        assert!(matches!(
+            Envelope::view(input),
+            Err(EnvelopeViewError::VariantBatch(BatchViewError::CountValue(
+                wire_repr::ScalarConversionError {
+                    offset: 2,
+                    from: "i32",
+                    to: "usize",
+                }
+            )))
+        ));
+    }
     prove_uleb_envelope()?;
     prove_integer_formats()?;
+    prove_signed_widths()?;
+    prove_narrow_detached_count()?;
     Ok(())
 }

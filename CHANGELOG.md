@@ -4,6 +4,16 @@ All notable public changes to `wire-repr` are recorded here.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-12
+
+- Allow signed `counted_by` controllers across native `i8`, `i16`, `i32`, `i64`, and `i128`, plus
+  logical `isize` with an explicit signed physical representation. Readers reject negative counts
+  before array geometry, including through `view_unchecked()`, with no null sentinel. Progressive
+  and detached writers derive counts and check both physical and logical representability.
+  Fixed recursive arrays retain their compact `u32` continuation and existing count boundary;
+  SLEB128 and ZigZag ULEB128/VU128 counts are supported only outside recursive body grammars.
+  Byte-length, placement, and bit-projection controllers remain unsigned.
+
 ## [1.1.0] - 2026-10-11
 
 - Add ULEB128, SLEB128, and VU128 integer field encodings, with ZigZag available alongside
@@ -75,10 +85,11 @@ The first stable release of `wire-repr`.
 - Executable DNS, NTP, Telegram MTProto, and recursive expression-VM showcases exercise real
   network bytes, computed fields, schema validators, runtime collections, and recursive writers.
 
-[Unreleased]: https://github.com/SilentBless/wire-repr-rs/compare/v1.1.0...master
+[Unreleased]: https://github.com/SilentBless/wire-repr-rs/compare/v1.1.1...master
 [1.0.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.0
 [1.0.1]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.1
 [1.0.2]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.2
 [1.0.3]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.3
 [1.0.4]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.4
 [1.1.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.1.0
+[1.1.1]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.1.1

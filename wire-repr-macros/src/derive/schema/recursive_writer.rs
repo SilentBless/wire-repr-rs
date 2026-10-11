@@ -260,19 +260,16 @@ fn render_array(
     let FieldKind::Scalar(count) = &count_field.kind else {
         return Err(syn::Error::new_spanned(
             &count_field.ty,
-            "recursive array count must be an unsigned scalar",
+            "recursive array count must be an integer scalar",
         ));
     };
     if count.is_variable() {
         return Ok(TokenStream::new());
     }
-    if !count.wire_type.is_unsigned_integer()
-        || count.constant.is_some()
-        || count.computed.is_some()
-    {
+    if !count.is_count_controller() || count.constant.is_some() || count.computed.is_some() {
         return Err(syn::Error::new_spanned(
             &count_field.ty,
-            "recursive array count must be a stored unsigned scalar",
+            "recursive array count must be a stored integer scalar",
         ));
     }
 
@@ -293,6 +290,19 @@ fn render_array(
     let count_encode = super::to_bytes_method(count.endian);
     let count_width = count.width();
     let count_field_name = count_field.name.unraw().to_string();
+    let logical_check = count.value_type.is_converted().then(|| {
+        let value_type = super::value_type_tokens(&count.value_type);
+        quote! {
+            let _: #value_type = #value_type::try_from(items.count).map_err(|_| {
+                #runtime::WriteError::Schema(
+                    #runtime::__private::RecursiveWriteError::CountOverflow {
+                        field: #count_field_name,
+                        count: items.count,
+                    },
+                )
+            })?;
+        }
+    });
     let items_name = &array_field.name;
     let slot_index = slot.index;
     let mut impl_generics = schema.generics.clone();
@@ -425,6 +435,7 @@ fn render_array(
                     count: 0,
                     marker: ::core::marker::PhantomData,
                 })?;
+                #logical_check
                 let recursive_count = u32::try_from(items.count).map_err(|_| {
                     #runtime::WriteError::Schema(
                         #runtime::__private::RecursiveWriteError::CountOverflow {

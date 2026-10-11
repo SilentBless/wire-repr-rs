@@ -262,6 +262,23 @@ Read controllers are authoritative. Write payload intent is authoritative: gener
 lengths, counts, presence bits, and bit projections when their dependent values become known.
 Controller setters are omitted.
 
+Count controllers accept unsigned integers, native `i8`, `i16`, `i32`, `i64`, and `i128`, and
+logical `isize` with an explicit signed `as = integer_type` representation. One-byte `i8` needs
+no endian marker; wider fixed representations require `le` or `be`. SLEB128 and ZigZag with
+ULEB128 or VU128 also support signed counts outside recursive body grammars.
+
+Negative counts fail with the field-site `CountValue(ScalarConversionError)` from the physical
+signed type to `usize` at the controller's absolute input offset before array geometry, even
+through `view_unchecked()`. Physical-to-`isize` conversion can separately fail. A zero count is an
+empty array; `-1` is an error, not `null`. Both writer paths derive the number of emitted items and
+check the physical representation and logical type ranges. Byte-length, placement, and
+bit-projection controllers remain unsigned.
+
+Fixed recursive counted arrays accept the same signed controllers while retaining their existing
+compact `u32` continuation and count boundary. Negative counts fail before any child resumes;
+schema-specific conversion errors flatten to `RecursiveError::Child`. Recursive variable-integer
+controllers remain unsupported.
+
 Padding, alignment, and placement gaps are geometry rather than canonicality checks. Views accept
 their exact source bytes. Fresh writers fill forward gaps with zeroes. Exact view copying preserves
 the source representation.

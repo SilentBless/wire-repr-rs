@@ -3,7 +3,9 @@ use quote::quote;
 use syn::ext::IdentExt;
 
 use super::super::model::{Field, FieldKind, Schema, SizeTerm};
-use super::super::{builder_offset, private_ident, scalar_type_tokens, to_bytes_method};
+use super::super::{
+    builder_offset, private_ident, scalar_type_tokens, to_bytes_method, value_type_tokens,
+};
 use super::{encode_scalar, scalar_bytes};
 
 pub(in super::super) fn progressive_expansions(
@@ -248,10 +250,21 @@ pub(in super::super) fn render_count_patch(
     };
     let controller_name = controller.unraw().to_string();
     let wire_ty = scalar_type_tokens(scalar.wire_type);
+    let logical_check = scalar.value_type.is_converted().then(|| {
+        let value_ty = value_type_tokens(&scalar.value_type);
+        quote! {
+            let _: #value_ty = #value_ty::try_from(actual).map_err(|_| {
+                #runtime::WriteError::Schema(
+                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
+                )
+            })?;
+        }
+    });
     if scalar.is_variable() {
         let state = private_ident(schema, &format!("{}_controller_value", controller.unraw()));
         return quote! {
             let actual = #count;
+            #logical_check
             let _: #wire_ty = #wire_ty::try_from(actual).map_err(|_| {
                 #runtime::WriteError::Schema(
                     #error::Layout(#runtime::LayoutError { field: #controller_name }),
@@ -267,12 +280,14 @@ pub(in super::super) fn render_count_patch(
         .unwrap_or_else(|| builder_offset(&controller_field.offset, runtime));
     let encode = to_bytes_method(scalar.endian);
     quote! {
+        let actual = #count;
+        #logical_check
         let controller_offset = #controller_offset.ok_or_else(|| {
             #runtime::WriteError::Schema(
                 #error::Layout(#runtime::LayoutError { field: #controller_name }),
             )
         })?;
-        let controller_value = #wire_ty::try_from(#count).map_err(|_| {
+        let controller_value = #wire_ty::try_from(actual).map_err(|_| {
             #runtime::WriteError::Schema(
                 #error::Layout(#runtime::LayoutError { field: #controller_name }),
             )

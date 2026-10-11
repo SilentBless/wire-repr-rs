@@ -814,6 +814,18 @@ fn render_complete(
                     };
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
                     let controller_name = controller.name.unraw().to_string();
+                    let logical_check = scalar.value_type.is_converted().then(|| {
+                        let value_ty = value_type_tokens(&scalar.value_type);
+                        quote! {
+                            let _: #value_ty = #value_ty::try_from(count).map_err(|_| {
+                                #runtime::WriteError::Schema(
+                                    #error::Layout(#runtime::LayoutError {
+                                        field: #controller_name,
+                                    }),
+                                )
+                            })?;
+                        }
+                    });
                     let offset = private_ident(
                         schema,
                         &format!("{}_controller_offset", controller.name.unraw()),
@@ -842,6 +854,7 @@ fn render_complete(
                                 #runtime::WriteError::Output(error)
                             }
                         })?;
+                        #logical_check
                         let count = <#wire_ty as ::core::convert::TryFrom<usize>>::try_from(count)
                             .map_err(|_| #runtime::WriteError::Schema(
                                 #error::Layout(#runtime::LayoutError {

@@ -4,7 +4,7 @@ use super::attributes::{
     FieldAttributes, array_item_type, fixed_scalar_array, is_raw_bytes, primitive_name,
     recursive_item_type,
 };
-use super::controller::validate_unsigned_controller;
+use super::controller::{ControllerRole, validate_controller};
 use super::{
     ArrayField, BitProjection, Computed, DynamicExtent, Endian, Field, FieldKind, FieldLayout,
     FixedBytes, FixedScalarArray, FlagField, LayoutOffset, NestedField, Position, RawBytes,
@@ -570,7 +570,13 @@ fn validate_bit_projection(
             "bit projection controller must be physically earlier",
         ));
     }
-    validate_unsigned_controller(fields, fields.len(), controller, "bit projection", false)?;
+    validate_controller(
+        fields,
+        fields.len(),
+        controller,
+        ControllerRole::BitProjection,
+        false,
+    )?;
     let controller_field = fields
         .iter()
         .find(|field| field.name == *controller)

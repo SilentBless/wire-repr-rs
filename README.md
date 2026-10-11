@@ -200,12 +200,22 @@ A runtime array keeps its count as an ordinary physical field:
 ```rust
 #[derive(WireView, WireBuilder)]
 struct Items<T> {
-    #[wire(le)]
-    count: u16,
+    #[wire(as = i64, le)]
+    count: isize,
     #[wire(counted_by = count)]
     values: wire::Array<T>,
 }
 ```
+
+`counted_by` accepts unsigned integer controllers, native `i8`, `i16`, `i32`, `i64`, and `i128`,
+and logical `isize` with an explicit signed `as = integer_type` representation. One-byte `i8`
+needs no endian marker; wider fixed representations require `le` or `be`. Readers reject a negative
+count at the controller before array geometry, including through `view_unchecked()`. A zero count
+is an empty array; `-1` never means `null`. Writers count emitted items and check both the physical
+representation and logical type ranges.
+
+SLEB128 and ZigZag with ULEB128 or VU128 share this signed count contract outside recursive body
+grammars. Byte-length, placement, and bit-projection controllers remain unsigned.
 
 The count may also follow a bounded dynamic field. The reader locates it with the framed
 cursor; the progressive writer patches it after streaming the array:
@@ -280,6 +290,11 @@ The const parameter bounds one iterative continuation stack. Recursive arrays re
 geometry rather than item offsets; unsupported shapes fall back to exact replay. Progressive
 writers stream children through one output cursor without retaining a semantic tree or encoded
 plan.
+
+Fixed recursive counted arrays accept the same signed controllers but keep their existing compact
+`u32` continuation and its count boundary; a wider controller does not expand that grammar.
+Negative counts fail before any child resumes, with schema-specific conversion errors flattened
+to `RecursiveError::Child`. Recursive variable-integer count controllers remain unsupported.
 
 ## 🔬 What reaches the CPU
 

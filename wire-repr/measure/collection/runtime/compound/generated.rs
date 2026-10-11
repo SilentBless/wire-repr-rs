@@ -11,7 +11,8 @@ struct Bar {
 
 #[derive(WireView, WireBuilder)]
 struct Foo<T> {
-    count: u8,
+    #[wire(be)]
+    count: i32,
     #[wire(counted_by = count)]
     items: wire_repr::wire::Array<T>,
     tail: u8,
@@ -54,7 +55,7 @@ fn try_build(seed: u64) -> Result<u64, ()> {
     let first = [seed as u8];
     let second = [(seed >> 8) as u8, (seed >> 16) as u8];
     let third = [(seed >> 24) as u8];
-    let mut output = [0u8; 9];
+    let mut output = [0u8; 12];
     let writer = discard(Foo::<Bar>::builder(&mut output[..]).items(|items| {
         items.try_extend([&first[..], &second[..], &third[..]], |bar, body| {
             bar.body(body)
@@ -72,7 +73,7 @@ fn try_nested_build(seed: u64) -> Result<u64, ()> {
     let first = [seed as u8];
     let second = [(seed >> 8) as u8, (seed >> 16) as u8];
     let third = [(seed >> 24) as u8];
-    let mut output = [0u8; 9];
+    let mut output = [0u8; 12];
     let written = discard(
         discard(Nested::builder(&mut output[..]).body(|body| {
             body.items(|items| {
@@ -101,7 +102,7 @@ fn try_copy(seed: u64) -> Result<u64, ()> {
 
 fn copy_input(input: &[u8]) -> Result<u64, ()> {
     let source = Foo::<Bar>::view(input).map_err(|_| ())?;
-    let mut output = [0u8; 16];
+    let mut output = [0u8; 19];
     let writer = discard(
         Foo::<Bar>::builder(&mut output[..]).items(|items| items.copy_from(source.items())),
     )?;
@@ -122,7 +123,7 @@ pub fn domain(seed: u64) -> u64 {
 }
 
 struct Input {
-    bytes: [u8; 16],
+    bytes: [u8; 19],
     len: usize,
 }
 
@@ -138,9 +139,9 @@ fn opaque_input(seed: u64) -> Input {
 }
 
 fn input(seed: u64) -> Input {
-    let mut bytes = [0u8; 16];
-    bytes[0] = 3;
-    let mut cursor = 1usize;
+    let mut bytes = [0u8; 19];
+    bytes[..4].copy_from_slice(&3i32.to_be_bytes());
+    let mut cursor = 4usize;
     for index in 0..3usize {
         let length = ((seed >> (index * 8)) as usize % 3) + 1;
         bytes[cursor] = length as u8;
@@ -160,10 +161,11 @@ fn input(seed: u64) -> Input {
 fn domain_input(seed: u64) -> Input {
     let mut input = input(seed);
     match seed & 7 {
-        0 => input.bytes[0] = 0,
-        1 => input.bytes[0] = 4,
-        2 => input.bytes[1] = 15,
+        0 => input.bytes[..4].copy_from_slice(&0i32.to_be_bytes()),
+        1 => input.bytes[..4].copy_from_slice(&4i32.to_be_bytes()),
+        2 => input.bytes[4] = 15,
         3 => input.len -= 1,
+        4 => input.bytes[..4].copy_from_slice(&(-1i32).to_be_bytes()),
         _ => {}
     }
     input

@@ -9,12 +9,13 @@ struct Bar {
 
 #[derive(WireBuilder)]
 struct Foo {
-    count: u8,
+    #[wire(be)]
+    count: i32,
     #[wire(counted_by = count)]
     items: wire_repr::wire::Array<Bar>,
 }
 
 fn main() {
-    let mut output = [0u8; 2];
+    let mut output = [0u8; 5];
     let _ = Foo::builder(&mut output[..]).count(1);
 }

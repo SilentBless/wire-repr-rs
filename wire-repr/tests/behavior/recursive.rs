@@ -1309,3 +1309,105 @@ fn caller_selected_depth_scales_beyond_sixty_four_and_fails_closed() {
         JsonValueViewError::DepthExceeded(wire_repr::DepthExceeded { limit: 127, .. })
     ));
 }
+
+macro_rules! signed_recursive_count_cases {
+    ($module:ident, $logical:ty, $physical:ty, $encode:ident, [$($attribute:meta),*]) => {
+        mod $module {
+            use super::*;
+
+            #[derive(WireView, WireBuilder)]
+            struct Counted<T> {
+                $(#[$attribute])*
+                count: $logical,
+                #[wire(counted_by = count)]
+                items: wire_repr::wire::Array<T>,
+            }
+
+            #[derive(WireView, WireBuilder)]
+            #[wire(selector = u8)]
+            enum Value {
+                #[wire(value = 1)]
+                Leaf(WriteLeaf),
+                #[wire(value = 2)]
+                Array(Counted<Value>),
+            }
+
+            #[test]
+            fn rejects_negative_counts_at_root_and_nested_controller_offsets() {
+                let mut counts = vec![-1 as $physical, <$logical>::MIN as $physical];
+                if <$physical>::MIN != <$logical>::MIN as $physical {
+                    counts.push(<$physical>::MIN);
+                }
+                for count in counts {
+                    let mut root = vec![2];
+                    root.extend_from_slice(&count.$encode());
+                    let mut nested = vec![2];
+                    nested.extend_from_slice(&(1 as $physical).$encode());
+                    nested.extend_from_slice(&root);
+                    let nested_offset = 2 + core::mem::size_of::<$physical>();
+                    for (input, offset) in [(&root, 1), (&nested, nested_offset)] {
+                        assert!(matches!(
+                            Value::view::<4>(input),
+                            Err(ValueViewError::Recursive(
+                                wire_repr::__private::RecursiveError::Child { offset: actual }
+                            )) if actual == offset
+                        ));
+                    }
+                }
+            }
+
+            #[test]
+            fn builds_and_reads_leaf_payload_and_nested_zero_count()
+            -> Result<(), Box<dyn std::error::Error>> {
+                let mut expected = vec![2];
+                expected.extend_from_slice(&(2 as $physical).$encode());
+                expected.extend_from_slice(&[1, 7, 2]);
+                expected.extend_from_slice(&(0 as $physical).$encode());
+                let mut output = vec![0xff; expected.len()];
+                let written = Value::builder(&mut output[..])
+                    .array(|array| {
+                        array.items(|items| {
+                            let items = items.item(|root| root.leaf(|leaf| leaf.value(7)))?;
+                            items.item(|root| root.array(|array| array.items(Ok)))
+                        })
+                    })?
+                    .finish()?;
+                assert_eq!(written.as_bytes(), expected);
+
+                let view = Value::view::<4>(expected.as_slice())?;
+                let ValueVariant::Array(array) = view.variant() else {
+                    panic!("expected counted body");
+                };
+                let count: $logical = array.count();
+                assert_eq!(count, 2 as $logical);
+                let first = array.items().get(0)?.expect("leaf item");
+                let ValueVariant::Leaf(leaf) = first.variant() else {
+                    panic!("expected leaf payload");
+                };
+                assert_eq!(leaf.value(), 7);
+                let empty = array.items().get(1)?.expect("nested array");
+                let ValueVariant::Array(empty) = empty.variant() else {
+                    panic!("expected empty counted body");
+                };
+                let count: $logical = empty.count();
+                assert_eq!(count, 0 as $logical);
+                assert!(empty.items().iter().next().is_none());
+                Ok(())
+            }
+        }
+    };
+}
+
+signed_recursive_count_cases!(signed_i8, i8, i8, to_be_bytes, []);
+signed_recursive_count_cases!(signed_i16_be, i16, i16, to_be_bytes, [wire(be)]);
+signed_recursive_count_cases!(signed_i16_le, i16, i16, to_le_bytes, [wire(le)]);
+signed_recursive_count_cases!(signed_i32_be, i32, i32, to_be_bytes, [wire(be)]);
+signed_recursive_count_cases!(signed_i32_le, i32, i32, to_le_bytes, [wire(le)]);
+signed_recursive_count_cases!(signed_i64_be, i64, i64, to_be_bytes, [wire(be)]);
+signed_recursive_count_cases!(signed_i64_le, i64, i64, to_le_bytes, [wire(le)]);
+signed_recursive_count_cases!(signed_i128_be, i128, i128, to_be_bytes, [wire(be)]);
+signed_recursive_count_cases!(signed_i128_le, i128, i128, to_le_bytes, [wire(le)]);
+signed_recursive_count_cases!(signed_isize_i64_be, isize, i64, to_be_bytes, [wire(as = i64, be)]);
+signed_recursive_count_cases!(signed_isize_i64_le, isize, i64, to_le_bytes, [wire(as = i64, le)]);
+signed_recursive_count_cases!(signed_isize_i128_be, isize, i128, to_be_bytes, [wire(as = i128, be)]);
+signed_recursive_count_cases!(signed_isize_i128_le, isize, i128, to_le_bytes, [wire(as = i128, le)]);

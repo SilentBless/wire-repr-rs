@@ -6,8 +6,8 @@ pub fn decode(seed: u64) -> u64 {
 }
 
 fn decode_input(input: &[u8]) -> Option<u64> {
-    let count = usize::from(*input.first()?);
-    let mut cursor = 1usize;
+    let count = usize::try_from(i32::from_be_bytes(input.get(..4)?.try_into().ok()?)).ok()?;
+    let mut cursor = 4usize;
     let mut value = u64::from(*input.last()?).rotate_left(53);
     for _ in 0..count {
         let length = usize::from(*input.get(cursor)?);
@@ -36,7 +36,7 @@ pub fn copy(seed: u64) -> u64 {
 
 fn copy_input(source: &[u8]) -> Option<u64> {
     let tail = validate(source)?;
-    let mut output = [0u8; 16];
+    let mut output = [0u8; 19];
     output.get_mut(..tail)?.copy_from_slice(source.get(..tail)?);
     output[tail] = source[tail].wrapping_add(1);
     Some(observe(&output[..=tail]))
@@ -50,8 +50,8 @@ pub fn domain(seed: u64) -> u64 {
 }
 
 fn validate(input: &[u8]) -> Option<usize> {
-    let count = usize::from(*input.first()?);
-    let mut cursor = 1usize;
+    let count = usize::try_from(i32::from_be_bytes(input.get(..4)?.try_into().ok()?)).ok()?;
+    let mut cursor = 4usize;
     for _ in 0..count {
         let length = usize::from(*input.get(cursor)?);
         cursor = cursor.checked_add(1 + length)?;
@@ -61,7 +61,7 @@ fn validate(input: &[u8]) -> Option<usize> {
 }
 
 struct Input {
-    bytes: [u8; 16],
+    bytes: [u8; 19],
     len: usize,
 }
 
@@ -77,9 +77,9 @@ fn opaque_input(seed: u64) -> Input {
 }
 
 fn input(seed: u64) -> Input {
-    let mut bytes = [0u8; 16];
-    bytes[0] = 3;
-    let mut cursor = 1usize;
+    let mut bytes = [0u8; 19];
+    bytes[..4].copy_from_slice(&3i32.to_be_bytes());
+    let mut cursor = 4usize;
     for index in 0..3usize {
         let length = ((seed >> (index * 8)) as usize % 3) + 1;
         bytes[cursor] = length as u8;
@@ -99,17 +99,21 @@ fn input(seed: u64) -> Input {
 fn domain_input(seed: u64) -> Input {
     let mut input = input(seed);
     match seed & 7 {
-        0 => input.bytes[0] = 0,
-        1 => input.bytes[0] = 4,
-        2 => input.bytes[1] = 15,
+        0 => input.bytes[..4].copy_from_slice(&0i32.to_be_bytes()),
+        1 => input.bytes[..4].copy_from_slice(&4i32.to_be_bytes()),
+        2 => input.bytes[4] = 15,
         3 => input.len -= 1,
+        4 => input.bytes[..4].copy_from_slice(&(-1i32).to_be_bytes()),
         _ => {}
     }
     input
 }
 
-fn build_input(seed: u64) -> [u8; 9] {
+fn build_input(seed: u64) -> [u8; 12] {
     [
+        0,
+        0,
+        0,
         3,
         1,
         seed as u8,

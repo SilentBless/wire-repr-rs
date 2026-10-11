@@ -286,7 +286,7 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
         let FieldKind::Scalar(controller_scalar) = &controller.kind else {
             continue;
         };
-        if !controller_scalar.wire_type.is_unsigned_integer()
+        if !controller_scalar.is_count_controller()
             || controller_scalar.is_variable()
             || controller_scalar.constant.is_some()
             || controller_scalar.computed.is_some()
@@ -314,6 +314,18 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
         let callback = super::fresh_type_ident(&schema.generics, "RecursiveCallback");
         let count_name = &controller.name;
         let items_name = &field.name;
+        let count_error = if controller_scalar.wire_type.is_signed_integer() {
+            quote!(#runtime::__private::RecursiveError::Child { offset: absolute_offset })
+        } else {
+            quote!(#runtime::__private::RecursiveError::Layout(#runtime::LayoutError {
+                field: stringify!(#count_name),
+            }))
+        };
+        let logical_check = controller_scalar.value_type.is_converted().then(|| {
+            quote! {
+                let _: #value_type = #value_type::try_from(raw).map_err(|_| #count_error)?;
+            }
+        });
         let mut recursive_impl_generics = schema.generics.clone();
         recursive_impl_generics
             .params
@@ -450,11 +462,8 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                         .try_into()
                         .expect("count width checked");
                     let raw = #wire_type::#decode(bytes);
-                    let count = u32::try_from(raw).map_err(|_| {
-                        #runtime::__private::RecursiveError::Layout(#runtime::LayoutError {
-                            field: stringify!(#count_name),
-                        })
-                    })?;
+                    #logical_check
+                    let count = u32::try_from(raw).map_err(|_| #count_error)?;
                     Ok(if count == 0 {
                         #runtime::__private::RecursiveStep::Done { advance: #width }
                     } else {
