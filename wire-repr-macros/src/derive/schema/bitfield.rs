@@ -885,6 +885,14 @@ fn parse_item_attributes(
             continue;
         }
         attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("uleb128")
+                || meta.path.is_ident("sleb128")
+                || meta.path.is_ident("vu128")
+                || meta.path.is_ident("zigzag")
+            {
+                let name = meta.path.get_ident().expect("recognized integer attribute");
+                return Err(meta.error(format!("nominal bitfields cannot use `{name}`")));
+            }
             if meta.path.is_ident("as") {
                 if representation.is_some() {
                     return Err(meta.error("duplicate `as` bitfield representation"));
@@ -922,6 +930,14 @@ fn parse_field_attributes(attributes: &[syn::Attribute]) -> syn::Result<(u32, u3
             continue;
         }
         attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("uleb128")
+                || meta.path.is_ident("sleb128")
+                || meta.path.is_ident("vu128")
+                || meta.path.is_ident("zigzag")
+            {
+                let name = meta.path.get_ident().expect("recognized integer attribute");
+                return Err(meta.error(format!("nominal bitfield projections cannot use `{name}`")));
+            }
             if meta.path.is_ident("bit") {
                 if range.is_some() {
                     return Err(meta.error("duplicate or conflicting bit range"));

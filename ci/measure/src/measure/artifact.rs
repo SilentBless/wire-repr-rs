@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::fs;
+use std::ops::Bound::{Excluded, Unbounded};
 use std::path::{Path, PathBuf};
 
 use rzpipe::{RzPipe, RzPipeSpawnOptions};
@@ -82,6 +83,14 @@ pub enum ArtifactError {
     MissingSymbol { path: PathBuf, symbol: String },
     #[error("transitive analysis of `{symbol}` exceeds {limit} reachable functions")]
     TraversalLimit { symbol: String, limit: usize },
+    #[error(
+        "callee at {address:#x} has declared size {declared_size}, crossing linked symbol at {next_symbol:#x}"
+    )]
+    ConflictingSymbolBounds {
+        address: u64,
+        declared_size: u64,
+        next_symbol: u64,
+    },
 }
 
 pub struct Analyzer {
@@ -142,14 +151,8 @@ impl Analyzer {
                 path: self.path.clone(),
                 symbol: symbol.to_owned(),
             })?;
-        let root_size = root_symbol.size.filter(|size| *size != 0).or_else(|| {
-            symbols
-                .iter()
-                .filter_map(|entry| entry.vaddr)
-                .filter(|candidate| *candidate > address)
-                .min()
-                .map(|next| next - address)
-        });
+        let symbol_sizes = linked_symbol_sizes(&symbols);
+        let root_size = linked_symbol_size(address, root_symbol.size, &symbol_sizes)?;
         let imports: Vec<ImportInfo> = self.json("iij")?;
         let import_addresses = imports
             .iter()
@@ -171,7 +174,7 @@ impl Analyzer {
             let local = self.analyze_function(current, exact_size, &import_addresses)?;
             for &callee in &local.callees {
                 if !functions.contains_key(&callee) {
-                    pending.push_back((callee, None));
+                    pending.push_back((callee, linked_symbol_size(callee, None, &symbol_sizes)?));
                 }
             }
             functions.insert(current, local);
@@ -395,6 +398,47 @@ fn command(pipe: &mut RzPipe, command_text: &str) -> Result<String, ArtifactErro
         })
 }
 
+fn linked_symbol_sizes(symbols: &[SymbolInfo]) -> BTreeMap<u64, u64> {
+    let mut sizes = BTreeMap::new();
+    for symbol in symbols {
+        if let Some(address) = symbol.vaddr {
+            let size = sizes.entry(address).or_insert(0);
+            *size = (*size).max(symbol.size.unwrap_or(0));
+        }
+    }
+    sizes
+}
+
+fn linked_symbol_size(
+    address: u64,
+    requested_size: Option<u64>,
+    symbols: &BTreeMap<u64, u64>,
+) -> Result<Option<u64>, ArtifactError> {
+    let Some(size) = requested_size
+        .filter(|&size| size != 0)
+        .or_else(|| symbols.get(&address).copied())
+    else {
+        return Ok(None);
+    };
+    let next_symbol = symbols
+        .range((Excluded(address), Unbounded))
+        .next()
+        .map(|(&next, _)| next);
+    if size != 0 {
+        if let Some(next_symbol) = next_symbol
+            && size > next_symbol - address
+        {
+            return Err(ArtifactError::ConflictingSymbolBounds {
+                address,
+                declared_size: size,
+                next_symbol,
+            });
+        }
+        return Ok(Some(size));
+    }
+    Ok(next_symbol.map(|next| next - address))
+}
+
 fn max_call_depth(root: u64, functions: &BTreeMap<u64, LocalMetrics>) -> u64 {
     fn visit(
         address: u64,
@@ -494,8 +538,8 @@ fn marker(value: &str, markers: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Operation, linkage, switch};
-    use std::collections::BTreeSet;
+    use super::{Operation, SymbolInfo, linkage, linked_symbol_size, linked_symbol_sizes, switch};
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn distinguishes_linker_relocations_from_dynamic_dispatch() {
@@ -527,6 +571,81 @@ mod tests {
             flags: vec!["switch.0x1000".to_owned()],
         };
         assert!(switch(&jump_table));
+    }
+
+    #[test]
+    fn linked_callee_bounds_exclude_the_following_function() {
+        let symbols = BTreeMap::from([(0x100000dd8, 0), (0x100001734, 0), (0x1000042bc, 16)]);
+        let start = 0x100000dd8;
+        let end = start
+            + linked_symbol_size(start, Some(0), &symbols)
+                .unwrap()
+                .unwrap();
+        assert!((start..end).contains(&0x100001730));
+        assert!(!(start..end).contains(&0x100001754));
+        assert_eq!(
+            linked_symbol_size(0x1000042bc, None, &symbols).unwrap(),
+            Some(16)
+        );
+        assert_eq!(
+            linked_symbol_size(0x100001000, None, &symbols).unwrap(),
+            None
+        );
+        assert_eq!(
+            linked_symbol_size(0x1000, None, &BTreeMap::from([(0x1000, 0)])).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn requested_root_bounds_preserve_late_calls_without_including_larger_aliases() {
+        let symbols: Vec<SymbolInfo> = serde_json::from_str(
+            r#"[
+                {"name":"short_alias","vaddr":4096,"size":4},
+                {"name":"requested_root","vaddr":4096,"size":32},
+                {"name":"long_alias","vaddr":4096,"size":64},
+                {"name":"following_function","vaddr":4160,"size":16}
+            ]"#,
+        )
+        .unwrap();
+        let root = &symbols[1];
+        let start = root.vaddr.unwrap();
+        let sizes = linked_symbol_sizes(&symbols);
+        let end = start
+            + linked_symbol_size(start, root.size, &sizes)
+                .unwrap()
+                .unwrap();
+        assert!((start..end).contains(&0x101c));
+        assert!(!(start..end).contains(&0x1024));
+        let callee_end = start + linked_symbol_size(start, None, &sizes).unwrap().unwrap();
+        assert!((start..callee_end).contains(&0x103c));
+        assert!(!(start..callee_end).contains(&0x1040));
+    }
+
+    #[test]
+    fn conflicting_alias_bounds_cannot_include_the_following_function() {
+        let symbols = BTreeMap::from([(0x1000, 128), (0x1040, 16)]);
+        assert!(matches!(
+            linked_symbol_size(0x1000, None, &symbols),
+            Err(super::ArtifactError::ConflictingSymbolBounds {
+                address: 0x1000,
+                declared_size: 128,
+                next_symbol: 0x1040,
+            })
+        ));
+    }
+
+    #[test]
+    fn conflicting_root_bounds_cannot_include_the_following_function() {
+        let symbols = BTreeMap::from([(0x1000, 128), (0x1040, 16)]);
+        assert!(matches!(
+            linked_symbol_size(0x1000, Some(128), &symbols),
+            Err(super::ArtifactError::ConflictingSymbolBounds {
+                address: 0x1000,
+                declared_size: 128,
+                next_symbol: 0x1040,
+            })
+        ));
     }
 
     #[test]

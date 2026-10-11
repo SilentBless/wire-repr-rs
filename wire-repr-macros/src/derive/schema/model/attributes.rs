@@ -1,6 +1,6 @@
 use syn::{Expr, Ident, Path, Type};
 
-use super::{Endian, ScalarType};
+use super::{Endian, ScalarEncoding, ScalarType};
 
 pub(super) fn parse_item_attributes(
     attributes: &[syn::Attribute],
@@ -27,6 +27,8 @@ pub(super) fn parse_item_attributes(
 #[derive(Default)]
 pub(super) struct FieldAttributes {
     pub(super) endian: Option<Endian>,
+    pub(super) encoding: Option<ScalarEncoding>,
+    pub(super) zigzag: bool,
     pub(super) constant: Option<Expr>,
     pub(super) representation: Option<ScalarType>,
     pub(super) bytes: Option<Ident>,
@@ -64,6 +66,33 @@ impl FieldAttributes {
                         return Err(meta.error("duplicate or conflicting endian attribute"));
                     }
                     result.endian = Some(endian);
+                    return Ok(());
+                }
+                let encoding = if meta.path.is_ident("uleb128") {
+                    Some(ScalarEncoding::Uleb128)
+                } else if meta.path.is_ident("sleb128") {
+                    Some(ScalarEncoding::Sleb128)
+                } else if meta.path.is_ident("vu128") {
+                    Some(ScalarEncoding::Vu128)
+                } else {
+                    None
+                };
+                if let Some(encoding) = encoding {
+                    if let Some(previous) = result.encoding {
+                        return Err(if previous == encoding {
+                            meta.error(format!("duplicate `{}` attribute", encoding.name()))
+                        } else {
+                            meta.error("only one integer encoding attribute is allowed")
+                        });
+                    }
+                    result.encoding = Some(encoding);
+                    return Ok(());
+                }
+                if meta.path.is_ident("zigzag") {
+                    if result.zigzag {
+                        return Err(meta.error("duplicate `zigzag` attribute"));
+                    }
+                    result.zigzag = true;
                     return Ok(());
                 }
                 if meta.path.is_ident("as") {
@@ -210,6 +239,14 @@ fn computed_callback_path(expression: &Expr) -> syn::Result<&Path> {
 }
 
 pub(super) fn primitive_name(ty: &Type) -> Option<String> {
+    let mut ty = ty;
+    loop {
+        ty = match ty {
+            Type::Group(group) => &group.elem,
+            Type::Paren(paren) => &paren.elem,
+            _ => break,
+        };
+    }
     let Type::Path(path) = ty else {
         return None;
     };

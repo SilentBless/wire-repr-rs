@@ -5,6 +5,7 @@ use core::fmt;
 use core::ops::Range;
 
 mod array_source;
+mod integer;
 #[doc(hidden)]
 pub use array_source::{ArrayBuilder, ArraySource, WriteArray};
 
@@ -850,6 +851,7 @@ impl<O: Output> ChildWriter<'_, O> {
         }
         self.writer.write_at(offset, bytes)
     }
+
     /// Verifies that a fixed-width child filled its complete assigned region.
     #[doc(hidden)]
     pub fn finish(self) -> Result<(), OutputError<O::GrowError>> {

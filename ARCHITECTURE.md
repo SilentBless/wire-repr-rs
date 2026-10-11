@@ -4,10 +4,10 @@ This document defines the shipped `1.0` architecture and its extension contract.
 installation and examples live in [`README.md`](README.md); this document records the invariants
 behind generated code, manual capability boundaries, recursion, and measurement.
 
-The implementation covers named structs, fixed scalars and arrays, constants, checked logical
-conversions, validators, nested children, demand geometry, controller dependencies, conditional
-choice groups, counted runtime arrays, static enums, nominal and inline bitfields, nested physical
-selections, computed fields, homogeneous views, heterogeneous cursors, exact View forwarding,
+The implementation covers named structs, fixed and variable-width scalars, fixed arrays, constants,
+checked logical conversions, validators, nested children, demand geometry, controller dependencies,
+conditional choice groups, counted runtime arrays, static enums, nominal and inline bitfields,
+nested physical selections, computed fields, homogeneous views, heterogeneous cursors, exact View forwarding,
 depth-bounded recursive enum arrays, recursive object continuations, and progressive recursive
 writers. General traversal is not part of the `1.0` core. New layout classes extend this one model
 rather than restoring the removed legacy renderer or introducing parallel modes.
@@ -158,6 +158,8 @@ remain first in generated generic declarations.
 Declaration order is physical order. The supported field vocabulary includes:
 
 - fixed Rust integers and floats with explicit `be` or `le` where width exceeds one byte;
+- ULEB128 and VU128 unsigned integers, SLEB128 signed integers, and ZigZag followed by ULEB128
+  or VU128 for signed physical integers;
 - `usize`, `isize`, `bool`, `char`, `NonZero*`, and user newtypes with an explicit physical
   `as = integer_type` and bidirectional checked `TryFrom`;
 - fixed byte arrays and fixed primitive scalar arrays;
@@ -184,6 +186,27 @@ items: wire::Array<T>,
 Read controllers are authoritative. Write payload intent is authoritative: array length, byte
 length, conditional presence, and computed values derive or patch their controllers while writing.
 Controller setters are omitted.
+
+Variable integer encodings remain a finite property of `FieldKind::Scalar`; they do not introduce
+wrapper schemas, codec registries, or a second framing model. Their exact endpoints participate in
+retained field geometry and physical selections. Checked logical conversions and constants use the
+same scalar owners as fixed representations. Reading accepts bounded nonminimal forms that fit the
+physical width, while fresh writing emits the shortest form. ULEB128/SLEB128 have a
+`ceil(bits / 7)` byte bound; VU128 follows the current prefix format and allows at most seventeen
+bytes, even for complete nonminimal values of a narrow integer.
+
+Unsigned primitive ULEB128/VU128 controllers derive length or count from payload intent. Writers
+retain actual controller offsets and values, reserve one byte for unknown prefixes, and expand
+deferred prefixes in reverse physical order before computed patches. Known detached raw-byte
+lengths encode directly. Expansion shifts only represented suffix bytes inside the caller's output,
+checks capacity and child limits before moving bytes, and requires no staging or hidden allocation.
+Sequential variable-scalar geometry can precede byte/count controllers because their actual offsets
+are retained. Alignment or forward placement after a deferred variable controller remains rejected:
+prefix expansion would change its origin-relative geometry.
+
+Variable encodings remain unavailable for fixed scalar arrays, enum selectors, bitfield cells and
+projections, conditional/computed destinations, placement controllers, and recursive body grammars.
+These boundaries are derive diagnostics, not runtime fallbacks.
 
 The shipped dependency vertical accepts top-level byte-length and presence controllers with fixed
 sequential geometry. Count controllers may also follow dynamic sequential geometry: framing
@@ -474,7 +497,8 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has fifteen discovered zones and sixty-four cases: fixed scalars,
+The current mandatory corpus has seventeen discovered zones and seventy cases: fixed scalars,
+ULEB128/SLEB128/ZigZag/VU128 compound decode/build/copy with variable byte controllers,
 fixed primitive arrays, constants, built-in and generic `TryFrom` conversions, one generic nested
 child, a four-level compound generic lattice, fixed byte arrays with multiple nested children,
 dynamic geometry, conditional controllers, runtime collection decode/build/copy and detached nested
@@ -489,6 +513,10 @@ per case, so compilation is amortized without linking generated, idiomatic, and 
 into one consumer. Pinned Rizin 0.9.1 analyzes the final linked ELF, Mach-O, and PE role artifacts;
 Windows builds additionally load their generated PDB. Artifact evidence keeps named linker calls
 distinct from unresolved indirect dispatch.
+Linked symbol sizes or the next linked symbol bound every known callee as well as each entry point;
+analysis must not absorb a following function after a non-returning panic branch.
+Contradictory linked bounds stop analysis rather than truncating a body or counting neighboring
+code.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
 IR may explain an optimization result but is not treated as a latency oracle. State and
 artifact-size probes remain isolated from measured hot-path implementations.
@@ -544,6 +572,7 @@ interpreter. Keep each decision with its owner:
 | Framing, retained views and physical field routes | `schema/view.rs` and `schema/view_fields.rs`; runtime `wire-repr/src/schema.rs` and `schema/selection.rs` |
 | Counted arrays, homogeneous sequences and heterogeneous cursors | Runtime `schema/array.rs` and `schema/sequence.rs` |
 | Write slots, conversions and conditional choice names | `schema/write_fields.rs`; detached and progressive emission stay in `schema/builder.rs` and `schema/writer.rs` |
+| Scalar byte encodings and prefix/controller lowering | Runtime `integer/`; macro `schema/integer.rs` and `schema/integer/controller.rs`; output expansion `output/integer.rs` |
 | Computed expression arguments and patches for both writers | `schema/computed.rs`; the output cursor and partial-write behavior stay in runtime `output.rs` |
 | Recursive body grammar and bounded geometry | Macro `schema/recursive*.rs` and runtime `recursive.rs` / `recursive/geometry/` |
 

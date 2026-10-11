@@ -287,6 +287,7 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
             continue;
         };
         if !controller_scalar.wire_type.is_unsigned_integer()
+            || controller_scalar.is_variable()
             || controller_scalar.constant.is_some()
             || controller_scalar.computed.is_some()
             || controller.layout.condition.is_some()

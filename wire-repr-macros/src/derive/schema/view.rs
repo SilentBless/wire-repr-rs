@@ -991,10 +991,12 @@ fn error_names(schema: &Schema) -> ErrorNames {
             let extent = matches!(field.kind, FieldKind::Nested(_))
                 .then(|| unique_variant(&mut used, &format!("{base}Extent")));
             let decorated_shortage = mismatch.is_some() || conversion.is_some() || nested.is_some();
-            let shortage_base = if decorated_shortage {
-                format!("{base}NeedMore")
-            } else {
-                base.clone()
+            let shortage_base = match &field.kind {
+                FieldKind::Scalar(scalar) if scalar.is_variable() => {
+                    format!("{base}{}", super::integer::error_suffix(scalar))
+                }
+                _ if decorated_shortage => format!("{base}NeedMore"),
+                _ => base.clone(),
             };
             let shortage = unique_variant(&mut used, &shortage_base);
             FieldErrorNames {
@@ -1038,11 +1040,20 @@ fn render_flatten_error(
     let mut arms = Vec::new();
     for (field, names) in schema.fields.iter().zip(&names.fields) {
         let shortage = &names.shortage;
-        arms.push(quote! {
-            #error::#shortage(source) => {
-                #runtime::__private::RecursiveError::NeedMore(source)
-            }
-        });
+        if let FieldKind::Scalar(scalar) = &field.kind
+            && scalar.is_variable()
+        {
+            let flatten = super::integer::flatten_read_error(scalar, runtime);
+            arms.push(quote! {
+                #error::#shortage(source) => #flatten
+            });
+        } else {
+            arms.push(quote! {
+                #error::#shortage(source) => {
+                    #runtime::__private::RecursiveError::NeedMore(source)
+                }
+            });
+        }
         if let Some(mismatch) = &names.mismatch {
             arms.push(quote! {
                 #error::#mismatch(source) => {
@@ -1186,16 +1197,31 @@ fn render_error(
         let field_name = field.name.to_string();
         let shortage = &names.shortage;
         let shortage_message = format!("failed to frame field `{field_name}`: {{0}}");
-        variants.push(quote! {
-            #[doc = "The field ended before its complete representation."]
-            #[error(#shortage_message)]
-            #shortage(#[source] #runtime::NeedMore),
-        });
-        flatten_arms.push(quote! {
-            Self::#shortage(source) => {
-                #runtime::__private::RecursiveError::NeedMore(source)
-            }
-        });
+        if let FieldKind::Scalar(scalar) = &field.kind
+            && scalar.is_variable()
+        {
+            variants.push(super::integer::read_error_variant(
+                scalar,
+                shortage,
+                &shortage_message,
+                runtime,
+            ));
+            let flatten = super::integer::flatten_read_error(scalar, runtime);
+            flatten_arms.push(quote! {
+                Self::#shortage(source) => #flatten
+            });
+        } else {
+            variants.push(quote! {
+                #[doc = "The field ended before its complete representation."]
+                #[error(#shortage_message)]
+                #shortage(#[source] #runtime::NeedMore),
+            });
+            flatten_arms.push(quote! {
+                Self::#shortage(source) => {
+                    #runtime::__private::RecursiveError::NeedMore(source)
+                }
+            });
+        }
         if let Some(mismatch) = &names.mismatch {
             let mismatch_message = format!("invalid constant field `{field_name}`: {{0}}");
             match &field.kind {
@@ -1757,7 +1783,30 @@ fn render_explicit_frame_steps(
                             private_ident(schema, &format!("presence_{}", field.name.unraw()));
                         quote!(let #presence = #value;)
                     });
-                let decode_value = quote! {
+                let decode_value = if scalar.is_variable() {
+                    let available = private_ident(schema, &format!("scalar_{index}_available"));
+                    let encoded_len = private_ident(schema, &format!("scalar_{index}_encoded_len"));
+                    let decode = super::integer::decode_field(
+                        scalar,
+                        frame_input,
+                        &start,
+                        &absolute,
+                        &input_end,
+                        &available,
+                        runtime,
+                    );
+                    quote! {
+                        let (#raw, #encoded_len) = #decode.map_err(#error::#shortage)?;
+                        let #raw: #wire_ty = #raw as #wire_ty;
+                        let #end = #start.checked_add(#encoded_len)
+                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                        #converted
+                        #constant_check
+                        #controller_value
+                        #presence_controller_value
+                    }
+                } else {
+                    quote! {
                     let #bytes: [u8; #width] = #frame_input
                         .get(#start..#end)
                         .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
@@ -1771,8 +1820,11 @@ fn render_explicit_frame_steps(
                     #constant_check
                     #controller_value
                     #presence_controller_value
+                    }
                 };
-                if field.layout.condition.is_some() {
+                if scalar.is_variable() {
+                    steps.push(decode_value);
+                } else if field.layout.condition.is_some() {
                     steps.push(quote! {
                         let #end = if #present_value {
                             #start.checked_add(#width)
@@ -2123,6 +2175,7 @@ fn retains_geometry_end(schema: &Schema, index: usize) -> bool {
         field.kind,
         FieldKind::RawBytes(_) | FieldKind::Array(_) | FieldKind::Nested(_)
     ) || field.layout.condition.is_some()
+        || matches!(&field.kind, FieldKind::Scalar(scalar) if scalar.is_variable())
         || field.layout.pad_before.is_some()
         || field.layout.align_before.is_some()
         || field.layout.position.is_some()
@@ -2230,7 +2283,18 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                             } else {
                                 quote!(#raw)
                             };
-                            if schema.has_explicit_geometry() {
+                            if scalar.is_variable() {
+                                let value = super::integer::scalar_value(
+                                    scalar,
+                                    &dynamic_start,
+                                    &dynamic_end,
+                                    runtime,
+                                );
+                                quote! {
+                                    let #raw: #wire_ty = #value;
+                                    #decoded
+                                }
+                            } else if schema.has_explicit_geometry() {
                                 quote! {
                                     let #raw = #wire_ty::#decode(
                                         self.as_bytes()[#dynamic_start..#dynamic_end]

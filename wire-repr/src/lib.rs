@@ -4,6 +4,7 @@
 
 extern crate self as wire_repr;
 
+mod integer;
 pub mod output;
 mod recursive;
 mod schema;
@@ -24,6 +25,10 @@ pub mod wire {
 }
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::integer::{
+        Sleb128Bytes, Uleb128Bytes, Vu128Bytes, decode_sleb128, decode_uleb128, decode_vu128,
+        encode_sleb128, encode_uleb128, encode_vu128, zigzag_decode, zigzag_encode,
+    };
     pub use crate::output::{ArrayBuilder, ArraySource, WriteArray};
     pub use crate::recursive::{
         FlattenRecursiveError, RecursiveArrayView, RecursiveBody, RecursiveCursor, RecursiveDepth,
@@ -42,6 +47,7 @@ pub mod __private {
     pub use thiserror::Error as ThisError;
 }
 
+pub use integer::{Sleb128Error, Uleb128Error, Vu128Error};
 pub use output::{
     ArrayWriter, ChildWriter, GrowthRequest, Output, OutputError, WriteError, Writer, Written,
 };

@@ -1,0 +1,99 @@
+name = "scalar/integer_formats/compound"
+
+[roles]
+generated = "generated.rs"
+idiomatic = "idiomatic.rs"
+best_latency = "best/latency.rs"
+
+[[cases]]
+name = "decode"
+entry = "decode"
+seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 127, 128, 16383, 16384, 2097151, 2097152, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_allocation_symbols == 0"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.35"
+message = "generated mixed integer decode has measurable overhead"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.05"
+message = "generated mixed integer decode has safe optimization headroom"
+
+[[cases]]
+name = "build"
+entry = "build"
+seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 127, 128, 16383, 16384, 2097151, 2097152, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_allocation_symbols == 0"
+[[cases.rules]]
+name = "idiomatic latency attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.35"
+message = "generated mixed integer VU128 controller build has measurable overhead"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.05"
+message = "generated mixed integer VU128 controller build has safe optimization headroom"
+
+[[cases]]
+name = "decode_copy"
+entry = "copy"
+seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 127, 128, 16383, 16384, 2097151, 2097152, 81985529216486895, -1]
+[cases.runtime]
+samples = 7
+target_ms = 2
+warmup = 100
+[[cases.formulas]]
+name = "ergonomic_tax"
+expression = "percent(generated_runtime_median_ns, idiomatic_runtime_median_ns)"
+unit = "%"
+[[cases.formulas]]
+name = "optimization_gap"
+expression = "percent(generated_runtime_median_ns, best_latency_runtime_median_ns)"
+unit = "%"
+[[cases.rules]]
+name = "artifact invariants"
+level = "error"
+assert = "generated_artifact_transitive_indirect_calls == 0 && generated_artifact_transitive_allocation_symbols == 0"
+[[cases.rules]]
+name = "exact forwarding attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= idiomatic_runtime_median_ns * 1.50"
+message = "validated exact mixed integer forwarding has measurable facade overhead"
+[[cases.rules]]
+name = "best safe attention"
+level = "attention"
+assert = "generated_runtime_median_ns <= best_latency_runtime_median_ns * 1.05"
+message = "validated exact mixed integer forwarding has safe optimization headroom"

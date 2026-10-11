@@ -18,6 +18,8 @@ mod enumeration;
 mod geometry;
 #[path = "behavior/hygiene.rs"]
 mod hygiene;
+#[path = "behavior/integer_formats.rs"]
+mod integer_formats;
 #[path = "behavior/layout.rs"]
 mod layout;
 #[path = "behavior/ownership.rs"]
@@ -32,5 +34,7 @@ mod selection;
 mod sequence;
 #[path = "behavior/structural_fuzz.rs"]
 mod structural_fuzz;
+#[path = "behavior/uleb128.rs"]
+mod uleb128;
 #[path = "behavior/view.rs"]
 mod view;

@@ -5,6 +5,9 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, Generics, TypeParam, parse_quote};
 
+use super::integer::{
+    detached_expansions, detached_state, render_detached_length_patch, scalar_bytes,
+};
 use super::model::{FieldKind, Position, Schema};
 use super::write_fields::{
     Slot, SlotKind, choice_final_ident, choice_start_ident, choice_state_ident, choice_trait_ident,
@@ -628,7 +631,6 @@ fn render_complete(
                 FieldKind::Scalar(scalar) => {
                     let value_ty = value_type_tokens(&scalar.value_type);
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
-                    let encode = to_bytes_method(scalar.endian);
                     let source = if let Some(constant) = &scalar.constant {
                         quote!(#constant)
                     } else if scalar.computed.is_some()
@@ -705,18 +707,14 @@ fn render_complete(
                             quote!(0 as #value_ty)
                         }
                     };
-                    let count_offset = schema.is_count_controller(&field.name).then(|| {
-                        let offset =
-                            private_ident(schema, &format!("{}_count_offset", field.name.unraw()));
-                        quote!(let #offset = writer.position();)
-                    });
                     if let Some(variant) = conversion_variant {
                         let semantic = private_ident(schema, &format!("scalar_{index}_value"));
                         let encoded = private_ident(schema, &format!("scalar_{index}_encoded"));
+                        let controller_state = detached_state(schema, field, &encoded);
+                        let bytes = scalar_bytes(scalar, &encoded, runtime);
                         let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
                         quote! {
                             #geometry
-                            #count_offset
                             let #semantic: #value_ty = #source;
                             let #encoded: #wire_ty = #conversion.ok_or_else(|| {
                                 #runtime::WriteError::Schema(#error::#variant(
@@ -726,15 +724,18 @@ fn render_complete(
                                     },
                                 ))
                             })?;
-                            writer.write(&#encoded.#encode())?;
+                            #controller_state
+                            writer.write(#bytes)?;
                         }
                     } else {
                         let encoded = private_ident(schema, &format!("scalar_{index}_encoded"));
+                        let controller_state = detached_state(schema, field, &encoded);
+                        let bytes = scalar_bytes(scalar, &encoded, runtime);
                         quote! {
                             let #encoded: #wire_ty = #source;
                             #geometry
-                            #count_offset
-                            writer.write(&#encoded.#encode())?;
+                            #controller_state
+                            writer.write(#bytes)?;
                         }
                     }
                 }
@@ -776,54 +777,14 @@ fn render_complete(
                                 .next()
                                 .is_none_or(|dependent| dependent.name != field.name) =>
                         {
-                            let controller_field = schema
-                                .fields
-                                .iter()
-                                .find(|candidate| candidate.name == *controller)
-                                .expect("validated length controller");
-                            let FieldKind::Scalar(controller_scalar) = &controller_field.kind else {
-                                unreachable!("validated length controller is scalar")
-                            };
-                            let relative =
-                                super::builder_offset(&controller_field.offset, runtime);
-                            let controller_name = controller.unraw().to_string();
-                            let wire_ty = scalar_type_tokens(controller_scalar.wire_type);
-                            let decode = super::from_bytes_method(controller_scalar.endian);
-                            let width = controller_scalar.width();
-                            quote! {
-                                let controller_offset = #relative
-                                    .and_then(|offset| #schema_start.checked_add(offset))
-                                    .ok_or_else(|| #runtime::WriteError::Schema(
-                                        #error::Layout(#runtime::LayoutError {
-                                            field: #controller_name,
-                                        }),
-                                    ))?;
-                                let controller_bytes = writer
-                                    .read_at::<#width>(controller_offset)
-                                    .ok_or_else(|| #runtime::WriteError::Schema(
-                                        #error::Layout(#runtime::LayoutError {
-                                            field: #controller_name,
-                                        }),
-                                    ))?;
-                                let expected = usize::try_from(
-                                    #wire_ty::#decode(controller_bytes)
-                                )
-                                .map_err(|_| #runtime::WriteError::Schema(
-                                    #error::Layout(#runtime::LayoutError {
-                                        field: #controller_name,
-                                    }),
-                                ))?;
-                                let actual = #build_value.#field_name.0.as_ref().len();
-                                if actual != expected {
-                                    return Err(#runtime::WriteError::Schema(
-                                        #error::LengthConflict {
-                                            controller: #controller_name,
-                                            expected,
-                                            actual,
-                                        },
-                                    ));
-                                }
-                            }
+                            render_detached_length_patch(
+                                schema,
+                                controller,
+                                &field.name,
+                                quote!(#build_value.#field_name.0.as_ref().len()),
+                                error,
+                                runtime,
+                            )
                         }
                         super::model::DynamicExtent::Bounded(_)
                         | super::model::DynamicExtent::Rest => TokenStream::new(),
@@ -852,12 +813,21 @@ fn render_complete(
                         unreachable!("validated count controller is scalar")
                     };
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
-                    let encode = to_bytes_method(scalar.endian);
                     let controller_name = controller.name.unraw().to_string();
                     let offset = private_ident(
                         schema,
-                        &format!("{}_count_offset", controller.name.unraw()),
+                        &format!("{}_controller_offset", controller.name.unraw()),
                     );
+                    let patch = if scalar.is_variable() {
+                        let value = private_ident(
+                            schema,
+                            &format!("{}_controller_value", controller.name.unraw()),
+                        );
+                        quote!(#value = count as usize;)
+                    } else {
+                        let encode = to_bytes_method(scalar.endian);
+                        quote!(writer.patch_at(#offset, &count.#encode())?;)
+                    };
                     quote! {
                         #geometry
                         let count = <#parameter as #runtime::__private::WriteArray<#item>>::write(
@@ -878,7 +848,7 @@ fn render_complete(
                                     field: #controller_name,
                                 }),
                             ))?;
-                        writer.patch_at(#offset, &count.#encode())?;
+                        #patch
                     }
                 }
                 FieldKind::BitProjection(_) => TokenStream::new(),
@@ -914,82 +884,18 @@ fn render_complete(
                         .extent
                         .as_ref()
                         .map(|controller| {
-                            let controller_field = schema
-                                .fields
-                                .iter()
-                                .find(|candidate| candidate.name == *controller)
-                                .expect("validated length controller");
-                            let FieldKind::Scalar(controller_scalar) = &controller_field.kind else {
-                                unreachable!("validated controller is scalar")
-                            };
-                            let relative = super::builder_offset(&controller_field.offset, runtime);
-                            let controller_name = controller.unraw().to_string();
-                            let wire_ty = scalar_type_tokens(controller_scalar.wire_type);
-                            let encode = to_bytes_method(controller_scalar.endian);
-                            let decode = super::from_bytes_method(controller_scalar.endian);
-                            let width = controller_scalar.width();
-                            let is_first = schema
-                                .length_dependents(controller)
-                                .next()
-                                .is_some_and(|dependent| dependent.name == field.name);
-                            let apply = if is_first {
-                                quote! {
-                                    let controller_value =
-                                        #wire_ty::try_from(child_length).map_err(|_| {
-                                            #runtime::WriteError::Schema(
-                                                #error::Layout(#runtime::LayoutError {
-                                                    field: #controller_name,
-                                                }),
-                                            )
-                                        })?;
-                                    writer.patch_at(
-                                        controller_offset,
-                                        &controller_value.#encode(),
-                                    )?;
-                                }
-                            } else {
-                                quote! {
-                                    let controller_bytes = writer
-                                        .read_at::<#width>(controller_offset)
-                                        .ok_or_else(|| #runtime::WriteError::Schema(
-                                            #error::Layout(#runtime::LayoutError {
-                                                field: #controller_name,
-                                            }),
-                                        ))?;
-                                    let expected = usize::try_from(
-                                        #wire_ty::#decode(controller_bytes)
-                                    )
-                                    .map_err(|_| #runtime::WriteError::Schema(
-                                        #error::Layout(#runtime::LayoutError {
-                                            field: #controller_name,
-                                        }),
-                                    ))?;
-                                    if child_length != expected {
-                                        return Err(#runtime::WriteError::Schema(
-                                            #error::LengthConflict {
-                                                controller: #controller_name,
-                                                expected,
-                                                actual: child_length,
-                                            },
-                                        ));
-                                    }
-                                }
-                            };
-                            quote! {
-                                let child_length = #actual_end.checked_sub(#start).ok_or_else(|| {
+                            render_detached_length_patch(
+                                schema,
+                                controller,
+                                &field.name,
+                                quote!(#actual_end.checked_sub(#start).ok_or_else(|| {
                                     #runtime::WriteError::Schema(
                                         #error::Layout(#runtime::LayoutError { field: #field_label }),
                                     )
-                                })?;
-                                let controller_offset = #relative
-                                    .and_then(|offset| #schema_start.checked_add(offset))
-                                    .ok_or_else(|| #runtime::WriteError::Schema(
-                                        #error::Layout(#runtime::LayoutError {
-                                            field: #controller_name,
-                                        }),
-                                    ))?;
-                                #apply
-                            }
+                                })?),
+                                error,
+                                runtime,
+                            )
                         })
                         .unwrap_or_default();
                     quote! {
@@ -1191,6 +1097,7 @@ fn render_complete(
             start: &schema_start,
         },
     );
+    let prefix_expansions = detached_expansions(schema, runtime);
     quote! {
         #error_declaration
 
@@ -1207,12 +1114,14 @@ fn render_complete(
             > {
                 let #schema_start = writer.position();
                 #(#writes)*
+                #(#prefix_expansions)*
                 #(#computed_patches)*
                 Ok(())
             }
         }
     }
 }
+
 fn render_detached_geometry(
     _schema: &Schema,
     field: &super::model::Field,

@@ -4,6 +4,17 @@ All notable public changes to `wire-repr` are recorded here.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-11
+
+- Add ULEB128, SLEB128, and VU128 integer field encodings, with ZigZag available alongside
+  ULEB128 or VU128 for signed physical integers. Checked conversions and constants compose
+  with the encodings; views preserve legal nonminimal source bytes.
+- Support unsigned variable-integer byte/count controllers in detached and progressive writers.
+  Deferred prefixes expand in the caller's output before computed fields are patched, without
+  hidden allocation or a larger-than-final fixed buffer.
+- Bound transitive artifact analysis by linked function extents, preventing non-returning panic
+  branches from attributing a neighboring function's allocations and dispatch to the workload.
+
 ## [1.0.4] - 2026-10-11
 
 - Support counted arrays in detached nested struct and enum-body builders through
@@ -62,9 +73,10 @@ The first stable release of `wire-repr`.
 - Executable DNS, NTP, Telegram MTProto, and recursive expression-VM showcases exercise real
   network bytes, computed fields, schema validators, runtime collections, and recursive writers.
 
-[Unreleased]: https://github.com/SilentBless/wire-repr-rs/compare/v1.0.4...master
+[Unreleased]: https://github.com/SilentBless/wire-repr-rs/compare/v1.1.0...master
 [1.0.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.0
 [1.0.1]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.1
 [1.0.2]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.2
 [1.0.3]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.3
 [1.0.4]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.4
+[1.1.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.1.0

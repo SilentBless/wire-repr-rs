@@ -47,6 +47,127 @@ pub enum Envelope {
     Batch(Batch),
 }
 
+#[derive(WireView, WireBuilder)]
+struct ParcelData {
+    #[wire(uleb128)]
+    number: u32,
+    #[wire(rest)]
+    bytes: wire::Bytes,
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum ParcelItem {
+    #[wire(value = 0x27)]
+    Data(ParcelData),
+}
+
+#[derive(WireView, WireBuilder)]
+struct ParcelContent {
+    #[wire(uleb128)]
+    length: u16,
+    #[wire(bytes = length)]
+    item: ParcelItem,
+    tail: u8,
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum Parcel {
+    #[wire(value = 0x59)]
+    Body(ParcelContent),
+}
+
+fn prove_uleb_envelope() -> Result<(), Box<dyn std::error::Error>> {
+    let payload = [0x6e; 125];
+    let mut expected = vec![0x59, 0x80, 0x01, 0x27, 0x80, 0x02];
+    expected.extend_from_slice(&payload);
+    expected.push(0x96);
+    let mut output = [0x55; 132];
+    let written = Parcel::builder(&mut output[..])
+        .body(|body| {
+            body.item(|item| item.data(|data| data.number(256).bytes(payload)))
+                .tail(0x96)
+        })?
+        .finish()?;
+    assert_eq!(written.as_bytes(), expected.as_slice());
+    let view = Parcel::view(written.as_bytes())?;
+    let ParcelVariant::Body(body) = view.variant();
+    assert_eq!(body.length(), 128);
+    assert_eq!(body.tail(), 0x96);
+    let item = body.item();
+    let ParcelItemVariant::Data(data) = item.variant();
+    assert_eq!(data.number(), 256);
+    assert_eq!(data.bytes(), payload);
+    Ok(())
+}
+
+#[derive(WireView, WireBuilder)]
+struct IntegerRecord {
+    #[wire(sleb128)]
+    delta: i32,
+    #[wire(uleb128, zigzag)]
+    distance: i16,
+    #[wire(vu128)]
+    code: u32,
+    #[wire(vu128, zigzag)]
+    displacement: i16,
+    #[wire(vu128)]
+    length: u16,
+    #[wire(bytes = length)]
+    payload: wire::Bytes,
+    tail: u8,
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum IntegerEnvelope {
+    #[wire(value = 0x2e)]
+    Record(IntegerRecord),
+}
+
+fn prove_integer_formats() -> Result<(), Box<dyn std::error::Error>> {
+    let payload = [0xb7; 128];
+    let mut expected = vec![
+        0x2e, 0x9b, 0xf1, 0x59, 0x81, 0x01, 0xde, 0xe6, 0x55, 0x81, 0x02, 0x80, 0x02,
+    ];
+    expected.extend_from_slice(&payload);
+    expected.push(0x3d);
+    let mut output = [0; 142];
+    let written = IntegerEnvelope::builder(&mut output[..])
+        .record(|record| {
+            record
+                .delta(-624485)
+                .distance(-65)
+                .code(0xabcde)
+                .displacement(-65)
+                .payload(payload)
+                .tail(0x3d)
+        })?
+        .finish()?;
+    assert_eq!(written.as_bytes(), expected);
+    let view = IntegerEnvelope::view(written.as_bytes())?;
+    let IntegerEnvelopeVariant::Record(record) = view.variant();
+    assert_eq!(record.delta(), -624485);
+    assert_eq!(record.distance(), -65);
+    assert_eq!(record.code(), 0xabcde);
+    assert_eq!(record.displacement(), -65);
+    assert_eq!(record.length(), 128);
+    assert_eq!(record.payload(), payload);
+    assert_eq!(record.tail(), 0x3d);
+    let mut progressive = [0; 141];
+    let written = IntegerRecord::builder(&mut progressive[..])
+        .delta(-624485)?
+        .distance(-65)?
+        .code(0xabcde)?
+        .displacement(-65)?
+        .payload(payload)?
+        .tail(0x3d)?
+        .finish()?;
+    assert_eq!(written.as_bytes(), &expected[1..]);
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let expected = [1, 2, 1, 0xaa, 2, 0xbb, 0xcc, 0x2a];
     let view = Packet::view(expected)?;
@@ -145,5 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let second = entries.next().transpose()?.expect("second entry");
     assert_eq!((second.view().key(), second.view().value()), (41, -59));
     assert!(entries.next().is_none());
+    prove_uleb_envelope()?;
+    prove_integer_formats()?;
     Ok(())
 }

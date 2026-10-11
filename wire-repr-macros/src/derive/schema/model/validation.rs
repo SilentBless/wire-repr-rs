@@ -4,10 +4,12 @@ use syn::{Expr, Ident, Member};
 
 use super::controller::validate_unsigned_controller;
 use super::{
-    DynamicExtent, Field, FieldKind, NestedField, Position, RawBytes, SizeTerm, ValueType,
+    DynamicExtent, Field, FieldKind, NestedField, Position, RawBytes, ScalarEncoding, SizeTerm,
+    ValueType,
 };
 
 pub(super) fn validate(fields: &[Field]) -> syn::Result<Vec<usize>> {
+    validate_variable_integer_geometry(fields)?;
     for field in fields {
         if field.kind.computed().is_none() {
             continue;
@@ -48,6 +50,69 @@ pub(super) fn validate(fields: &[Field]) -> syn::Result<Vec<usize>> {
     validate_computed_controller_roles(fields)?;
     let computed_order = validate_computed_dependencies(fields)?;
     Ok(computed_order)
+}
+
+fn validate_variable_integer_geometry(fields: &[Field]) -> syn::Result<()> {
+    let recursive_object = fields
+        .iter()
+        .any(|field| matches!(field.kind, FieldKind::Recursive(_)));
+    let mut outstanding_prefix: Option<ScalarEncoding> = None;
+    for field in fields {
+        if let Some(encoding) = outstanding_prefix
+            && (field.layout.position.is_some() || field.layout.align_before.is_some())
+        {
+            return Err(syn::Error::new_spanned(
+                &field.name,
+                format!(
+                    "`at` and `align_before` cannot follow an outstanding `{}` controller prefix",
+                    encoding.name(),
+                ),
+            ));
+        }
+        let FieldKind::Scalar(scalar) = &field.kind else {
+            continue;
+        };
+        if !scalar.is_variable() {
+            continue;
+        }
+        if recursive_object {
+            return Err(syn::Error::new_spanned(
+                &field.name,
+                format!(
+                    "recursive object bodies cannot use `{}` without variable scalar geometry",
+                    scalar.encoding.name(),
+                ),
+            ));
+        }
+        let controller = fields.iter().any(|dependent| match &dependent.kind {
+            FieldKind::RawBytes(RawBytes {
+                extent: DynamicExtent::Bounded(controller),
+            })
+            | FieldKind::Nested(NestedField {
+                extent: Some(controller),
+                ..
+            }) => controller == &field.name,
+            FieldKind::Array(array) => array.controller == field.name,
+            FieldKind::Flag(flag) => flag.controller == field.name,
+            _ => false,
+        });
+        if fields.iter().any(|dependent| {
+            matches!(
+                &dependent.kind,
+                FieldKind::Flag(flag) if flag.controller == field.name
+            )
+        }) {
+            return Err(syn::Error::new_spanned(
+                &field.name,
+                format!(
+                    "`{}` cannot be a presence controller",
+                    scalar.encoding.name()
+                ),
+            ));
+        }
+        outstanding_prefix = outstanding_prefix.or(controller.then_some(scalar.encoding));
+    }
+    Ok(())
 }
 
 fn validate_computed_controller_roles(fields: &[Field]) -> syn::Result<()> {
@@ -267,7 +332,21 @@ fn validate_geometry_controllers(fields: &[Field]) -> syn::Result<()> {
     let mut length_controllers = BTreeSet::new();
     for (index, controller) in &length_roles {
         length_controllers.insert(controller.to_string());
-        validate_unsigned_controller(fields, *index, controller, "byte length", false)?;
+        let variable_scalar_geometry = fields
+            .iter()
+            .take_while(|field| field.name != **controller)
+            .any(|field| matches!(&field.kind, FieldKind::Scalar(scalar) if scalar.is_variable()))
+            || fields.iter().any(|field| {
+                field.name == **controller
+                    && matches!(&field.kind, FieldKind::Scalar(scalar) if scalar.is_variable())
+            });
+        validate_unsigned_controller(
+            fields,
+            *index,
+            controller,
+            "byte length",
+            variable_scalar_geometry,
+        )?;
     }
     for (index, field) in fields.iter().enumerate() {
         if let Some(Position::Field(controller)) = &field.layout.position {

@@ -3,6 +3,7 @@ mod builder;
 mod computed;
 mod enumeration;
 mod geometry;
+mod integer;
 mod model;
 mod recursive;
 mod recursive_demand;

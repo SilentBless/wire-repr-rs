@@ -8,7 +8,7 @@ use super::controller::validate_unsigned_controller;
 use super::{
     ArrayField, BitProjection, Computed, DynamicExtent, Endian, Field, FieldKind, FieldLayout,
     FixedBytes, FixedScalarArray, FlagField, LayoutOffset, NestedField, Position, RawBytes,
-    RecursiveField, Scalar, ScalarType, SizeTerm, ValueType, scalar_endian,
+    RecursiveField, Scalar, ScalarEncoding, ScalarType, SizeTerm, ValueType, scalar_endian,
 };
 
 pub(super) fn normalize_field(
@@ -22,6 +22,8 @@ pub(super) fn normalize_field(
 ) -> syn::Result<Field> {
     let FieldAttributes {
         endian,
+        encoding,
+        zigzag,
         constant,
         representation,
         bytes,
@@ -38,6 +40,13 @@ pub(super) fn normalize_field(
         bits,
         counted_by,
     } = attributes;
+    let encoding = encoding.unwrap_or(ScalarEncoding::Fixed);
+    if zigzag && !matches!(encoding, ScalarEncoding::Uleb128 | ScalarEncoding::Vu128) {
+        return Err(syn::Error::new_spanned(
+            &name,
+            "`zigzag` requires `uleb128` or `vu128`",
+        ));
+    }
     if bytes.is_some() && rest {
         return Err(syn::Error::new_spanned(
             &name,
@@ -92,6 +101,42 @@ pub(super) fn normalize_field(
             &name,
             "computed fields cannot be logical bit projections",
         ));
+    }
+    if encoding != ScalarEncoding::Fixed {
+        if value_type.is_none() || flag.is_some() {
+            return Err(syn::Error::new_spanned(
+                &name,
+                if encoding == ScalarEncoding::Uleb128 && !zigzag {
+                    "`uleb128` requires an unsigned physical scalar"
+                } else {
+                    "integer encodings require a physical scalar"
+                },
+            ));
+        }
+        if endian.is_some() {
+            return Err(syn::Error::new_spanned(
+                &name,
+                format!("`{}` does not accept an endian attribute", encoding.name()),
+            ));
+        }
+        if bits_of.is_some() || bit_range.is_some() {
+            return Err(syn::Error::new_spanned(
+                &name,
+                format!("`{}` cannot be a logical bit projection", encoding.name()),
+            ));
+        }
+        if computed.is_some() {
+            return Err(syn::Error::new_spanned(
+                &name,
+                format!("computed destinations cannot use `{}`", encoding.name()),
+            ));
+        }
+        if layout.condition.is_some() {
+            return Err(syn::Error::new_spanned(
+                &name,
+                format!("conditional fields cannot use `{}`", encoding.name()),
+            ));
+        }
     }
     let kind = if let Some(controller) = bits_of {
         let (start, end) = bit_range.ok_or_else(|| {
@@ -194,7 +239,38 @@ pub(super) fn normalize_field(
                 "custom TryFrom scalar fields do not support stored constants",
             ));
         }
-        let endian = scalar_endian(wire_type, endian, &ty)?;
+        let endian = if encoding != ScalarEncoding::Fixed {
+            if !wire_type.is_unsigned_integer() && !wire_type.is_signed_integer() {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "integer encodings require a physical integer",
+                ));
+            }
+            if zigzag && !wire_type.is_signed_integer() {
+                return Err(syn::Error::new_spanned(
+                    &name,
+                    "`zigzag` requires a signed physical integer",
+                ));
+            }
+            let invalid_representation = match encoding {
+                ScalarEncoding::Uleb128 if !zigzag && !wire_type.is_unsigned_integer() => {
+                    Some("`uleb128` requires an unsigned physical scalar")
+                }
+                ScalarEncoding::Sleb128 if !wire_type.is_signed_integer() => {
+                    Some("`sleb128` requires a signed physical integer")
+                }
+                ScalarEncoding::Vu128 if !zigzag && !wire_type.is_unsigned_integer() => {
+                    Some("`vu128` requires an unsigned physical integer unless `zigzag` is present")
+                }
+                _ => None,
+            };
+            if let Some(message) = invalid_representation {
+                return Err(syn::Error::new_spanned(&name, message));
+            }
+            Endian::Native
+        } else {
+            scalar_endian(wire_type, endian, &ty)?
+        };
         if constant.is_some() && computed.is_some() {
             return Err(syn::Error::new_spanned(
                 &name,
@@ -205,6 +281,8 @@ pub(super) fn normalize_field(
             value_type,
             wire_type,
             endian,
+            encoding,
+            zigzag,
             constant,
             computed,
         })

@@ -222,7 +222,8 @@ pub(super) fn validate(schema: &Schema, root: &Ident) -> syn::Result<()> {
                 ));
             }
             FieldKind::Scalar(scalar)
-                if scalar.constant.is_none()
+                if !scalar.is_variable()
+                    && scalar.constant.is_none()
                     && scalar.computed.is_none()
                     && !scalar.value_type.is_converted() => {}
             FieldKind::Bytes(bytes) if bytes.constant.is_none() => {}

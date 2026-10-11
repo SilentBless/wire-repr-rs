@@ -121,8 +121,8 @@ buffer and publish only after `finish()` succeeds.
 
 ## Scalars and logical representations
 
-Direct scalar fields support fixed-width Rust integers and floats. Multibyte scalars require `be`
-or `le`; one-byte integers do not accept an endian marker. Primitive fixed arrays use the same
+Direct scalar fields support fixed-width Rust integers and floats. Fixed multibyte scalars require
+`be` or `le`; one-byte integers do not accept an endian marker. Primitive fixed arrays use the same
 per-element representation:
 
 ```
@@ -134,8 +134,26 @@ struct Lanes {
     lanes: [u16; 8],
 }
 ```
+Rust `f32` is IEEE 754 binary32 (usually called `float`); `f64` is binary64 (`double`).
+Both support `be`, `le`, and fixed arrays. Reading and writing preserve their bits, including NaN
+payloads, infinities, and signed zero; compare `to_bits()` when those distinctions matter.
 
-Platform-sized and logical types declare a fixed physical representation:
+```
+use wire_repr::{WireBuilder, WireView};
+
+#[derive(WireView, WireBuilder)]
+struct Measurement {
+    #[wire(le)]
+    value: f32,
+    #[wire(be)]
+    time: f64,
+    #[wire(le)]
+    samples: [f32; 4],
+}
+```
+
+
+Platform-sized and logical types declare an explicit physical integer representation:
 
 ```
 use wire_repr::{WireBuilder, WireView};
@@ -155,6 +173,79 @@ Reading requires `Logical: TryFrom<Physical>`. Writing requires `Physical: TryFr
 Conversion failures remain nominal field-site [`ScalarConversionError`] or
 [`ScalarBuildConversionError`] values; implementation-specific conversion error types do not leak
 through generated public error enums. Stored constants use the direct physical representation.
+
+### Variable-width integers
+
+Integer fields may select a byte encoding instead of an endian marker:
+
+| Attribute | Physical type | Format |
+| --- | --- | --- |
+| `uleb128` | `u8` through `u128` | Unsigned LEB128; also Protobuf unsigned varint |
+| `sleb128` | `i8` through `i128` | Signed LEB128 with terminal sign extension |
+| `uleb128, zigzag` | `i8` through `i128` | ZigZag followed by unsigned LEB128 |
+| `vu128` | `u8` through `u128` | VU128 prefix-length integer |
+| `vu128, zigzag` | `i8` through `i128` | ZigZag followed by VU128 |
+
+`zigzag` is a signed-to-unsigned transformation, not a standalone byte format.
+`varint` and `prefix_varint` are not attribute aliases: those names describe incompatible protocol
+families. In particular, SLEB128 and ZigZag are not substitutes for a protocol's signed
+two's-complement varint. VU128 follows the current format, not its superseded original version.
+
+The `as = integer_type` conversion and stored constants compose with these encodings. Unsigned
+primitive ULEB128 and VU128 fields can control `bytes` or `counted_by`. Their setters remain omitted.
+Writers reserve one byte for a deferred controller and expand its prefix in the same output after
+the payload completes, without staging or hidden allocation. Prefixes expand in reverse physical
+order before computed callbacks run; a fixed buffer need only fit the final representation.
+
+For example, a WebAssembly custom section carries a ULEB128 content length and a UTF-8 name
+represented here as bytes:
+
+```
+use wire_repr::{WireBuilder, WireView, wire};
+
+#[derive(WireView, WireBuilder)]
+struct CustomContent {
+    #[wire(uleb128)]
+    name_length: u32,
+    #[wire(bytes = name_length)]
+    name: wire::Bytes,
+    #[wire(rest)]
+    data: wire::Bytes,
+}
+
+#[derive(WireView, WireBuilder)]
+struct CustomSection {
+    #[wire(constant = 0)]
+    id: u8,
+    #[wire(uleb128)]
+    size: u32,
+    #[wire(bytes = size)]
+    content: CustomContent,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = [0; 8];
+    let written = CustomSection::builder(&mut output[..])
+        .content(|content| content.name(&b"note"[..]).data(&[0x2a][..]))?
+        .finish()?;
+    assert_eq!(written.as_bytes(), &[0, 6, 4, b'n', b'o', b't', b'e', 0x2a]);
+    let section = CustomSection::view(written.as_bytes())?;
+    assert_eq!(section.size(), 6);
+    assert_eq!(section.content().name(), b"note");
+    Ok(())
+}
+```
+
+Views accept complete nonminimal encodings that fit the physical width and preserve their exact
+bytes. LEB128 is bounded by `ceil(bits / 7)` bytes; VU128 has a prefix-declared extent of at most
+seventeen bytes, including nonminimal narrow values. Fresh writes emit the shortest form.
+Malformed fields report [`Uleb128Error`], [`Sleb128Error`], or [`Vu128Error`] at their field site;
+VU128 truncation reports the exact missing encoded bytes once its prefix is available.
+
+Variable encodings are not supported for fixed primitive arrays, enum selectors, bitfield cells or
+projections, conditional or computed destinations, placement controllers, or recursive body
+grammars. Alignment or forward placement following a deferred variable controller is rejected
+because later prefix expansion would invalidate that placement.
 
 ## Geometry and dependencies
 

@@ -25,7 +25,11 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
             } else {
                 rendered.extend(render_object(schema, &slot, runtime)?);
             }
-        } else if slot.fields.len() == 1 && schema.fields.len() == 2 && slot.fields[0] == 1 {
+        } else if slot.fields.len() == 1
+            && schema.fields.len() == 2
+            && slot.fields[0] == 1
+            && !matches!(&schema.fields[0].kind, FieldKind::Scalar(scalar) if scalar.is_variable())
+        {
             rendered.extend(render_array(schema, &slot, runtime)?);
         }
     }
@@ -259,6 +263,9 @@ fn render_array(
             "recursive array count must be an unsigned scalar",
         ));
     };
+    if count.is_variable() {
+        return Ok(TokenStream::new());
+    }
     if !count.wire_type.is_unsigned_integer()
         || count.constant.is_some()
         || count.computed.is_some()

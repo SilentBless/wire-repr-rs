@@ -156,8 +156,10 @@ overridden from the command line.
 
 ## 🧩 Layout toolbox
 
-- **Scalars and arrays:** fixed integers and floats, explicit endian, constants, `[u8; N]`, and
-  fixed primitive arrays.
+- **Scalars and arrays:** fixed integers, IEEE 754 `f32` (`float`) and `f64` (`double`), explicit endian,
+  constants, `[u8; N]`, and fixed primitive arrays.
+- **Variable integers:** ULEB128, SLEB128, ZigZag with ULEB128 or VU128, and unsigned VU128;
+  exact source forwarding and automatic length/count controllers.
 - **Logical types:** `as = Physical` with checked bidirectional `TryFrom`, including `NonZero*` and
   user newtypes.
 - **Geometry:** bounded `wire::Bytes`, terminal `rest`, padding, alignment, and forward placement.
@@ -167,6 +169,31 @@ overridden from the command line.
 - **Physical selections:** ordered root/nested byte ranges for copying, hashes, and checksums.
 - **Computed fields:** infallible or fallible callbacks scheduled by a generated dependency DAG.
 - **Sequences:** homogeneous `views()` and failure-atomic heterogeneous cursors.
+
+`f32` and `f64` already support `be`, `le`, and fixed arrays. Their source bits survive reading and
+writing, including NaN payloads, infinities, and `-0.0`; use `to_bits()` for bit-exact comparisons.
+
+### Variable-width integers
+
+The following encodings are available starting with `1.1.0`:
+
+| Field attribute | Physical integer | Byte format |
+| --- | --- | --- |
+| `#[wire(uleb128)]` | unsigned | Unsigned LEB128 / Protobuf unsigned varint |
+| `#[wire(sleb128)]` | signed | Signed LEB128 |
+| `#[wire(uleb128, zigzag)]` | signed | ZigZag + unsigned LEB128 |
+| `#[wire(vu128)]` | unsigned | VU128 prefix-length integer |
+| `#[wire(vu128, zigzag)]` | signed | ZigZag + VU128 |
+
+Widths run from 8 to 128 bits. These attributes replace endian markers and compose with checked
+`as = integer_type` conversions and constants. ZigZag alone is not a byte encoding. Generic
+`VarInt` and `Prefix VarInt` names are deliberately not aliases for one protocol's format.
+
+Unsigned ULEB128 and VU128 fields can control `bytes` or `counted_by`, including bounded nested
+enum bodies. Both writer paths derive the value from the payload and expand deferred prefixes in
+the same output, without hidden allocation; fixed buffers need only fit the final representation.
+Views preserve legal nonminimal encodings, while fresh writes use the shortest form.
+See the crate's variable-integer reference for error and geometry boundaries.
 
 A runtime array keeps its count as an ordinary physical field:
 
@@ -268,7 +295,7 @@ separating named linker calls from unresolved dispatch before runtime samples ar
 > the release package by checksum. `WIRE_REPR_RIZIN` may point to another executable location.
 
 The core remains featureless and allocation-free; optional application storage appears only through
-caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.4/ARCHITECTURE.md)
+caller-selected input/output types. See [`ARCHITECTURE.md`](https://github.com/SilentBless/wire-repr-rs/blob/v1.1.0/ARCHITECTURE.md)
 for the generated-state, recursion, and measurement invariants.
 Ongoing repository and API work is ordered in
 [`ROADMAP.md`](https://github.com/SilentBless/wire-repr-rs/blob/master/ROADMAP.md).
@@ -324,4 +351,4 @@ to 120 seconds without adding that cost to merge commits.
 ## 📄 License
 
 MIT © 2026 SilentBless. See the
-[license](https://github.com/SilentBless/wire-repr-rs/blob/v1.0.4/LICENSE).
+[license](https://github.com/SilentBless/wire-repr-rs/blob/v1.1.0/LICENSE).

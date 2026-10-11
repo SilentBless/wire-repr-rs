@@ -43,6 +43,12 @@ pub(super) fn validate_unsigned_controller(
             format!("{role} controller `{controller}` must be an integer scalar"),
         ));
     };
+    if scalar.is_variable() && matches!(role, "bit projection" | "field position") {
+        return Err(syn::Error::new_spanned(
+            controller,
+            format!("`{}` cannot be a {role} controller", scalar.encoding.name()),
+        ));
+    }
     if !scalar.wire_type.is_unsigned_integer()
         || !matches!(
             &scalar.value_type,

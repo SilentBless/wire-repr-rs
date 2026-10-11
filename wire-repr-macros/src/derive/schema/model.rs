@@ -109,8 +109,29 @@ pub(super) struct Scalar {
     pub(super) value_type: ValueType,
     pub(super) wire_type: ScalarType,
     pub(super) endian: Endian,
+    pub(super) encoding: ScalarEncoding,
+    pub(super) zigzag: bool,
     pub(super) constant: Option<Expr>,
     pub(super) computed: Option<Computed>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum ScalarEncoding {
+    Fixed,
+    Uleb128,
+    Sleb128,
+    Vu128,
+}
+
+impl ScalarEncoding {
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+            Self::Uleb128 => "uleb128",
+            Self::Sleb128 => "sleb128",
+            Self::Vu128 => "vu128",
+        }
+    }
 }
 
 pub(super) struct Computed {
@@ -215,6 +236,10 @@ impl Scalar {
     pub(super) const fn width(&self) -> usize {
         self.wire_type.width()
     }
+
+    pub(super) const fn is_variable(&self) -> bool {
+        !matches!(self.encoding, ScalarEncoding::Fixed)
+    }
 }
 
 impl FieldKind {
@@ -234,6 +259,7 @@ impl FieldKind {
 
     pub(super) fn size_term(&self) -> SizeTerm {
         match self {
+            Self::Scalar(scalar) if scalar.is_variable() => SizeTerm::Dynamic,
             Self::Scalar(scalar) => SizeTerm::Fixed(scalar.width()),
             Self::Bytes(bytes) => SizeTerm::Expr(bytes.len.clone()),
             Self::ScalarArray(array) => SizeTerm::Scaled(array.len.clone(), array.element.width()),
@@ -465,6 +491,9 @@ impl Schema {
             matches!(
                 field.kind,
                 FieldKind::RawBytes(_) | FieldKind::Array(_) | FieldKind::Flag(_)
+            ) || matches!(
+                &field.kind,
+                FieldKind::Scalar(scalar) if scalar.is_variable()
             ) || matches!(
                 field.kind,
                 FieldKind::Nested(NestedField {

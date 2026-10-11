@@ -1375,6 +1375,18 @@ impl EnumSchema {
                 }
                 unknown_seen = true;
             }
+            for field in &variant.fields {
+                if let Some(attribute) = field
+                    .attrs
+                    .iter()
+                    .find(|attribute| attribute.path().is_ident("wire"))
+                {
+                    return Err(syn::Error::new_spanned(
+                        attribute,
+                        "enum body fields do not accept wire attributes; declare them on the body schema",
+                    ));
+                }
+            }
             let (body, unit) = match variant.fields {
                 Fields::Unit if !unknown => (parse_quote!(()), true),
                 Fields::Unnamed(fields) if fields.unnamed.len() == 1 => (
@@ -1478,6 +1490,14 @@ fn parse_item_attributes(
             continue;
         }
         attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("uleb128")
+                || meta.path.is_ident("sleb128")
+                || meta.path.is_ident("vu128")
+                || meta.path.is_ident("zigzag")
+            {
+                let name = meta.path.get_ident().expect("recognized integer attribute");
+                return Err(meta.error(format!("enum selectors cannot use `{name}`")));
+            }
             if meta.path.is_ident("selector") {
                 if selector.is_some() {
                     return Err(meta.error("duplicate selector representation"));
@@ -1516,6 +1536,14 @@ fn parse_variant_attributes(attributes: &[syn::Attribute]) -> syn::Result<(Optio
             continue;
         }
         attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("uleb128")
+                || meta.path.is_ident("sleb128")
+                || meta.path.is_ident("vu128")
+                || meta.path.is_ident("zigzag")
+            {
+                let name = meta.path.get_ident().expect("recognized integer attribute");
+                return Err(meta.error(format!("enum variants cannot use `{name}`")));
+            }
             if meta.path.is_ident("value") {
                 if value.is_some() {
                     return Err(meta.error("duplicate enum selector value"));

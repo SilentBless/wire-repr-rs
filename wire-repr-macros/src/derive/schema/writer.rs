@@ -5,6 +5,10 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, TypeParam, parse_quote};
 
+use super::integer::{
+    progressive_expansions, render_count_patch, render_length_patch, retained_controller_offsets,
+    scalar_bytes, variable_controllers,
+};
 use super::model::{DynamicExtent, FieldKind, LayoutOffset, Position, Schema, SizeTerm};
 use super::write_fields::{
     Slot, SlotKind, choice_final_ident, choice_start_ident, choice_trait_ident, convert_to_wire,
@@ -25,13 +29,18 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
     let original_arguments = generic_arguments(&schema.generics);
     let state_markers = slots.iter().map(|slot| &slot.state).collect::<Vec<_>>();
     let bit_controller_states = bit_controller_states(schema);
-    let dynamic_count_offsets = dynamic_count_offsets(schema);
+    let dynamic_count_offsets = retained_controller_offsets(schema);
     let count_offset_fields = dynamic_count_offsets
         .iter()
         .map(|(_, state)| quote!(#state: usize,));
     let count_offset_initializers = dynamic_count_offsets
         .iter()
         .map(|(_, state)| quote!(#state: 0,));
+    let controller_values = variable_controllers(schema)
+        .map(|field| private_ident(schema, &format!("{}_controller_value", field.name.unraw())))
+        .collect::<Vec<_>>();
+    let controller_value_fields = controller_values.iter().map(|state| quote!(#state: usize,));
+    let controller_value_initializers = controller_values.iter().map(|state| quote!(#state: 0,));
     let bit_controller_fields = bit_controller_states
         .iter()
         .map(|(_, state, ty)| quote!(#state: #ty,));
@@ -91,6 +100,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
             writer: #runtime::Writer<#output>,
             #(#bit_controller_fields)*
             #(#count_offset_fields)*
+            #(#controller_value_fields)*
             #marker: ::core::marker::PhantomData<
                 fn() -> (#self_type, #(#state_markers,)*)
             >,
@@ -104,6 +114,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
                     writer: #runtime::Writer::new(output),
                     #(#bit_controller_initializers)*
                     #(#count_offset_initializers)*
+                    #(#controller_value_initializers)*
                     #marker: ::core::marker::PhantomData,
                 }
             }
@@ -128,7 +139,10 @@ fn render_setters(
     let (conversion_names, nested_names) = writer_error_names(schema);
     let has_conversions = conversion_names.iter().any(Option::is_some);
     let bit_controller_states = bit_controller_states(schema);
-    let dynamic_count_offsets = dynamic_count_offsets(schema);
+    let dynamic_count_offsets = retained_controller_offsets(schema);
+    let controller_values = variable_controllers(schema)
+        .map(|field| private_ident(schema, &format!("{}_controller_value", field.name.unraw())))
+        .collect::<Vec<_>>();
     let mut rendered = Vec::new();
 
     for (target_index, target) in slots.iter().enumerate() {
@@ -223,11 +237,15 @@ fn render_setters(
         let count_offset_assignments = dynamic_count_offsets
             .iter()
             .map(|(_, state)| quote!(#state: self.#state,));
+        let controller_value_assignments = controller_values
+            .iter()
+            .map(|state| quote!(#state: self.#state,));
         let assignments = quote! {
             #writer_name {
                 writer: self.writer,
                 #(#bit_controller_assignments)*
                 #(#count_offset_assignments)*
+                #(#controller_value_assignments)*
                 #marker: ::core::marker::PhantomData,
             }
         };
@@ -237,8 +255,8 @@ fn render_setters(
                 let schema_error =
                     writer_error_type(schema, &error_name, has_conversions, None, runtime);
                 let wire_ty = scalar_type_tokens(scalar.wire_type);
-                let encode = to_bytes_method(scalar.endian);
                 let encoded = private_ident(schema, &format!("{}_encoded", field.unraw()));
+                let bytes = scalar_bytes(scalar, &encoded, runtime);
                 let write = if scalar.value_type.is_converted() {
                     let conversion = convert_to_wire(scalar, &value, &wire_ty);
                     let variant = conversion_names[physical_index]
@@ -253,12 +271,12 @@ fn render_setters(
                                 }),
                             )
                         })?;
-                        self.writer.write_at(#offset_local, &#encoded.#encode())?;
+                        self.writer.write_at(#offset_local, #bytes)?;
                     }
                 } else {
                     quote! {
                         let #encoded: #wire_ty = #value;
-                        self.writer.write_at(#offset_local, &#encoded.#encode())?;
+                        self.writer.write_at(#offset_local, #bytes)?;
                     }
                 };
                 let (impl_params, _, impl_where) = impl_generics.split_for_impl();
@@ -381,25 +399,6 @@ fn render_setters(
                     .find(|(name, _, _)| *name == projection.controller)
                     .map(|(_, state, _)| state)
                     .expect("bit controller has retained writer state");
-                let returned_controller_assignments =
-                    bit_controller_states.iter().map(|(_, state, _)| {
-                        if state == controller_state {
-                            quote!(#state: raw,)
-                        } else {
-                            quote!(#state: self.#state,)
-                        }
-                    });
-                let returned_count_offsets = dynamic_count_offsets
-                    .iter()
-                    .map(|(_, state)| quote!(#state: self.#state,));
-                let returned = quote! {
-                    #writer_name {
-                        writer: self.writer,
-                        #(#returned_controller_assignments)*
-                        #(#returned_count_offsets)*
-                        #marker: ::core::marker::PhantomData,
-                    }
-                };
                 let (impl_params, _, impl_where) = impl_generics.split_for_impl();
                 rendered.push(quote! {
                     impl #impl_params #current_writer #impl_where {
@@ -436,7 +435,8 @@ fn render_setters(
                             let raw = (raw & !shifted_mask)
                                 | (((part as #controller_ty) << #start) & shifted_mask);
                             self.writer.write_at(controller_offset, &raw.#encode())?;
-                            Ok(#returned)
+                            self.#controller_state = raw;
+                            Ok(#assignments)
                         }
                     }
                 });
@@ -835,10 +835,10 @@ fn render_finish(
                 FieldKind::Scalar(scalar) => {
                     let value_ty = value_type_tokens(&scalar.value_type);
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
-                    let encode = to_bytes_method(scalar.endian);
                     if let Some(variant) = conversion_variant {
                         let semantic = private_ident(schema, &format!("constant_{index}_semantic"));
                         let encoded = private_ident(schema, &format!("constant_{index}_encoded"));
+                        let bytes = scalar_bytes(scalar, &encoded, runtime);
                         let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
                         quote! {
                             #offset_binding
@@ -853,13 +853,15 @@ fn render_finish(
                                     ),
                                 )
                             })?;
-                            self.writer.write_at(#offset_local, &#encoded.#encode())?;
+                            self.writer.write_at(#offset_local, #bytes)?;
                         }
                     } else {
+                        let encoded = private_ident(schema, &format!("constant_{index}_encoded"));
+                        let bytes = scalar_bytes(scalar, &encoded, runtime);
                         quote! {
                             #offset_binding
-                            let encoded: #wire_ty = #constant;
-                            self.writer.write_at(#offset_local, &encoded.#encode())?;
+                            let #encoded: #wire_ty = #constant;
+                            self.writer.write_at(#offset_local, #bytes)?;
                         }
                     }
                 }
@@ -937,6 +939,7 @@ fn render_finish(
     } else {
         TokenStream::new()
     };
+    let prefix_expansions = progressive_expansions(schema, runtime);
     let (impl_params, _, impl_where) = impl_generics.split_for_impl();
 
     quote! {
@@ -955,6 +958,7 @@ fn render_finish(
                 #ensure_total
                 #(#constant_writes)*
                 #(#computed_placeholders)*
+                #(#prefix_expansions)*
                 #(#computed_patches)*
                 Ok(self.writer.finish())
             }
@@ -1081,21 +1085,21 @@ fn render_pending_fields(
         .iter()
         .enumerate()
         .filter_map(|(relative_index, field)| {
-            let dynamic_count = schema.is_count_controller(&field.name)
-                && field
-                    .offset
-                    .terms
-                    .iter()
-                    .any(|term| matches!(term, SizeTerm::Dynamic));
-            if dynamic_count {
+            let retained_controller = retained_controller_offsets(schema)
+                .into_iter()
+                .find(|(controller, _)| *controller == field.name);
+            if let Some((_, state)) = retained_controller {
                 let index = start + relative_index;
-                let offset = private_ident(schema, &format!("pending_count_{index}_offset"));
-                let state = private_ident(schema, &format!("{}_count_offset", field.name.unraw()));
+                let offset = private_ident(schema, &format!("pending_controller_{index}_offset"));
                 let geometry = render_writer_start(schema, field, &offset, error, runtime);
                 let FieldKind::Scalar(scalar) = &field.kind else {
                     unreachable!("validated count controller is scalar")
                 };
-                let width = scalar.width();
+                let width = if scalar.is_variable() {
+                    1
+                } else {
+                    scalar.width()
+                };
                 return Some(quote! {
                     #geometry
                     self.writer.write_at(#offset, &[0u8; #width])?;
@@ -1110,12 +1114,12 @@ fn render_pending_fields(
                 FieldKind::Scalar(scalar) => {
                     let value_ty = value_type_tokens(&scalar.value_type);
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
-                    let encode = to_bytes_method(scalar.endian);
                     if let Some(variant) = &conversion_names[index] {
                         let semantic =
                             private_ident(schema, &format!("pending_constant_{index}_semantic"));
                         let encoded =
                             private_ident(schema, &format!("pending_constant_{index}_encoded"));
+                        let bytes = scalar_bytes(scalar, &encoded, runtime);
                         let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
                         quote! {
                             #geometry
@@ -1130,13 +1134,16 @@ fn render_pending_fields(
                                     ),
                                 )
                             })?;
-                            self.writer.write_at(#offset, &#encoded.#encode())?;
+                            self.writer.write_at(#offset, #bytes)?;
                         }
                     } else {
+                        let value =
+                            private_ident(schema, &format!("pending_constant_{index}_value"));
+                        let bytes = scalar_bytes(scalar, &value, runtime);
                         quote! {
                             #geometry
-                            let value: #wire_ty = #constant;
-                            self.writer.write_at(#offset, &value.#encode())?;
+                            let #value: #wire_ty = #constant;
+                            self.writer.write_at(#offset, #bytes)?;
                         }
                     }
                 }
@@ -1267,119 +1274,6 @@ fn render_writer_start(
         if #offset > written {
             self.writer.fill_at(written, #offset - written, 0)?;
         }
-    }
-}
-
-fn render_length_patch(
-    schema: &Schema,
-    controller: &syn::Ident,
-    dependent: &syn::Ident,
-    length: TokenStream,
-    error: &syn::Ident,
-    runtime: &TokenStream,
-) -> TokenStream {
-    let controller_field = schema
-        .fields
-        .iter()
-        .find(|field| field.name == *controller)
-        .expect("validated length controller");
-    let FieldKind::Scalar(scalar) = &controller_field.kind else {
-        unreachable!("validated length controller is scalar")
-    };
-    let controller_name = controller.unraw().to_string();
-    let controller_offset = builder_offset(&controller_field.offset, runtime);
-    let wire_ty = scalar_type_tokens(scalar.wire_type);
-    let encode = to_bytes_method(scalar.endian);
-    let decode = super::from_bytes_method(scalar.endian);
-    let is_first = schema
-        .length_dependents(controller)
-        .next()
-        .is_some_and(|field| field.name == *dependent);
-    if is_first {
-        quote! {
-            let controller_offset = #controller_offset.ok_or_else(|| {
-                #runtime::WriteError::Schema(
-                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
-                )
-            })?;
-            let controller_value = #wire_ty::try_from(#length).map_err(|_| {
-                #runtime::WriteError::Schema(
-                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
-                )
-            })?;
-            self.writer
-                .write_at(controller_offset, &controller_value.#encode())?;
-        }
-    } else {
-        quote! {
-            let controller_offset = #controller_offset.ok_or_else(|| {
-                #runtime::WriteError::Schema(
-                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
-                )
-            })?;
-            let controller_bytes = self.writer
-                .read_at::<{ ::core::mem::size_of::<#wire_ty>() }>(controller_offset)
-                .ok_or_else(|| #runtime::WriteError::Schema(
-                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
-                ))?;
-            let expected = usize::try_from(#wire_ty::#decode(controller_bytes)).map_err(|_| {
-                #runtime::WriteError::Schema(
-                    #error::Layout(#runtime::LayoutError { field: #controller_name }),
-                )
-            })?;
-            let actual = #length;
-            if actual != expected {
-                return Err(#runtime::WriteError::Schema(#error::LengthConflict {
-                    controller: #controller_name,
-                    expected,
-                    actual,
-                }));
-            }
-        }
-    }
-}
-fn render_count_patch(
-    schema: &Schema,
-    controller: &syn::Ident,
-    count: TokenStream,
-    error: &syn::Ident,
-    runtime: &TokenStream,
-) -> TokenStream {
-    let controller_field = schema
-        .fields
-        .iter()
-        .find(|field| field.name == *controller)
-        .expect("validated item count controller");
-    let FieldKind::Scalar(scalar) = &controller_field.kind else {
-        unreachable!("validated item count controller is scalar")
-    };
-    let controller_name = controller.unraw().to_string();
-    let controller_offset = if controller_field
-        .offset
-        .terms
-        .iter()
-        .any(|term| matches!(term, SizeTerm::Dynamic))
-    {
-        let state = private_ident(schema, &format!("{}_count_offset", controller.unraw()));
-        quote!(Some(self.#state))
-    } else {
-        builder_offset(&controller_field.offset, runtime)
-    };
-    let wire_ty = scalar_type_tokens(scalar.wire_type);
-    let encode = to_bytes_method(scalar.endian);
-    quote! {
-        let controller_offset = #controller_offset.ok_or_else(|| {
-            #runtime::WriteError::Schema(
-                #error::Layout(#runtime::LayoutError { field: #controller_name }),
-            )
-        })?;
-        let controller_value = #wire_ty::try_from(#count).map_err(|_| {
-            #runtime::WriteError::Schema(
-                #error::Layout(#runtime::LayoutError { field: #controller_name }),
-            )
-        })?;
-        self.writer
-            .write_at(controller_offset, &controller_value.#encode())?;
     }
 }
 
@@ -1541,27 +1435,6 @@ fn bit_controller_states(schema: &Schema) -> Vec<(syn::Ident, syn::Ident, TokenS
                 ),
                 scalar_type_tokens(scalar.wire_type),
             ))
-        })
-        .collect()
-}
-
-fn dynamic_count_offsets(schema: &Schema) -> Vec<(syn::Ident, syn::Ident)> {
-    schema
-        .fields
-        .iter()
-        .filter(|field| {
-            schema.is_count_controller(&field.name)
-                && field
-                    .offset
-                    .terms
-                    .iter()
-                    .any(|term| matches!(term, SizeTerm::Dynamic))
-        })
-        .map(|field| {
-            (
-                field.name.clone(),
-                private_ident(schema, &format!("{}_count_offset", field.name.unraw())),
-            )
         })
         .collect()
 }
