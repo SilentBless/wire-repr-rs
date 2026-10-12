@@ -543,9 +543,10 @@ into one consumer. A startup-only address barrier retains every entry while samp
 calls. Artifact retention must not disable ordinary release dead-code elimination and change
 hot-path optimization. Pinned Rizin 0.9.1 analyzes the final linked ELF, Mach-O, and PE role artifacts;
 Windows builds additionally load their generated PDB. Artifact evidence keeps named linker calls
-distinct from unresolved indirect dispatch. On x86-64, an import cached in a callee-saved register
-remains a named linker call only with proven provenance inside one basic block. Register-alias
-writes, unknown instruction semantics, and block boundaries discard that provenance.
+distinct from unresolved indirect dispatch. On x86-64, a named import loaded or copied through
+full-width registers remains a named linker call only with proven provenance inside one basic
+block. Calls discard caller-saved provenance. Register-alias writes discard the corresponding
+source; unknown instructions, unknown calls, and block boundaries discard all provenance.
 Linked symbol sizes or the next linked symbol bound every known callee as well as each entry point;
 analysis must not absorb a following function after a non-returning panic branch.
 Contradictory linked bounds stop analysis rather than truncating a body or counting neighboring

@@ -10,6 +10,8 @@ All notable public changes to `wire-repr` are recorded here.
   proves a leading extent. Parents retain validated child state and exact boundaries without
   reframing getters. Progressive and detached writers use each child's actual emitted length,
   including write-only manual children, and preserve following controller and computed patches.
+- Preserve proven x86-64 import provenance through full-width register copies inside one
+  basic block. Calls invalidate caller-saved sources, and unknown effects remain unresolved.
 
 ## [1.1.1] - 2026-10-12
 
