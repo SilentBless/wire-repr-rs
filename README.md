@@ -163,6 +163,8 @@ overridden from the command line.
 - **Logical types:** `as = Physical` with checked bidirectional `TryFrom`, including `NonZero*` and
   user newtypes.
 - **Geometry:** bounded `wire::Bytes`, terminal `rest`, padding, alignment, and forward placement.
+- **Nested children:** fixed, explicitly bounded, or self-delimiting variable representations,
+  including consecutive children before later fields.
 - **Dependencies:** shared length controllers, conditional groups, flags, inline bit projections,
   and counted runtime arrays.
 - **Static enums:** selector-only unit variants, body variants, and exact unknown-body forwarding.

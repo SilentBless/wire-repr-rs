@@ -398,8 +398,17 @@ impl WireWrite<u32> for LittleEndianWord {
 }
 ```
 
-A manual `FIXED_SIZE` allows later physical fields. Otherwise the child must be terminal or bounded
-by an explicit byte controller. Manual writer errors may occur after partial output.
+A nonterminal read child may be fixed-width, explicitly byte-bounded, or self-delimiting through
+[`WireView::LEADING_EXTENT`]. In the last case the parent frames it once and retains its state and
+the required boundaries; getters do not reframe it. A child without any such boundary remains
+terminal-only unless an explicit byte controller bounds it.
+
+Writers use the actual bytes emitted by a variable child before writing subsequent fields. This
+works with [`WireBuilder`] and [`WireWrite`] alone; no read capability or preliminary encoding pass
+is required. Progressive setters whose offsets depend on a variable child must follow physical
+order; calling them before the necessary earlier setters returns a field-site [`LayoutError`].
+Fixed-size instantiations keep their static offsets and permit reordered setters. Manual writer
+errors may occur after partial output.
 
 ## Error contract
 

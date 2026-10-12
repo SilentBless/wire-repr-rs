@@ -4,6 +4,13 @@ All notable public changes to `wire-repr` are recorded here.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-13
+
+- Compose unbounded variable-width children before later fields when their read capability
+  proves a leading extent. Parents retain validated child state and exact boundaries without
+  reframing getters. Progressive and detached writers use each child's actual emitted length,
+  including write-only manual children, and preserve following controller and computed patches.
+
 ## [1.1.1] - 2026-10-12
 
 - Allow signed `counted_by` controllers across native `i8`, `i16`, `i32`, `i64`, and `i128`, plus
@@ -90,7 +97,7 @@ The first stable release of `wire-repr`.
 - Executable DNS, NTP, Telegram MTProto, and recursive expression-VM showcases exercise real
   network bytes, computed fields, schema validators, runtime collections, and recursive writers.
 
-[Unreleased]: https://github.com/SilentBless/wire-repr-rs/compare/v1.1.1...master
+[Unreleased]: https://github.com/SilentBless/wire-repr-rs/compare/v1.2.0...master
 [1.0.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.0
 [1.0.1]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.1
 [1.0.2]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.2
@@ -98,3 +105,4 @@ The first stable release of `wire-repr`.
 [1.0.4]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.0.4
 [1.1.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.1.0
 [1.1.1]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.1.1
+[1.2.0]: https://github.com/SilentBless/wire-repr-rs/releases/tag/v1.2.0

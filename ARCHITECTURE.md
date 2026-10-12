@@ -93,7 +93,7 @@ self-references, runtime schema objects, dynamic dispatch, or per-item indexes.
 
 Generated descriptors and getters specialize by geometry:
 
-- fixed and suffix-derived offsets occupy no state;
+- syntactically fixed and suffix-derived offsets occupy no state;
 - length-bounded and terminal children expose direct ranges;
 - homogeneous prefix grammars use counters;
 - sequential dynamic geometry retains only endpoints actually discovered;
@@ -125,10 +125,20 @@ child getter re-frames its already-proven exact range. Progressive recursive wri
 corresponding body grammar but transfer one output cursor by value through consuming typestate
 stages; they retain no recursive value tree.
 
-The current fixed-layout vertical cannot inspect a generic child's associated fixed-size capability
-during macro expansion. Instantiating a nonterminal child whose `FIXED_SIZE` is `None` therefore
-returns a field-site `LayoutUnavailable`/`LayoutError` from framing or writing; it never panics.
-The demand-geometry vertical replaces that capability error with lazy endpoint discovery.
+An unbounded nonterminal child uses its associated `FIXED_SIZE` when available; otherwise its
+read capability must prove `LEADING_EXTENT`. The parent calls `frame` once, checks the consumed
+range, and retains child state and only the boundaries needed by later getters and selections.
+The final child boundary in an implicit layout can be recovered from the represented length
+minus a fixed suffix. Earlier potentially variable child boundaries require retained endpoints,
+even when a generic instantiation turns out to be fixed-width. Fixed capability expressions and
+static offset specialization remain unchanged. A nonleading child still needs an explicit bound
+or a terminal position.
+
+Both writers derive subsequent geometry from each child's actual emitted length, without a
+measurement pass, staging buffer, or `WireView` requirement. Progressive setters with an unknown
+nested offset check that earlier setters have run before invoking user code or writing pending
+fields; fixed-size instantiations keep reordered setters. Controller offsets and computed
+destinations after a variable child are retained for the existing patch passes.
 
 Manual `WireView` implementations use the same contract and are `unsafe impl`s. They explicitly
 separate `frame` from `from_validated_parts` and certify that owned, reference-free state remains
@@ -515,11 +525,12 @@ Every shipped representation class must have generated, idiomatic, and best-safe
 with one semantic oracle. Optional unsafe implementations are informational lower bounds only.
 Workload formulas own their hard gates and optimization-attention policy; outperforming idiomatic
 code is a success, while a gap to best-safe remains visible without automatically failing CI.
-The current mandatory corpus has seventeen discovered zones and seventy cases: fixed scalars,
+The current mandatory corpus has eighteen discovered zones and seventy-five cases: fixed scalars,
 ULEB128/SLEB128/ZigZag/VU128 compound decode/build/copy with variable byte controllers,
 fixed primitive arrays, constants, built-in and generic `TryFrom` conversions, one generic nested
 child, a four-level compound generic lattice, fixed byte arrays with multiple nested children,
-dynamic geometry, conditional controllers, runtime collection decode/build/copy and detached nested
+dynamic geometry, self-delimiting nested-child decode/build/detached-build/copy and malformed-input
+handling, conditional controllers, runtime collection decode/build/copy and detached nested
 collection build, static body and
 unit enum decode/build/copy, nominal and inline bitfields, fragmented and nested physical
 selections, fixed and dynamic computed fields, fixed and variable homogeneous views,
@@ -595,9 +606,9 @@ interpreter. Keep each decision with its owner:
 | Fixed-width capability expressions, static offsets and recursive scalar placement | `schema/geometry.rs` |
 | Framing, retained views and physical field routes | `schema/view.rs` and `schema/view_fields.rs`; runtime `wire-repr/src/schema.rs` and `schema/selection.rs` |
 | Counted arrays, homogeneous sequences and heterogeneous cursors | Runtime `schema/array.rs` and `schema/sequence.rs` |
-| Write slots, conversions and conditional choice names | `schema/write_fields.rs`; detached and progressive emission stay in `schema/builder.rs` and `schema/writer.rs` |
+| Write slots, conversions and conditional choice names | `schema/write_fields.rs`; detached and progressive emission stay in `schema/builder.rs` and `schema/writer.rs`, with automatic progressive fields in `schema/writer/automatic.rs` |
 | Scalar byte encodings and prefix/controller lowering | Runtime `integer/`; macro `schema/integer.rs` and `schema/integer/controller.rs`; output expansion `output/integer.rs` |
-| Computed expression arguments and patches for both writers | `schema/computed.rs`; the output cursor and partial-write behavior stay in runtime `output.rs` |
+| Computed expression arguments, retained destination offsets and patches for both writers | `schema/computed.rs`; the output cursor and partial-write behavior stay in runtime `output.rs` |
 | Recursive body grammar and bounded geometry | Macro `schema/recursive*.rs` and runtime `recursive.rs` / `recursive/geometry/` |
 
 Enums and nominal bitfields still have specialized macro entry paths in `schema/enumeration.rs`

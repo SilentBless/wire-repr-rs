@@ -377,3 +377,16 @@ pub struct Set<T>(pub T);
 pub trait IsSet {}
 
 impl<T> IsSet for Set<T> {}
+
+#[doc(hidden)]
+pub trait SlotState {
+    const IS_SET: bool;
+}
+
+impl SlotState for Unset {
+    const IS_SET: bool = false;
+}
+
+impl<T> SlotState for Set<T> {
+    const IS_SET: bool = true;
+}

@@ -3,10 +3,20 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{Expr, ExprCall, ExprPath, Ident, Member};
 
-use super::model::{Computed, FieldKind, Schema};
+use super::model::{self, Computed, FieldKind, Schema, SizeTerm};
 
 pub(super) fn requires_view(computed: &Computed) -> bool {
     !matches!(&computed.expression, Expr::Call(call) if call.args.is_empty())
+}
+
+pub(super) fn computed_offset_state(schema: &Schema, field: &model::Field) -> Option<Ident> {
+    field.kind.computed()?;
+    field
+        .offset
+        .terms
+        .iter()
+        .any(|term| matches!(term, SizeTerm::Nested(_)))
+        .then(|| super::private_ident(schema, &format!("{}_computed_offset", field.name.unraw())))
 }
 
 pub(super) fn render_call(
@@ -173,6 +183,18 @@ pub(super) fn render_patches(
             let name = &field.name;
             let field_name = name.unraw().to_string();
             let offset = super::builder_offset(&field.offset, runtime);
+            let offset = if let Some(retained) = computed_offset_state(schema, field) {
+                match writer {
+                    PatchWriter::Detached { start } => {
+                        quote!((#offset).or_else(|| #retained.checked_sub(#start)))
+                    }
+                    PatchWriter::Progressive => {
+                        quote!((#offset).or(Some(self.#retained)))
+                    }
+                }
+            } else {
+                offset
+            };
             let view = super::private_ident(
                 schema,
                 &format!("{}_computed_view", name.unraw()),

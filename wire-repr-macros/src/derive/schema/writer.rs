@@ -1,3 +1,5 @@
+mod automatic;
+
 use std::collections::BTreeSet;
 
 use proc_macro2::TokenStream;
@@ -5,6 +7,9 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, TypeParam, parse_quote};
 
+use automatic::{render_automatic_fields, render_finish_constants, render_pending_fields};
+
+use super::computed::computed_offset_state;
 use super::integer::{
     progressive_expansions, render_count_patch, render_length_patch, retained_controller_offsets,
     scalar_bytes, variable_controllers,
@@ -16,7 +21,7 @@ use super::write_fields::{
 };
 use super::{
     builder_offset, builder_optional_size, fresh_field_ident, fresh_type_ident, pascal,
-    private_ident, scalar_type_tokens, to_bytes_method, value_type_tokens,
+    private_ident, scalar_type_tokens, to_bytes_method,
 };
 
 pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
@@ -36,6 +41,13 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
     let count_offset_initializers = dynamic_count_offsets
         .iter()
         .map(|(_, state)| quote!(#state: 0,));
+    let computed_offsets = schema
+        .fields
+        .iter()
+        .filter_map(|field| computed_offset_state(schema, field))
+        .collect::<Vec<_>>();
+    let computed_offset_fields = computed_offsets.iter().map(|state| quote!(#state: usize,));
+    let computed_offset_initializers = computed_offsets.iter().map(|state| quote!(#state: 0,));
     let controller_values = variable_controllers(schema)
         .map(|field| private_ident(schema, &format!("{}_controller_value", field.name.unraw())))
         .collect::<Vec<_>>();
@@ -100,6 +112,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
             writer: #runtime::Writer<#output>,
             #(#bit_controller_fields)*
             #(#count_offset_fields)*
+            #(#computed_offset_fields)*
             #(#controller_value_fields)*
             #marker: ::core::marker::PhantomData<
                 fn() -> (#self_type, #(#state_markers,)*)
@@ -114,6 +127,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> TokenStream {
                     writer: #runtime::Writer::new(output),
                     #(#bit_controller_initializers)*
                     #(#count_offset_initializers)*
+                    #(#computed_offset_initializers)*
                     #(#controller_value_initializers)*
                     #marker: ::core::marker::PhantomData,
                 }
@@ -140,6 +154,11 @@ fn render_setters(
     let has_conversions = conversion_names.iter().any(Option::is_some);
     let bit_controller_states = bit_controller_states(schema);
     let dynamic_count_offsets = retained_controller_offsets(schema);
+    let computed_offsets = schema
+        .fields
+        .iter()
+        .filter_map(|field| computed_offset_state(schema, field))
+        .collect::<Vec<_>>();
     let controller_values = variable_controllers(schema)
         .map(|field| private_ident(schema, &format!("{}_controller_value", field.name.unraw())))
         .collect::<Vec<_>>();
@@ -210,7 +229,7 @@ fn render_setters(
                 #error_name::Layout(#runtime::LayoutError { field: #field_name }),
             )
         };
-        let offset_binding = if schema.has_explicit_geometry() {
+        let offset_binding = if schema.has_sequential_geometry() {
             render_writer_start(schema, physical, &offset_local, &error_name, runtime)
         } else if schema.layout_can_fail() {
             quote!(let #offset_local = #offset.ok_or_else(|| #layout_failure)?;)
@@ -219,15 +238,21 @@ fn render_setters(
                 let #offset_local = #offset.expect("validated fixed layout offset");
             )
         };
-        let pending_fields = if schema.has_explicit_geometry() {
-            render_pending_fields(
+        let pending_fields = if schema.has_sequential_geometry() {
+            let readiness =
+                render_nested_geometry_check(schema, physical, slots, &error_name, runtime);
+            let writes = render_pending_fields(
                 schema,
                 physical_index,
                 slots,
                 &conversion_names,
                 &error_name,
                 runtime,
-            )
+            );
+            quote! {
+                #readiness
+                #writes
+            }
         } else {
             TokenStream::new()
         };
@@ -237,6 +262,9 @@ fn render_setters(
         let count_offset_assignments = dynamic_count_offsets
             .iter()
             .map(|(_, state)| quote!(#state: self.#state,));
+        let computed_offset_assignments = computed_offsets
+            .iter()
+            .map(|state| quote!(#state: self.#state,));
         let controller_value_assignments = controller_values
             .iter()
             .map(|state| quote!(#state: self.#state,));
@@ -245,6 +273,7 @@ fn render_setters(
                 writer: self.writer,
                 #(#bit_controller_assignments)*
                 #(#count_offset_assignments)*
+                #(#computed_offset_assignments)*
                 #(#controller_value_assignments)*
                 #marker: ::core::marker::PhantomData,
             }
@@ -279,6 +308,10 @@ fn render_setters(
                         self.writer.write_at(#offset_local, #bytes)?;
                     }
                 };
+                let retain_offset = dynamic_count_offsets
+                    .iter()
+                    .find(|(controller, _)| *controller == physical.name)
+                    .map(|(_, state)| quote!(self.#state = #offset_local;));
                 let (impl_params, _, impl_where) = impl_generics.split_for_impl();
                 rendered.push(quote! {
                     impl #impl_params #current_writer #impl_where {
@@ -297,6 +330,7 @@ fn render_setters(
                             #pending_fields
                             #offset_binding
                             #write
+                            #retain_offset
                             Ok(#assignments)
                         }
                     }
@@ -379,7 +413,7 @@ fn render_setters(
                 let FieldKind::Scalar(controller_scalar) = &controller.kind else {
                     unreachable!("validated bit controller is scalar")
                 };
-                let controller_offset = super::builder_offset(&controller.offset, runtime);
+                let controller_offset = writer_controller_offset(schema, controller, runtime);
                 let controller_ty = scalar_type_tokens(controller_scalar.wire_type);
                 let encode = to_bytes_method(controller_scalar.endian);
                 let start = projection.start;
@@ -626,19 +660,13 @@ fn render_setters(
                 let child_writer = private_ident(schema, &format!("{}_writer", field.unraw()));
                 let create_child = if nested.extent.is_some() {
                     quote!(self.writer.child_at(#offset_local)?)
-                } else if nested.terminal {
+                } else {
                     quote! {
                         match <#ty as #runtime::WireBuilder>::FIXED_SIZE {
                             Some(size) => self.writer.fixed_child_at(#offset_local, size)?,
                             None => self.writer.child_at(#offset_local)?,
                         }
                     }
-                } else {
-                    quote! {{
-                        let size = <#ty as #runtime::WireBuilder>::FIXED_SIZE
-                            .ok_or_else(|| #layout_failure)?;
-                        self.writer.fixed_child_at(#offset_local, size)?
-                    }}
                 };
                 let patch = nested
                     .extent
@@ -802,92 +830,21 @@ fn render_finish(
     let schema_error =
         writer_error_type_from_all(schema, &error_name, has_conversions, &child_errors, runtime);
 
-    let constant_writes = schema
-        .fields
-        .iter()
-        .zip(&conversion_names)
-        .enumerate()
-        .filter_map(|(index, (field, conversion_variant))| {
-            if schema.has_explicit_geometry()
-                && last_slot_physical.is_some_and(|last| index <= last)
-            {
-                return None;
-            }
-            let constant = field.kind.constant()?;
-            let offset = builder_offset(&field.offset, runtime);
-            let offset_local = private_ident(schema, &format!("constant_{index}_offset"));
-            let field_name = field.name.unraw().to_string();
-            let layout_failure = quote! {
-                #runtime::WriteError::Schema(
-                    #error_name::Layout(#runtime::LayoutError { field: #field_name }),
-                )
-            };
-            let offset_binding = if schema.has_explicit_geometry() {
-                render_writer_start(schema, field, &offset_local, &error_name, runtime)
-            } else if schema.layout_can_fail() {
-                quote!(let #offset_local = #offset.ok_or_else(|| #layout_failure)?;)
-            } else {
-                quote!(
-                    let #offset_local = #offset.expect("validated fixed layout offset");
-                )
-            };
-            Some(match &field.kind {
-                FieldKind::Scalar(scalar) => {
-                    let value_ty = value_type_tokens(&scalar.value_type);
-                    let wire_ty = scalar_type_tokens(scalar.wire_type);
-                    if let Some(variant) = conversion_variant {
-                        let semantic = private_ident(schema, &format!("constant_{index}_semantic"));
-                        let encoded = private_ident(schema, &format!("constant_{index}_encoded"));
-                        let bytes = scalar_bytes(scalar, &encoded, runtime);
-                        let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
-                        quote! {
-                            #offset_binding
-                            let #semantic: #value_ty = #constant;
-                            let #encoded: #wire_ty = #conversion.ok_or_else(|| {
-                                #runtime::WriteError::Schema(
-                                    #error_name::#variant(
-                                        #runtime::ScalarBuildConversionError {
-                                            from: stringify!(#value_ty),
-                                            to: stringify!(#wire_ty),
-                                        },
-                                    ),
-                                )
-                            })?;
-                            self.writer.write_at(#offset_local, #bytes)?;
-                        }
-                    } else {
-                        let encoded = private_ident(schema, &format!("constant_{index}_encoded"));
-                        let bytes = scalar_bytes(scalar, &encoded, runtime);
-                        quote! {
-                            #offset_binding
-                            let #encoded: #wire_ty = #constant;
-                            self.writer.write_at(#offset_local, #bytes)?;
-                        }
-                    }
-                }
-                FieldKind::Bytes(_) => {
-                    let ty = &field.ty;
-                    let value = private_ident(schema, &format!("constant_{index}_bytes"));
-                    quote! {
-                        #offset_binding
-                        let #value: #ty = #constant;
-                        self.writer.write_at(#offset_local, &#value)?;
-                    }
-                }
-                FieldKind::RawBytes(_)
-                | FieldKind::ScalarArray(_)
-                | FieldKind::Array(_)
-                | FieldKind::Recursive(_)
-                | FieldKind::Flag(_)
-                | FieldKind::BitProjection(_)
-                | FieldKind::Nested(_) => unreachable!(),
-            })
-        });
+    let constant_writes = render_finish_constants(
+        schema,
+        last_slot_physical,
+        &conversion_names,
+        &error_name,
+        runtime,
+    );
     let computed_placeholders = schema
         .fields
         .iter()
         .filter_map(|field| {
             let computed = field.kind.computed()?;
+            if computed_offset_state(schema, field).is_some() {
+                return None;
+            }
             let _ = computed;
             let FieldKind::Scalar(scalar) = &field.kind else {
                 unreachable!("computed destination is scalar")
@@ -906,6 +863,18 @@ fn render_finish(
             })
         })
         .collect::<Vec<_>>();
+    let trailing_fields = if schema.has_nested_geometry() {
+        render_automatic_fields(
+            schema,
+            last_slot_physical.map_or(0, |index| index + 1),
+            schema.fields.len(),
+            &conversion_names,
+            &error_name,
+            runtime,
+        )
+    } else {
+        TokenStream::new()
+    };
     let computed_patches = super::computed::render_patches(
         schema,
         runtime,
@@ -921,7 +890,20 @@ fn render_finish(
         .is_some_and(|field| !matches!(field.kind, FieldKind::Nested(_)))
     {
         let total = builder_optional_size(schema, runtime);
-        if schema.layout_can_fail() {
+        if schema.has_nested_geometry() {
+            let unavailable = nested_size_unavailable(&schema.size_terms(), runtime);
+            quote! {
+                match #total {
+                    Some(total) => self.writer.ensure(total, total)?,
+                    None if #unavailable => {}
+                    None => {
+                        return Err(#runtime::WriteError::Schema(
+                            #error_name::Layout(#runtime::LayoutError { field: "<finish>" }),
+                        ));
+                    }
+                }
+            }
+        } else if schema.layout_can_fail() {
             quote! {
                 let total = #total.ok_or_else(|| {
                     #runtime::WriteError::Schema(
@@ -956,7 +938,8 @@ fn render_finish(
                 >,
             > {
                 #ensure_total
-                #(#constant_writes)*
+                #trailing_fields
+                #constant_writes
                 #(#computed_placeholders)*
                 #(#prefix_expansions)*
                 #(#computed_patches)*
@@ -1059,112 +1042,82 @@ fn writer_error_type_from_all(
         quote!(#error<#(#errors),*>)
     }
 }
-fn render_pending_fields(
+
+fn nested_geometry_predecessor<'a>(
     schema: &Schema,
-    target_physical_index: usize,
+    field: &super::model::Field,
+    slots: &'a [Slot],
+) -> Option<&'a Slot> {
+    if field.layout.position.is_some()
+        || field
+            .offset
+            .terms
+            .iter()
+            .any(|term| matches!(term, SizeTerm::Dynamic))
+        || !field
+            .offset
+            .terms
+            .iter()
+            .any(|term| matches!(term, SizeTerm::Nested(_)))
+    {
+        return None;
+    }
+    let field_index = schema
+        .fields
+        .iter()
+        .position(|candidate| candidate.name == field.name)
+        .expect("field belongs to schema");
+    slots.iter().rev().find(|slot| {
+        schema.fields[..field_index]
+            .iter()
+            .any(|candidate| candidate.name == slot.field)
+    })
+}
+
+fn render_nested_geometry_check(
+    schema: &Schema,
+    field: &super::model::Field,
     slots: &[Slot],
-    conversion_names: &[Option<syn::Ident>],
     error: &syn::Ident,
     runtime: &TokenStream,
 ) -> TokenStream {
-    let target_slot_index = slots
-        .iter()
-        .position(|slot| slot.field == schema.fields[target_physical_index].name)
-        .expect("target field has one writer slot");
-    let previous_physical_index = target_slot_index
-        .checked_sub(1)
-        .and_then(|index| slots.get(index))
-        .and_then(|slot| {
-            schema
-                .fields
-                .iter()
-                .position(|field| field.name == slot.field)
-        });
-    let start = previous_physical_index.map_or(0, |index| index + 1);
-    let writes = schema.fields[start..target_physical_index]
-        .iter()
-        .enumerate()
-        .filter_map(|(relative_index, field)| {
-            let retained_controller = retained_controller_offsets(schema)
-                .into_iter()
-                .find(|(controller, _)| *controller == field.name);
-            if let Some((_, state)) = retained_controller {
-                let index = start + relative_index;
-                let offset = private_ident(schema, &format!("pending_controller_{index}_offset"));
-                let geometry = render_writer_start(schema, field, &offset, error, runtime);
-                let FieldKind::Scalar(scalar) = &field.kind else {
-                    unreachable!("validated count controller is scalar")
-                };
-                let width = if scalar.is_variable() {
-                    1
-                } else {
-                    scalar.width()
-                };
-                return Some(quote! {
-                    #geometry
-                    self.writer.write_at(#offset, &[0u8; #width])?;
-                    self.#state = #offset;
-                });
-            }
-            let constant = field.kind.constant()?;
-            let index = start + relative_index;
-            let offset = private_ident(schema, &format!("pending_constant_{index}_offset"));
-            let geometry = render_writer_start(schema, field, &offset, error, runtime);
-            Some(match &field.kind {
-                FieldKind::Scalar(scalar) => {
-                    let value_ty = value_type_tokens(&scalar.value_type);
-                    let wire_ty = scalar_type_tokens(scalar.wire_type);
-                    if let Some(variant) = &conversion_names[index] {
-                        let semantic =
-                            private_ident(schema, &format!("pending_constant_{index}_semantic"));
-                        let encoded =
-                            private_ident(schema, &format!("pending_constant_{index}_encoded"));
-                        let bytes = scalar_bytes(scalar, &encoded, runtime);
-                        let conversion = convert_to_wire(scalar, &semantic, &wire_ty);
-                        quote! {
-                            #geometry
-                            let #semantic: #value_ty = #constant;
-                            let #encoded: #wire_ty = #conversion.ok_or_else(|| {
-                                #runtime::WriteError::Schema(
-                                    #error::#variant(
-                                        #runtime::ScalarBuildConversionError {
-                                            from: stringify!(#value_ty),
-                                            to: stringify!(#wire_ty),
-                                        },
-                                    ),
-                                )
-                            })?;
-                            self.writer.write_at(#offset, #bytes)?;
-                        }
-                    } else {
-                        let value =
-                            private_ident(schema, &format!("pending_constant_{index}_value"));
-                        let bytes = scalar_bytes(scalar, &value, runtime);
-                        quote! {
-                            #geometry
-                            let #value: #wire_ty = #constant;
-                            self.writer.write_at(#offset, #bytes)?;
-                        }
-                    }
-                }
-                FieldKind::Bytes(_) => {
-                    let ty = &field.ty;
-                    quote! {
-                        #geometry
-                        let value: #ty = #constant;
-                        self.writer.write_at(#offset, &value)?;
-                    }
-                }
-                FieldKind::RawBytes(_)
-                | FieldKind::ScalarArray(_)
-                | FieldKind::Array(_)
-                | FieldKind::Recursive(_)
-                | FieldKind::Flag(_)
-                | FieldKind::BitProjection(_)
-                | FieldKind::Nested(_) => unreachable!(),
-            })
-        });
-    quote!(#(#writes)*)
+    let Some(previous) = nested_geometry_predecessor(schema, field, slots) else {
+        return TokenStream::new();
+    };
+    let state = &previous.state;
+    let static_offset = builder_offset(&field.offset, runtime);
+    let field_name = field.name.unraw().to_string();
+    quote! {
+        if #static_offset.is_none() && !<#state as #runtime::__private::SlotState>::IS_SET {
+            return Err(#runtime::WriteError::Schema(
+                #error::Layout(#runtime::LayoutError { field: #field_name }),
+            ));
+        }
+    }
+}
+
+fn writer_controller_offset(
+    schema: &Schema,
+    field: &super::model::Field,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let offset = builder_offset(&field.offset, runtime);
+    if let Some((_, state)) = retained_controller_offsets(schema)
+        .into_iter()
+        .find(|(controller, _)| *controller == field.name)
+    {
+        quote!(#offset.or(Some(self.#state)))
+    } else {
+        offset
+    }
+}
+
+fn nested_size_unavailable(terms: &[SizeTerm], runtime: &TokenStream) -> TokenStream {
+    let children = terms.iter().filter_map(|term| match term {
+        SizeTerm::Nested(ty) => Some(ty),
+        _ => None,
+    });
+    quote!(false #(|| <#children as #runtime::WireBuilder>::FIXED_SIZE.is_none())*)
 }
 
 fn render_writer_start(
@@ -1181,6 +1134,12 @@ fn render_writer_start(
         .terms
         .iter()
         .any(|term| matches!(term, SizeTerm::Dynamic));
+    let has_nested_prefix = field
+        .offset
+        .terms
+        .iter()
+        .any(|term| matches!(term, SizeTerm::Nested(_)));
+    let nested_unavailable = nested_size_unavailable(&field.offset.terms, runtime);
     let (base_setup, requires_forward) = match &field.layout.position {
         Some(Position::Static(position)) => (quote!(let mut #offset: usize = #position;), true),
         Some(Position::Field(controller)) => {
@@ -1192,7 +1151,7 @@ fn render_writer_start(
             let FieldKind::Scalar(scalar) = &controller_field.kind else {
                 unreachable!("validated position controller is scalar")
             };
-            let controller_offset = builder_offset(&controller_field.offset, runtime);
+            let controller_offset = writer_controller_offset(schema, controller_field, runtime);
             let width = scalar.width();
             let wire_ty = scalar_type_tokens(scalar.wire_type);
             let decode = super::from_bytes_method(scalar.endian);
@@ -1218,6 +1177,20 @@ fn render_writer_start(
             )
         }
         None if has_dynamic_prefix => (quote!(let mut #offset = self.writer.position();), true),
+        None if has_nested_prefix => (
+            quote! {
+                let mut #offset = match #static_offset {
+                    Some(offset) => offset,
+                    None if #nested_unavailable => self.writer.position(),
+                    None => {
+                        return Err(#runtime::WriteError::Schema(
+                            #error::Layout(#runtime::LayoutError { field: #field_name }),
+                        ));
+                    }
+                };
+            },
+            false,
+        ),
         None => (
             quote! {
                 let mut #offset = #static_offset.ok_or_else(|| {
@@ -1302,7 +1275,7 @@ fn render_presence_patch(
         unreachable!("validated presence controller is scalar")
     };
     let controller_name = controller.unraw().to_string();
-    let controller_offset = builder_offset(&controller_field.offset, runtime);
+    let controller_offset = writer_controller_offset(schema, controller_field, runtime);
     let wire_ty = scalar_type_tokens(scalar.wire_type);
     let encode = to_bytes_method(scalar.endian);
     quote! {
@@ -1362,6 +1335,13 @@ fn add_geometry_state_bounds(
                 .predicates
                 .push(parse_quote!(#state: #runtime::__private::IsSet));
         }
+    }
+    if let Some(previous) = nested_geometry_predecessor(schema, field, slots) {
+        let state = &previous.state;
+        generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#state: #runtime::__private::SlotState));
     }
 }
 

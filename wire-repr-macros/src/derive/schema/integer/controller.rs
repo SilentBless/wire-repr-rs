@@ -2,7 +2,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::ext::IdentExt;
 
-use super::super::model::{Field, FieldKind, Schema, SizeTerm};
+use super::super::model::{Field, FieldKind, Position, Schema, SizeTerm};
 use super::super::{
     builder_offset, private_ident, scalar_type_tokens, to_bytes_method, value_type_tokens,
 };
@@ -114,13 +114,20 @@ pub(in super::super) fn retained_controller_offsets(
         .fields
         .iter()
         .filter(|field| {
-            (schema.is_count_controller(&field.name) || schema.is_length_controller(&field.name))
+            (schema.is_count_controller(&field.name)
+                || schema.is_length_controller(&field.name)
+                || schema.is_presence_controller(&field.name)
+                || schema.is_bit_controller(&field.name)
+                || schema.fields.iter().any(|dependent| {
+                    matches!(&dependent.layout.position,
+                        Some(Position::Field(name)) if *name == field.name)
+                }))
                 && (matches!(&field.kind, FieldKind::Scalar(scalar) if scalar.is_variable())
                     || field
                         .offset
                         .terms
                         .iter()
-                        .any(|term| matches!(term, SizeTerm::Dynamic)))
+                        .any(|term| matches!(term, SizeTerm::Dynamic | SizeTerm::Nested(_))))
         })
         .map(|field| {
             (
@@ -178,11 +185,12 @@ pub(in super::super) fn render_length_patch(
             }
         };
     }
+    let static_offset = builder_offset(&controller_field.offset, runtime);
     let controller_offset = retained_controller_offsets(schema)
         .into_iter()
         .find(|(name, _)| name == controller)
-        .map(|(_, state)| quote!(Some(self.#state)))
-        .unwrap_or_else(|| builder_offset(&controller_field.offset, runtime));
+        .map(|(_, state)| quote!((#static_offset).or(Some(self.#state))))
+        .unwrap_or(static_offset);
     let wire_ty = scalar_type_tokens(scalar.wire_type);
     let encode = to_bytes_method(scalar.endian);
     let decode = super::super::from_bytes_method(scalar.endian);
@@ -273,11 +281,12 @@ pub(in super::super) fn render_count_patch(
             self.#state = actual;
         };
     }
+    let static_offset = builder_offset(&controller_field.offset, runtime);
     let controller_offset = retained_controller_offsets(schema)
         .into_iter()
         .find(|(name, _)| name == controller)
-        .map(|(_, state)| quote!(Some(self.#state)))
-        .unwrap_or_else(|| builder_offset(&controller_field.offset, runtime));
+        .map(|(_, state)| quote!((#static_offset).or(Some(self.#state))))
+        .unwrap_or(static_offset);
     let encode = to_bytes_method(scalar.endian);
     quote! {
         let actual = #count;

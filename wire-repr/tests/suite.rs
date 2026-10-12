@@ -22,6 +22,8 @@ mod hygiene;
 mod integer_formats;
 #[path = "behavior/layout.rs"]
 mod layout;
+#[path = "behavior/leading_child.rs"]
+mod leading_child;
 #[path = "behavior/ownership.rs"]
 mod ownership;
 #[path = "behavior/recursive.rs"]

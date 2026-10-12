@@ -5,6 +5,7 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, Generics, TypeParam, parse_quote};
 
+use super::computed::computed_offset_state;
 use super::integer::{
     detached_expansions, detached_state, render_detached_length_patch, scalar_bytes,
 };
@@ -631,6 +632,8 @@ fn render_complete(
                 FieldKind::Scalar(scalar) => {
                     let value_ty = value_type_tokens(&scalar.value_type);
                     let wire_ty = scalar_type_tokens(scalar.wire_type);
+                    let computed_state = computed_offset_state(schema, field)
+                        .map(|offset| quote!(let #offset = writer.position();));
                     let source = if let Some(constant) = &scalar.constant {
                         quote!(#constant)
                     } else if scalar.computed.is_some()
@@ -725,6 +728,7 @@ fn render_complete(
                                 ))
                             })?;
                             #controller_state
+                            #computed_state
                             writer.write(#bytes)?;
                         }
                     } else {
@@ -735,6 +739,7 @@ fn render_complete(
                             let #encoded: #wire_ty = #source;
                             #geometry
                             #controller_state
+                            #computed_state
                             writer.write(#bytes)?;
                         }
                     }
@@ -882,16 +887,8 @@ fn render_complete(
                         private_ident(schema, &format!("nested_{index}_expected_end"));
                     let size_value = if nested.extent.is_some() {
                         quote!(None)
-                    } else if nested.terminal {
-                        quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE)
                     } else {
-                        quote!(Some(
-                            <#ty as #runtime::WireBuilder>::FIXED_SIZE.ok_or_else(|| {
-                                #runtime::WriteError::Schema(
-                                    #error::Layout(#runtime::LayoutError { field: #field_label }),
-                                )
-                            })?
-                        ))
+                        quote!(<#ty as #runtime::WireBuilder>::FIXED_SIZE)
                     };
                     let patch = nested
                         .extent

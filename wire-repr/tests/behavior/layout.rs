@@ -343,36 +343,24 @@ mod variable_nonterminal {
         inner: T,
     }
     #[test]
-    fn variable_nonterminal_geometry_is_an_error_not_a_panic() {
+    fn nonleading_read_geometry_is_unavailable_but_writers_use_the_emitted_extent() -> TestResult {
         assert!(matches!(
             Foo::view([1, 2]),
             Err(FooViewError::LayoutUnavailable { field: "bar" })
         ));
 
         let mut output = [0u8; 2];
-        let error = match Foo::builder(&mut output[..]).bar(|()| ()) {
-            Ok(_) => panic!("variable nonterminal child unexpectedly wrote"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            wire_repr::WriteError::Schema(FooWriteError::Layout(wire_repr::LayoutError {
-                field: "bar",
-            }))
-        ));
+        let written = Foo::builder(&mut output[..])
+            .bar(|()| ())?
+            .foo(2)?
+            .finish()?;
+        assert_eq!(written.as_bytes(), [1, 2]);
 
         let mut nested_output = [0u8; 2];
-        let nested_error = match Outer::<Foo>::builder(&mut nested_output[..])
-            .inner(|foo| foo.bar(|()| ()).foo(2))
-        {
-            Ok(_) => panic!("detached builder bypassed nonterminal layout capability"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            nested_error,
-            wire_repr::WriteError::Schema(OuterWriteError::Inner(FooWriteError::Layout(
-                wire_repr::LayoutError { field: "bar" }
-            )))
-        ));
+        let written = Outer::<Foo>::builder(&mut nested_output[..])
+            .inner(|foo| foo.bar(|()| ()).foo(2))?
+            .finish()?;
+        assert_eq!(written.as_bytes(), [1, 2]);
+        Ok(())
     }
 }

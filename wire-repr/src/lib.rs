@@ -41,8 +41,9 @@ pub mod __private {
         ArrayError, ArrayItem, ArrayView, ConstantMismatch, FieldExpr, FieldPath, FieldPrefix,
         FieldRoute, FieldRouteEnd, FieldRouteStep, FieldUnion, Frame, InvalidFrameExtent, IsSet,
         LayoutError, LeadingWire, NeedMore, NestedField, ScalarBuildConversionError,
-        ScalarConversionError, Set, TrailingBytes, Unset, WireFieldSchema, WireFields, WireSelect,
-        checked_align, checked_optional_equal, checked_optional_sum, frame_array_extent,
+        ScalarConversionError, Set, SlotState, TrailingBytes, Unset, WireFieldSchema, WireFields,
+        WireSelect, checked_align, checked_optional_equal, checked_optional_sum,
+        frame_array_extent,
     };
     pub use thiserror::Error as ThisError;
 }

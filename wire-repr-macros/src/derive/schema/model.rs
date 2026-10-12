@@ -486,6 +486,23 @@ impl Schema {
         })
     }
 
+    pub(super) fn has_nested_geometry(&self) -> bool {
+        self.fields.iter().any(|field| {
+            matches!(
+                &field.kind,
+                FieldKind::Nested(NestedField {
+                    terminal: false,
+                    extent: None,
+                    ..
+                })
+            )
+        })
+    }
+
+    pub(super) fn has_sequential_geometry(&self) -> bool {
+        self.has_explicit_geometry() || self.has_nested_geometry()
+    }
+
     pub(super) fn has_explicit_geometry(&self) -> bool {
         self.fields.iter().any(|field| {
             matches!(

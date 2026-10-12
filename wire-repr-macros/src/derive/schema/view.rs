@@ -270,7 +270,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         runtime,
         false,
     );
-    let leading_extent = match schema.fields.last().map(|field| &field.kind) {
+    let terminal_leading_extent = match schema.fields.last().map(|field| &field.kind) {
         Some(FieldKind::RawBytes(super::model::RawBytes {
             extent: super::model::DynamicExtent::Rest,
         })) => quote!(false),
@@ -285,7 +285,21 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         })) => quote!(<#ty as #runtime::WireView>::LEADING_EXTENT),
         _ => quote!(true),
     };
-    let consumed = if schema.has_explicit_geometry() {
+    let leading_children = schema.fields.iter().filter_map(|field| {
+        let FieldKind::Nested(nested) = &field.kind else {
+            return None;
+        };
+        if nested.terminal || nested.extent.is_some() {
+            return None;
+        }
+        let ty = &nested.ty;
+        Some(quote!(
+            (<#ty as #runtime::WireView>::FIXED_SIZE.is_some()
+                || <#ty as #runtime::WireView>::LEADING_EXTENT)
+        ))
+    });
+    let leading_extent = quote!(#terminal_leading_extent #(&& #leading_children)*);
+    let consumed = if schema.has_sequential_geometry() {
         let cursor = private_ident(schema, "geometry_cursor");
         quote!(#cursor)
     } else if let Some(last) = schema.fields.last() {
@@ -776,7 +790,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 }
                 Ok(#view_impl {
                     #input_field: #view_input,
-                    #represented_length_field: #framed_consumed,
+                    #represented_length_field: #input_length,
                     descriptor: #framed_descriptor,
                     #view_marker: ::core::marker::PhantomData,
                 })
@@ -797,7 +811,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                         available: #input_length,
                     }));
                 }
-                let #retained_value = #view_impl {
+                let mut #retained_value = #view_impl {
                     #input_field: #view_input,
                     #represented_length_field: #framed_consumed,
                     descriptor: #framed_descriptor,
@@ -810,6 +824,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                         trailing: #input_length - #framed_consumed,
                     }));
                 }
+                #retained_value.#represented_length_field = #input_length;
                 Ok(#retained_value)
             }
             #[allow(unsafe_code)]
@@ -856,7 +871,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                         available: #input_length,
                     }));
                 }
-                let #retained_value = #view_impl {
+                let mut #retained_value = #view_impl {
                     #input_field: #view_input,
                     #represented_length_field: #framed_consumed,
                     descriptor: #framed_descriptor,
@@ -869,6 +884,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                         trailing: #input_length - #framed_consumed,
                     }));
                 }
+                #retained_value.#represented_length_field = #input_length;
                 Ok(#retained_value)
             }
 
@@ -896,7 +912,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 }
                 Ok(#view_impl {
                     #input_field: #view_input,
-                    #represented_length_field: #framed_consumed,
+                    #represented_length_field: #input_length,
                     descriptor: #framed_descriptor,
                     #view_marker: ::core::marker::PhantomData,
                 })
@@ -1432,8 +1448,8 @@ fn render_frame_steps(
     runtime: &TokenStream,
     exact: bool,
 ) -> Vec<TokenStream> {
-    if schema.has_explicit_geometry() {
-        return render_explicit_frame_steps(
+    if schema.has_sequential_geometry() {
+        return render_sequential_frame_steps(
             schema,
             error,
             names,
@@ -1587,27 +1603,10 @@ fn render_frame_steps(
                 let shortage = &names.shortage;
                 let variant = names.nested.as_ref().expect("nested error variant");
                 let extent = names.extent.as_ref().expect("nested extent variant");
-                let frame_method = if exact && nested.terminal {
+                let frame_method = if exact {
                     quote!(frame_exact)
                 } else {
                     quote!(frame)
-                };
-                let fixed_check = if nested.terminal {
-                    TokenStream::new()
-                } else {
-                    let expected =
-                        private_ident(schema, &format!("{}_expected", field.name.unraw()));
-                    quote! {
-                        let #expected = <#ty as #runtime::WireView>::FIXED_SIZE
-                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                        if #child_consumed != #expected {
-                            return Err(#error::#extent(#runtime::InvalidFrameExtent {
-                                offset: #absolute,
-                                consumed: #child_consumed,
-                                available: #expected,
-                            }));
-                        }
-                    }
                 };
                 steps.push(quote! {
                     let #available = #frame_input.get(#offset..).ok_or_else(|| {
@@ -1629,21 +1628,22 @@ fn render_frame_steps(
                             available: #available.len(),
                         }));
                     }
-                    #fixed_check
                     let #child_total = #offset.checked_add(#child_consumed)
                         .ok_or(#error::LayoutUnavailable { field: #field_name })?;
                 });
             }
-            FieldKind::Array(_) => unreachable!("explicit geometry uses its own frame renderer"),
-            FieldKind::RawBytes(_) => unreachable!("explicit geometry uses its own frame renderer"),
-            FieldKind::Flag(_) => unreachable!("explicit geometry uses its own frame renderer"),
+            FieldKind::Array(_) => unreachable!("sequential geometry uses its own frame renderer"),
+            FieldKind::RawBytes(_) => {
+                unreachable!("sequential geometry uses its own frame renderer")
+            }
+            FieldKind::Flag(_) => unreachable!("sequential geometry uses its own frame renderer"),
             FieldKind::BitProjection(_) => {}
             FieldKind::Recursive(_) => unreachable!("recursive body uses its own frame renderer"),
         }
     }
     steps
 }
-fn render_explicit_frame_steps(
+fn render_sequential_frame_steps(
     schema: &Schema,
     error: &syn::Ident,
     names: &ErrorNames,
@@ -2024,6 +2024,15 @@ fn render_explicit_frame_steps(
                 } else {
                     quote!(frame)
                 };
+                let leading_check = (!nested.terminal && nested.extent.is_none()).then(|| {
+                    quote! {
+                        if <#ty as #runtime::WireView>::FIXED_SIZE.is_none()
+                            && !<#ty as #runtime::WireView>::LEADING_EXTENT
+                        {
+                            return Err(#error::LayoutUnavailable { field: #field_name });
+                        }
+                    }
+                });
                 let prepare_end = if let Some(declared) = &declared {
                     quote! {
                         let #end = #start.checked_add(#declared)
@@ -2034,6 +2043,32 @@ fn render_explicit_frame_steps(
                                 additional_at_least: #end.saturating_sub(#frame_input.len()),
                             })
                         })?;
+                    }
+                } else if !nested.terminal {
+                    let fixed_end =
+                        private_ident(schema, &format!("{}_fixed_end", field.name.unraw()));
+                    quote! {
+                        let #available = if let Some(width) =
+                            <#ty as #runtime::WireView>::FIXED_SIZE
+                        {
+                            let #fixed_end = #start.checked_add(width)
+                                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+                            #frame_input.get(#start..#fixed_end).ok_or_else(|| {
+                                #error::#shortage(#runtime::NeedMore {
+                                    offset: #input_end,
+                                    additional_at_least: #fixed_end
+                                        .saturating_sub(#frame_input.len()),
+                                })
+                            })?
+                        } else {
+                            #frame_input.get(#start..).ok_or_else(|| {
+                                #error::#shortage(#runtime::NeedMore {
+                                    offset: #input_end,
+                                    additional_at_least: #start
+                                        .saturating_sub(#frame_input.len()),
+                                })
+                            })?
+                        };
                     }
                 } else {
                     quote! {
@@ -2055,25 +2090,28 @@ fn render_explicit_frame_steps(
                             }));
                         }
                     }
-                } else if nested.terminal {
-                    quote!(let #end = #start.checked_add(#child_consumed)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;)
                 } else {
-                    quote! {
-                        let expected = <#ty as #runtime::WireView>::FIXED_SIZE
-                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                        if #child_consumed != expected {
-                            return Err(#error::#extent_variant(#runtime::InvalidFrameExtent {
-                                offset: #absolute,
-                                consumed: #child_consumed,
-                                available: expected,
-                            }));
+                    let fixed_check = (!nested.terminal).then(|| {
+                        quote! {
+                            if let Some(expected) = <#ty as #runtime::WireView>::FIXED_SIZE {
+                                if #child_consumed != expected {
+                                    return Err(#error::#extent_variant(#runtime::InvalidFrameExtent {
+                                        offset: #absolute,
+                                        consumed: #child_consumed,
+                                        available: expected,
+                                    }));
+                                }
+                            }
                         }
-                        let #end = #start.checked_add(expected)
+                    });
+                    quote! {
+                        #fixed_check
+                        let #end = #start.checked_add(#child_consumed)
                             .ok_or(#error::LayoutUnavailable { field: #field_name })?;
                     }
                 };
                 steps.push(quote! {
+                    #leading_check
                     #prepare_end
                     let #child_frame = <#ty as #runtime::WireView>::#frame_method(#available, #absolute)
                         .map_err(#error::#variant)?;
@@ -2183,28 +2221,41 @@ fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStre
 }
 fn retains_geometry_start(schema: &Schema, index: usize) -> bool {
     let field = &schema.fields[index];
-    schema.has_explicit_geometry()
+    schema.has_sequential_geometry()
         && (field.layout.pad_before.is_some()
             || field.layout.align_before.is_some()
             || field.layout.position.is_some())
 }
 
 fn retains_geometry_end(schema: &Schema, index: usize) -> bool {
-    if !schema.has_explicit_geometry() {
+    if !schema.has_sequential_geometry() {
         return false;
     }
     let field = &schema.fields[index];
     if matches!(field.kind, FieldKind::Flag(_) | FieldKind::BitProjection(_)) {
         return false;
     }
-    matches!(
-        field.kind,
-        FieldKind::RawBytes(_) | FieldKind::Array(_) | FieldKind::Nested(_)
-    ) || field.layout.condition.is_some()
+    matches!(field.kind, FieldKind::RawBytes(_) | FieldKind::Array(_))
+        || (matches!(field.kind, FieldKind::Nested(_)) && !has_fixed_suffix(schema, index))
+        || field.layout.condition.is_some()
         || matches!(&field.kind, FieldKind::Scalar(scalar) if scalar.is_variable())
         || field.layout.pad_before.is_some()
         || field.layout.align_before.is_some()
         || field.layout.position.is_some()
+}
+
+fn has_fixed_suffix(schema: &Schema, index: usize) -> bool {
+    // The represented range and fixed suffix recover the final implicit child's exact end.
+    !schema.has_explicit_geometry()
+        && schema.fields[index + 1..].iter().all(|field| {
+            matches!(
+                field.kind,
+                FieldKind::Scalar(_)
+                    | FieldKind::Bytes(_)
+                    | FieldKind::ScalarArray(_)
+                    | FieldKind::BitProjection(_)
+            )
+        })
 }
 
 fn geometry_state_value(schema: &Schema, index: usize, suffix: &str) -> TokenStream {
@@ -2216,9 +2267,6 @@ fn geometry_start(schema: &Schema, index: usize, runtime: &TokenStream) -> Token
     if retains_geometry_start(schema, index) {
         return geometry_state_value(schema, index, "start");
     }
-    if index > 0 && retains_geometry_end(schema, index - 1) {
-        return geometry_end(schema, index - 1, runtime);
-    }
     let field = &schema.fields[index];
     if !field
         .offset
@@ -2227,6 +2275,16 @@ fn geometry_start(schema: &Schema, index: usize, runtime: &TokenStream) -> Token
         .any(|term| matches!(term, super::model::SizeTerm::Dynamic))
     {
         let offset = view_offset(&field.offset, runtime);
+        if schema.has_nested_geometry()
+            && field
+                .offset
+                .terms
+                .iter()
+                .any(|term| matches!(term, super::model::SizeTerm::Nested(_)))
+        {
+            let preceding_end = geometry_end(schema, index - 1, runtime);
+            return quote!(#offset.unwrap_or_else(|| #preceding_end));
+        }
         return quote!(#offset.expect("validated static field offset"));
     }
     geometry_end(schema, index - 1, runtime)
@@ -2253,14 +2311,18 @@ fn geometry_end(schema: &Schema, index: usize, runtime: &TokenStream) -> TokenSt
         }
         FieldKind::Flag(_) | FieldKind::BitProjection(_) => start,
         FieldKind::Nested(nested) => {
-            let ty = &nested.ty;
             if nested.terminal {
                 quote!(self.as_bytes().len())
             } else {
+                let suffix = super::model::LayoutOffset {
+                    terms: schema.fields[index + 1..]
+                        .iter()
+                        .map(|field| field.kind.size_term())
+                        .collect(),
+                };
+                let width = view_offset(&suffix, runtime);
                 quote!(
-                    #start
-                        + <#ty as #runtime::WireView>::FIXED_SIZE
-                            .expect("framed nonterminal child has fixed width")
+                    self.as_bytes().len() - #width.expect("framed fixed suffix width")
                 )
             }
         }
@@ -2320,7 +2382,7 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                                     let #raw: #wire_ty = #value;
                                     #decoded
                                 }
-                            } else if schema.has_explicit_geometry() {
+                            } else if schema.has_sequential_geometry() {
                                 quote! {
                                     let #raw = #wire_ty::#decode(
                                         self.as_bytes()[#dynamic_start..#dynamic_end]
@@ -2370,7 +2432,7 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                             let value: #ty = #constant;
                             value
                         }
-                    } else if schema.has_explicit_geometry() {
+                    } else if schema.has_sequential_geometry() {
                         quote! {
                             self.as_bytes()[#dynamic_start..#dynamic_end]
                                 .try_into()
@@ -2396,7 +2458,7 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                     let element = scalar_type_tokens(array.element);
                     let width = array.element.width();
                     let decode = from_bytes_method(array.endian);
-                    let base = if schema.has_explicit_geometry() {
+                    let base = if schema.has_sequential_geometry() {
                         quote!(#dynamic_start)
                     } else {
                         quote!(#offset_value.expect("validated scalar-array offset"))
@@ -2504,24 +2566,15 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                     let ty = &nested.ty;
                     let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
                     let state = quote!(&self.descriptor.#name);
-                    let offset_setup = if schema.has_explicit_geometry() {
+                    let offset_setup = if schema.has_sequential_geometry() {
                         quote! {
                             let offset = #dynamic_start;
                             let end = #dynamic_end;
                         }
                     } else {
-                        let end = if nested.terminal {
-                            quote!(self.as_bytes().len())
-                        } else {
-                            quote!(
-                                offset
-                                    + <#ty as #runtime::WireView>::FIXED_SIZE
-                                        .expect("framed nonterminal child has fixed width")
-                            )
-                        };
                         quote! {
                             let offset = #offset_value.expect("validated nested offset");
-                            let end = #end;
+                            let end = self.as_bytes().len();
                         }
                     };
                     quote! {

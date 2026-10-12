@@ -339,6 +339,78 @@ fn prove_integer_formats() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[derive(WireView, WireBuilder)]
+struct SizedBlock {
+    length: u8,
+    #[wire(bytes = length)]
+    payload: wire::Bytes,
+}
+
+#[derive(WireView, WireBuilder)]
+struct BlockRecord<T> {
+    prefix: u8,
+    child: T,
+    #[wire(be)]
+    suffix: u16,
+}
+
+#[derive(WireView, WireBuilder)]
+#[wire(selector = u8)]
+enum BlockEnvelope {
+    #[wire(value = 0x78)]
+    Record(BlockRecord<SizedBlock>),
+}
+
+#[derive(WireView, WireBuilder)]
+struct BlockPacket {
+    prefix: u8,
+    body: BlockEnvelope,
+    suffix: u8,
+}
+
+fn prove_leading_children() -> Result<(), Box<dyn std::error::Error>> {
+    let expected = [0x29, 2, 0x3a, 0x4b, 0x5c, 0x6d];
+    let mut output = [0xcc; 6];
+    let written = BlockRecord::<SizedBlock>::builder(&mut output[..])
+        .prefix(0x29)?
+        .child(|child| child.payload(&[0x3a, 0x4b][..]))?
+        .suffix(0x5c6d)?
+        .finish()?;
+    assert_eq!(written.as_bytes(), expected);
+    let view = BlockRecord::<SizedBlock>::view(written.as_bytes())?;
+    assert_eq!(view.child().payload(), [0x3a, 0x4b]);
+    assert_eq!(view.child().as_bytes(), &expected[1..4]);
+    assert_eq!(view.suffix(), 0x5c6d);
+
+    let detached = <BlockRecord<SizedBlock> as WireBuilder>::builder()
+        .prefix(0x29)
+        .child(|child| child.payload(&[0x3a, 0x4b][..]))
+        .suffix(0x5c6d);
+    let expected = [0x17, 0x78, 0x29, 2, 0x3a, 0x4b, 0x5c, 0x6d, 0x8e];
+    let mut output = Vec::new();
+    let written = BlockPacket::builder(&mut output)
+        .prefix(0x17)?
+        .body(|body| body.record(|_| detached))?
+        .suffix(0x8e)?
+        .finish()?;
+    assert_eq!(written.as_bytes(), expected);
+    let view = BlockPacket::view(written.as_bytes())?;
+    let body = view.body();
+    let BlockEnvelopeVariant::Record(record) = body.variant();
+    assert_eq!(record.child().payload(), [0x3a, 0x4b]);
+    assert_eq!(record.suffix(), 0x5c6d);
+    assert_eq!(view.suffix(), 0x8e);
+
+    let input = [0x29, 0, 0x5c, 0x6d, 0x39, 1, 0x4b, 0x6c, 0x7d, 0x8e];
+    let (first, mut cursor) = BlockRecord::<SizedBlock>::cursor(&input)?;
+    let second = BlockRecord::<SizedBlock>::next(&mut cursor)?;
+    assert_eq!(first.child().payload(), []);
+    assert_eq!(second.child().payload(), [0x4b]);
+    assert_eq!(second.suffix(), 0x6c7d);
+    assert_eq!(cursor.remaining(), &[0x8e]);
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let expected = [1, 2, 1, 0xaa, 2, 0xbb, 0xcc, 0x2a];
     let view = Packet::view(expected)?;
@@ -458,5 +530,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     prove_integer_formats()?;
     prove_signed_widths()?;
     prove_narrow_detached_count()?;
+    prove_leading_children()?;
     Ok(())
 }
