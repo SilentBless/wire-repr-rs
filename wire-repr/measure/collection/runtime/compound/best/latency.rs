@@ -5,6 +5,7 @@ pub fn decode(seed: u64) -> u64 {
     decode_input(input.as_slice()).unwrap_or(u64::MAX)
 }
 
+#[inline(always)]
 fn decode_input(input: &[u8]) -> Option<u64> {
     let count = usize::try_from(i32::from_be_bytes(input.get(..4)?.try_into().ok()?)).ok()?;
     let mut cursor = 4usize;

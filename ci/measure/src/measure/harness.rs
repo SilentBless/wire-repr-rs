@@ -153,6 +153,7 @@ strip = false
         )?;
 
         let build_target = self.target.join("build");
+        // The startup address barrier retains entries without changing release optimization.
         let output = Command::new("cargo")
             .arg(format!("+{}", self.toolchain))
             .args([
@@ -161,9 +162,6 @@ strip = false
                 "--manifest-path",
                 &root.join("Cargo.toml").to_string_lossy(),
                 "--message-format=json-render-diagnostics",
-                "--",
-                "-C",
-                "link-dead-code=yes",
             ])
             .env("CARGO_TARGET_DIR", &build_target)
             .output()
@@ -355,6 +353,16 @@ fn main_source(sources: &BTreeMap<String, PathBuf>, entries: &[HarnessEntry]) ->
         )
         .expect("writing to a String is infallible");
     }
+    output.push_str("\nfn retain_entries() {\n    std::hint::black_box([\n");
+    for entry in entries {
+        writeln!(
+            output,
+            "        {} as extern \"C\" fn(u64) -> u64,",
+            entry.symbol
+        )
+        .expect("writing to a String is infallible");
+    }
+    output.push_str("    ]);\n}\n");
     output.push_str(
         r#"
 fn check(
@@ -392,6 +400,7 @@ fn sample(
 }
 
 fn main() {
+    retain_entries();
     let mut arguments = std::env::args().skip(1);
     let command = arguments.next();
     let entry = arguments.next();

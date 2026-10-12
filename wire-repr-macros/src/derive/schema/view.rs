@@ -1712,6 +1712,20 @@ fn render_explicit_frame_steps(
             .map(|present| quote!(#present))
             .unwrap_or_else(|| quote!(true));
         let position = quote!(if #present_value { #position } else { #cursor });
+        let absolute_position = if matches!(field.kind, FieldKind::RawBytes(_))
+            && field.layout.pad_before.is_none()
+            && field.layout.align_before.is_none()
+            && field.layout.position.is_none()
+        {
+            // The sequential cursor is already checked; raw fields never use its absolute start.
+            TokenStream::new()
+        } else {
+            quote! {
+                let #absolute = #frame_offset
+                    .checked_add(#start)
+                    .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+            }
+        };
         steps.push(quote! {
             let #start: usize = #position;
             if #start < #cursor {
@@ -1721,9 +1735,7 @@ fn render_explicit_frame_steps(
                     cursor: #cursor,
                 });
             }
-            let #absolute = #frame_offset
-                .checked_add(#start)
-                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
+            #absolute_position
         });
 
         match &field.kind {
@@ -1788,7 +1800,7 @@ fn render_explicit_frame_steps(
                     };
                     quote! {
                         let #controller = usize::try_from(#raw)
-                            .map_err(|_| #conversion_error)?;
+                            .map_err(#[cold] |_| #conversion_error)?;
                     }
                 });
                 let presence_controller_value =

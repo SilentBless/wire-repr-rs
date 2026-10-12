@@ -5,6 +5,7 @@ pub fn decode(seed: u64) -> u64 {
     try_decode(input.as_slice()).unwrap_or(u64::MAX)
 }
 
+#[inline(always)]
 fn try_decode(input: &[u8]) -> Option<u64> {
     let tail = validate(input)?;
     let count = usize::try_from(i32::from_be_bytes(input.get(..4)?.try_into().ok()?)).ok()?;

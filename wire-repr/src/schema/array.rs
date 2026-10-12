@@ -200,16 +200,16 @@ impl<'input, T: WireView> Iterator for ArrayIter<'input, T> {
             return None;
         }
         if self.index == self.count {
-            if self.cursor != self.input.len() {
+            if !self.input.is_empty() {
                 self.failed = true;
                 return Some(Err(ArrayError::Trailing {
                     offset: self.offset.saturating_add(self.cursor),
-                    trailing: self.input.len() - self.cursor,
+                    trailing: self.input.len(),
                 }));
             }
             return None;
         }
-        let available = &self.input[self.cursor..];
+        let available = self.input;
         let absolute = match self.offset.checked_add(self.cursor) {
             Some(absolute) => absolute,
             None => {
@@ -256,11 +256,11 @@ impl<'input, T: WireView> Iterator for ArrayIter<'input, T> {
                 available: available.len(),
             }));
         }
-        let start = self.cursor;
+        self.input = &available[consumed..];
         self.cursor += consumed;
         self.index += 1;
         Some(Ok(ArrayItem {
-            input: &self.input[start..self.cursor],
+            input: &available[..consumed],
             state,
         }))
     }

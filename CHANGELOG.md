@@ -13,6 +13,11 @@ All notable public changes to `wire-repr` are recorded here.
   Fixed recursive arrays retain their compact `u32` continuation and existing count boundary;
   SLEB128 and ZigZag ULEB128/VU128 counts are supported only outside recursive body grammars.
   Byte-length, placement, and bit-projection controllers remain unsigned.
+- Advance runtime-array iterators through their remaining input and omit unused absolute-start
+  calculations for sequential raw fields, preserving exact item ranges and typed errors.
+- Measure linked roles with ordinary release dead-code elimination. Exported entries remain
+  referenced by the role CLI without forcing dead-code retention that changes hot-path optimization.
+  Compound collection decoders share an inline byte-consumption boundary across all three roles.
 
 ## [1.1.0] - 2026-10-11
 

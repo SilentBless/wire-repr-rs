@@ -528,7 +528,9 @@ demand continuations, progressive recursive object/array/demand builds, and fixe
 borrowed-growable, owned-growable, and callback-driven output. Each covers read and write paths
 where applicable. Each role compiles once per workload and exports one stable measurement entry
 per case, so compilation is amortized without linking generated, idiomatic, and best-safe roles
-into one consumer. Pinned Rizin 0.9.1 analyzes the final linked ELF, Mach-O, and PE role artifacts;
+into one consumer. A startup-only address barrier retains every entry while sampling uses direct
+calls. Artifact retention must not disable ordinary release dead-code elimination and change
+hot-path optimization. Pinned Rizin 0.9.1 analyzes the final linked ELF, Mach-O, and PE role artifacts;
 Windows builds additionally load their generated PDB. Artifact evidence keeps named linker calls
 distinct from unresolved indirect dispatch. On x86-64, an import cached in a callee-saved register
 remains a named linker call only with proven provenance inside one basic block. Register-alias
@@ -540,6 +542,8 @@ code.
 Runtime performance uses calibrated interleaved samples and reports distribution statistics. LLVM
 IR may explain an optimization result but is not treated as a latency oracle. State and
 artifact-size probes remain isolated from measured hot-path implementations.
+Compound collection decoders use the same inline byte-consumption boundary across all three roles;
+their input producer remains opaque.
 
 Behavioral tests cover success, truncation at every accessed field boundary, constant mismatch,
 declared outer-extent mismatch, nested error propagation, absolute offsets, retained backing

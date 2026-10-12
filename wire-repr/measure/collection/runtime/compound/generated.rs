@@ -32,6 +32,7 @@ fn try_decode(seed: u64) -> Result<u64, ()> {
     decode_input(input.as_slice())
 }
 
+#[inline(always)]
 fn decode_input(input: &[u8]) -> Result<u64, ()> {
     let view = Foo::<Bar>::view(input).map_err(|_| ())?;
     let mut value = u64::from(view.tail()).rotate_left(53);

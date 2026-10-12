@@ -1418,10 +1418,17 @@ fn ordinary_generic_array_writer_keeps_placement_geometry() -> TestResult {
 fn terminal_array_iterator_is_fused_after_item_failure() -> TestResult {
     let view = Terminal::<Variable>::view([2, 1, 7, 1])?;
     let mut iter = view.items().iter();
-    assert!(iter.next().transpose()?.is_some());
+    let first = iter.next().transpose()?.expect("first item");
+    assert_eq!(first.view().body(), &[7]);
     assert!(matches!(
         iter.next(),
-        Some(Err(wire_repr::ArrayError::Item { index: 1, .. }))
+        Some(Err(wire_repr::ArrayError::Item {
+            index: 1,
+            source: VariableViewError::Body(wire_repr::NeedMore {
+                offset: 4,
+                additional_at_least: 1,
+            }),
+        }))
     ));
     assert!(iter.next().is_none());
     Ok(())
