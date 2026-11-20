@@ -1,4 +1,5 @@
 target/
 **/*.rs.bk
-Cargo.lock
+# The downstream fixture resolves like a fresh consumer; workspace and fuzz locks are tracked.
+/ci/downstream/Cargo.lock
 .DS_Store

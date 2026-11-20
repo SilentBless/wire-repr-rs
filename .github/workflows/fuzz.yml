@@ -23,6 +23,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install pinned nightly
         run: rustup toolchain install nightly-2026-08-01 --profile minimal --component rustfmt --component clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: fuzz -> target
       - name: Install cargo-fuzz 0.13.2
         run: cargo +nightly-2026-08-01 install cargo-fuzz --version 0.13.2 --locked
       - name: Check fuzz harness

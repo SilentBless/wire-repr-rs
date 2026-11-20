@@ -1,19 +1,26 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [master]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust 1.91.0
         run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Install Rizin 0.9.1
         run: |
           curl -fsSL https://github.com/rizinorg/rizin/releases/download/v0.9.1/rizin-v0.9.1-static-x86_64.tar.xz -o "$RUNNER_TEMP/rizin.tar.xz"
@@ -25,25 +32,24 @@ jobs:
         run: |
           cargo +1.91.0 fmt --all -- --check
           cargo +1.91.0 fmt --manifest-path ci/downstream/Cargo.toml -- --check
-      - name: Check
-        run: cargo +1.91.0 check --workspace --all-targets
       - name: Test
-        run: cargo +1.91.0 test --workspace --all-targets
+        run: cargo +1.91.0 test --locked --workspace --all-targets
       - name: Run standalone downstream consumer
         run: CARGO_TARGET_DIR=target cargo +1.91.0 run --manifest-path ci/downstream/Cargo.toml
       - name: Documentation tests
-        run: cargo +1.91.0 test -p wire-repr --doc
+        run: cargo +1.91.0 test --locked -p wire-repr --doc
       - name: Test CI tools
         run: python3 -m unittest discover -s ci/tests -v
       - name: Compile-failure diagnostics
         run: python3 ci/check-fail-fast.py --root "$GITHUB_WORKSPACE"
       - name: Clippy
-        run: cargo +1.91.0 clippy --workspace --all-targets -- -D warnings
+        run: cargo +1.91.0 clippy --locked --workspace --all-targets -- -D warnings
       - name: Documentation
-        run: RUSTDOCFLAGS='-D warnings' cargo +1.91.0 doc --workspace --no-deps
+        run: RUSTDOCFLAGS='-D warnings' cargo +1.91.0 doc --locked --workspace --no-deps
 
   artifact-platforms:
     name: artifact (${{ matrix.name }})
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -57,6 +63,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust 1.91.0
         run: rustup toolchain install 1.91.0 --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Install Rizin 0.9.1 on macOS
         if: runner.os == 'macOS'
         run: |
@@ -77,14 +84,16 @@ jobs:
           Expand-Archive $archive -DestinationPath $destination
           Join-Path $destination "rizin-win-installer-vs2019_static-64/bin" | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Verify artifact analysis and native debug information
-        run: cargo +1.91.0 test -p wire-repr-measure --test harness
+        run: cargo +1.91.0 test --locked -p wire-repr-measure --test harness
 
   measure:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust 1.91.0
         run: rustup toolchain install 1.91.0 --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Install Rizin 0.9.1
         run: |
           curl -fsSL https://github.com/rizinorg/rizin/releases/download/v0.9.1/rizin-v0.9.1-static-x86_64.tar.xz -o "$RUNNER_TEMP/rizin.tar.xz"
@@ -93,6 +102,6 @@ jobs:
           tar -xJf "$RUNNER_TEMP/rizin.tar.xz" -C "$RUNNER_TEMP/rizin"
           echo "$RUNNER_TEMP/rizin/bin" >> "$GITHUB_PATH"
       - name: Build measurement tool once
-        run: cargo +1.91.0 build -p wire-repr-measure --release
+        run: cargo +1.91.0 build --locked -p wire-repr-measure --release
       - name: Measure complete generated corpus
         run: target/release/wire-repr-measure run --json
