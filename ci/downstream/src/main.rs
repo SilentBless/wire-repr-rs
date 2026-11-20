@@ -1,3 +1,6 @@
+// Consumers commonly forbid unsafe code; generated impls must not need a lint override.
+#![forbid(unsafe_code)]
+
 use wire_repr::{ArrayError, NeedMore, TrailingBytes, WireBuilder, WireView, wire};
 
 #[derive(WireView, WireBuilder)]

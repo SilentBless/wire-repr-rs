@@ -13,7 +13,6 @@ pub(super) fn render_wire_fields(
     let inline = inline.then(|| quote!(#[inline(always)]));
     quote! {
         // SAFETY: the view pairs an exact framed input with the state used to resolve routes.
-        #[allow(unsafe_code)]
         #impl_header {
             type Fields = #fields;
             type SelectionRoot = #schema;

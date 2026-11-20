@@ -4,6 +4,9 @@ All notable public changes to `wire-repr` are recorded here.
 
 ## [Unreleased]
 
+- Compile derived schemas in crates that declare `#![forbid(unsafe_code)]`. Generated impls no
+  longer carry an `unsafe_code` lint override, which a consumer's `forbid` rejected with `E0453`.
+
 ## [1.2.0] - 2026-10-13
 
 - Compose unbounded variable-width children before later fields when their read capability
