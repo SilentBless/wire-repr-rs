@@ -71,6 +71,11 @@ fn chunks_merge_adjacent_ranges_without_materializing_bytes() -> TestResult {
         selected.chunks().collect::<Vec<_>>(),
         vec![&[1, 2, 10, 11][..]]
     );
+    // A borrowed selection iterates the same merged chunks.
+    assert_eq!(
+        (&selected).into_iter().collect::<Vec<_>>(),
+        vec![&[1, 2, 10, 11][..]]
+    );
     Ok(())
 }
 

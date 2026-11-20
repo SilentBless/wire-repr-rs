@@ -64,6 +64,12 @@ impl<'input, T: WireView> ArrayItem<'input, T> {
     }
 }
 
+impl<T: WireView> AsRef<[u8]> for ArrayItem<'_, T> {
+    fn as_ref(&self) -> &[u8] {
+        self.input
+    }
+}
+
 impl<'input, T: WireView> ExactWire<T> for ArrayItem<'input, T> {
     fn as_wire_bytes(&self) -> &[u8] {
         self.input

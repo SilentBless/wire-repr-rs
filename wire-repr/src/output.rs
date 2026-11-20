@@ -913,6 +913,18 @@ impl<O: Output> Written<O> {
     }
 }
 
+impl<O: Output> AsRef<[u8]> for Written<O> {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl<O: Output> AsMut<[u8]> for Written<O> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.as_bytes_mut()
+    }
+}
+
 fn growth_target(current: usize, request: GrowthRequest) -> usize {
     request
         .suggested_len

@@ -42,6 +42,9 @@ mod derived {
                 written.as_bytes(),
                 [0xaa, 0x12, 0x34, 0x11, 0x22, 0x33, 0x44]
             );
+            // Standard conversions expose the represented range, not the whole nine-byte owner.
+            assert_eq!(AsRef::<[u8]>::as_ref(&written).len(), 7);
+            assert_eq!(AsMut::<[u8]>::as_mut(&mut written).len(), 7);
             written.as_bytes_mut()[0] = 0xab;
         }
         assert_eq!(

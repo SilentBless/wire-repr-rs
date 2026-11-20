@@ -6,6 +6,9 @@ All notable public changes to `wire-repr` are recorded here.
 
 - Compile derived schemas in crates that declare `#![forbid(unsafe_code)]`. Generated impls no
   longer carry an `unsafe_code` lint override, which a consumer's `forbid` rejected with `E0453`.
+- Implement `AsRef<[u8]>` and `AsMut<[u8]>` for `Written<O>` and `AsRef<[u8]>` for `ArrayItem<T>`,
+  each over the exact represented range. A borrowed `Selection` implements `IntoIterator` over its
+  merged chunks, and selection and recursive-array iterators implement `FusedIterator`.
 
 ## [1.2.0] - 2026-10-13
 

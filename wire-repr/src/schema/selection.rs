@@ -393,6 +393,21 @@ where
     }
 }
 
+/// Iterates merged chunks, the form hashers and checksums consume without copying.
+impl<'selection, 'view, V, Expr, const INCLUDE: bool> IntoIterator
+    for &'selection Selection<'view, V, Expr, INCLUDE>
+where
+    V: WireFields,
+    Expr: FieldExpr<V>,
+{
+    type Item = &'selection [u8];
+    type IntoIter = SelectionChunks<'selection, 'view, V, Expr, INCLUDE>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.chunks()
+    }
+}
+
 /// Iterator over merged selected chunks.
 pub struct SelectionChunks<'selection, 'view, V, Expr, const INCLUDE: bool> {
     selection: &'selection Selection<'view, V, Expr, INCLUDE>,
@@ -503,6 +518,14 @@ where
     }
 }
 
+impl<V, Expr, const INCLUDE: bool> core::iter::FusedIterator
+    for SelectionChunks<'_, '_, V, Expr, INCLUDE>
+where
+    V: WireFields,
+    Expr: FieldExpr<V>,
+{
+}
+
 /// Iterator over bytes from a fragmented selection.
 pub struct SelectionBytes<'selection, 'view, V, Expr, const INCLUDE: bool> {
     chunks: SelectionChunks<'selection, 'view, V, Expr, INCLUDE>,
@@ -528,4 +551,12 @@ where
             self.offset = 0;
         }
     }
+}
+
+impl<V, Expr, const INCLUDE: bool> core::iter::FusedIterator
+    for SelectionBytes<'_, '_, V, Expr, INCLUDE>
+where
+    V: WireFields,
+    Expr: FieldExpr<V>,
+{
 }
