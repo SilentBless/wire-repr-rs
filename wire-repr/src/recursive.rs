@@ -489,6 +489,22 @@ where
     marker: core::marker::PhantomData<fn() -> (C, Slot)>,
 }
 
+impl<C, Slot, const DEPTH: usize> core::fmt::Debug for RecursiveArrayView<'_, '_, C, Slot, DEPTH>
+where
+    C: RecursiveFrame<Slot>,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RecursiveArrayView")
+            .field("len", &self.input.len())
+            .field("count", &self.count)
+            .field("offset", &self.offset)
+            .field("depth", &self.depth)
+            .field("geometry", &self.geometry)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'input, 'geometry, C, Slot, const DEPTH: usize>
     RecursiveArrayView<'input, 'geometry, C, Slot, DEPTH>
 where
@@ -618,6 +634,24 @@ where
     cursor: usize,
     failed: bool,
     marker: core::marker::PhantomData<fn() -> (C, Slot)>,
+}
+
+impl<C, Slot, const DEPTH: usize> core::fmt::Debug for RecursiveArrayIter<'_, C, Slot, DEPTH>
+where
+    C: RecursiveFrame<Slot>,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RecursiveArrayIter")
+            .field("len", &self.input.len())
+            .field("count", &self.count)
+            .field("offset", &self.offset)
+            .field("depth", &self.depth)
+            .field("index", &self.index)
+            .field("cursor", &self.cursor)
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'input, C, Slot, const DEPTH: usize> Iterator for RecursiveArrayIter<'input, C, Slot, DEPTH>

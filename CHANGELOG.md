@@ -9,6 +9,8 @@ All notable public changes to `wire-repr` are recorded here.
 - Implement `AsRef<[u8]>` and `AsMut<[u8]>` for `Written<O>` and `AsRef<[u8]>` for `ArrayItem<T>`,
   each over the exact represented range. A borrowed `Selection` implements `IntoIterator` over its
   merged chunks, and selection and recursive-array iterators implement `FusedIterator`.
+- Implement `Debug` for every public runtime type. Views, writers, and iterators print positions
+  and lengths, never buffer contents, and add no bounds on output or backing types.
 
 ## [1.2.0] - 2026-10-13
 

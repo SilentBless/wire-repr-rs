@@ -6,6 +6,7 @@ use crate::recursive::{FlattenRecursiveError, RecursiveDepth, RecursiveError, Re
 // moved geometry construction
 /// In-place bounded geometry summary used while framing one array.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct RecursiveGeometryBuilder {
     period_widths: [u16; PERIOD_CAPACITY],
     palette: [u16; PALETTE_CAPACITY],

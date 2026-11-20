@@ -41,6 +41,7 @@ pub fn decode_uleb128<const BITS: u32>(
 
 /// A minimally encoded unsigned integer.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct Uleb128Bytes {
     bytes: [u8; 19],
     len: usize,

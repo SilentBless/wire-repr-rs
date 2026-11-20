@@ -241,6 +241,12 @@ pub struct Owned<T> {
     target: T,
 }
 
+impl<T> fmt::Debug for Owned<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Owned").finish_non_exhaustive()
+    }
+}
+
 /// Owns a contiguous growable target so its writer may be moved independently of a caller borrow.
 ///
 /// The adapter itself never allocates. Growth is delegated to `T: Extend<u8>`, using the same
@@ -315,6 +321,12 @@ pub struct Fixed<'a, T: ?Sized> {
     target: &'a mut T,
 }
 
+impl<T: ?Sized> fmt::Debug for Fixed<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Fixed").finish_non_exhaustive()
+    }
+}
+
 /// Treats the target's current visible bytes as fixed output.
 pub fn fixed<T>(target: &mut T) -> Fixed<'_, T>
 where
@@ -350,6 +362,15 @@ where
 pub struct Bounded<'a, T: ?Sized> {
     target: &'a mut T,
     limit: usize,
+}
+
+impl<T: ?Sized> fmt::Debug for Bounded<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Bounded")
+            .field("limit", &self.limit)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Allows `Extend<u8>` growth up to `limit`, useful for pooled size-class buffers.
@@ -398,6 +419,12 @@ pub struct GrowWith<'a, T: ?Sized, F> {
     grow: F,
 }
 
+impl<T: ?Sized, F> fmt::Debug for GrowWith<'_, T, F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("GrowWith").finish_non_exhaustive()
+    }
+}
+
 /// Adds caller-controlled fallible growth without requiring an allocator dependency.
 ///
 /// A successful callback must preserve `0..request.high_water_mark` and expose at least
@@ -440,6 +467,16 @@ pub struct Writer<O> {
     output: O,
     start: usize,
     cursor: usize,
+}
+
+impl<O> fmt::Debug for Writer<O> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Writer")
+            .field("start", &self.start)
+            .field("cursor", &self.cursor)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<O: Output> Writer<O> {
@@ -589,6 +626,16 @@ pub struct ArrayWriter<'writer, O, T> {
     marker: core::marker::PhantomData<fn() -> T>,
 }
 
+impl<O, T> fmt::Debug for ArrayWriter<'_, O, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArrayWriter")
+            .field("writer", &self.writer)
+            .field("count", &self.count)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'writer, O, T> ArrayWriter<'writer, O, T>
 where
     O: Output,
@@ -726,6 +773,18 @@ pub struct ChildWriter<'writer, O> {
     start: usize,
     cursor: usize,
     limit: Option<usize>,
+}
+
+impl<O> fmt::Debug for ChildWriter<'_, O> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChildWriter")
+            .field("writer", &self.writer)
+            .field("start", &self.start)
+            .field("cursor", &self.cursor)
+            .field("limit", &self.limit)
+            .finish()
+    }
 }
 
 impl<O: Output> ChildWriter<'_, O> {
@@ -873,6 +932,15 @@ impl<O: Output> ChildWriter<'_, O> {
 pub struct Written<O> {
     output: O,
     range: Range<usize>,
+}
+
+impl<O> fmt::Debug for Written<O> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Written")
+            .field("range", &self.range)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<O: Output> Written<O> {

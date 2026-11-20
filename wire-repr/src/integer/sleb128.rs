@@ -44,6 +44,7 @@ pub fn decode_sleb128<const BITS: u32>(
 
 /// A minimally encoded signed integer.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct Sleb128Bytes {
     bytes: [u8; 19],
     len: usize,

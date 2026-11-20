@@ -54,6 +54,18 @@ pub struct FixedViews<'input, S: LeadingWire> {
     marker: core::marker::PhantomData<fn() -> S>,
 }
 
+impl<S: LeadingWire> core::fmt::Debug for FixedViews<'_, S> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("FixedViews")
+            .field("len", &self.input.len())
+            .field("width", &self.width)
+            .field("index", &self.index)
+            .field("count", &self.count)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'input, S: LeadingWire> FixedViews<'input, S> {
     #[doc(hidden)]
     #[allow(unsafe_code)]
@@ -142,6 +154,16 @@ pub struct VariableViews<'input, S: WireSelect> {
     marker: core::marker::PhantomData<fn() -> S>,
 }
 
+impl<S: WireSelect> core::fmt::Debug for VariableViews<'_, S> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("VariableViews")
+            .field("len", &self.input.len())
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'input, S: WireSelect> VariableViews<'input, S> {
     #[doc(hidden)]
     #[must_use]
@@ -201,6 +223,16 @@ impl<'input, S: WireSelect> VariableViews<'input, S> {
 pub struct Cursor<'input> {
     input: &'input [u8],
     offset: usize,
+}
+
+impl core::fmt::Debug for Cursor<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Cursor")
+            .field("len", &self.input.len())
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'input> Cursor<'input> {
