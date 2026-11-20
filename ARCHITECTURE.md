@@ -605,12 +605,12 @@ interpreter. Keep each decision with its owner:
 | Controller eligibility shared by normalization and policy | `schema/model/controller.rs` |
 | Dependency roles, computed order and rejection diagnostics | `schema/model/validation.rs` |
 | Fixed-width capability expressions, static offsets and recursive scalar placement | `schema/geometry.rs` |
-| Framing, retained views and physical field routes | `schema/view.rs` and `schema/view_fields.rs`; runtime `wire-repr/src/schema.rs` and `schema/selection.rs` |
+| Framing, retained views and physical field routes | `schema/view.rs` with `schema/view/{frame,error,methods,geometry,fields}.rs`; runtime `wire-repr/src/schema.rs` and `schema/selection.rs` |
 | Counted arrays, homogeneous sequences and heterogeneous cursors | Runtime `schema/array.rs` and `schema/sequence.rs` |
-| Write slots, conversions and conditional choice names | `schema/write_fields.rs`; detached and progressive emission stay in `schema/builder.rs` and `schema/writer.rs`, with automatic progressive fields in `schema/writer/automatic.rs` |
+| Write slots, conversions and conditional choice names | `schema/writer/fields.rs`; detached and progressive emission stay in `schema/builder.rs` and `schema/writer.rs`, with automatic progressive fields in `schema/writer/automatic.rs` |
 | Scalar byte encodings and prefix/controller lowering | Runtime `integer/`; macro `schema/integer.rs` and `schema/integer/controller.rs`; output expansion `output/integer.rs` |
 | Computed expression arguments, retained destination offsets and patches for both writers | `schema/computed.rs`; the output cursor and partial-write behavior stay in runtime `output.rs` |
-| Recursive body grammar and bounded geometry | Macro `schema/recursive*.rs` and runtime `recursive.rs` / `recursive/geometry/` |
+| Recursive body grammar and bounded geometry | Macro `schema/recursive.rs` with `schema/recursive/{demand,demand_writer,object,writer}.rs`; runtime `recursive.rs` / `recursive/geometry/` |
 
 Enums and nominal bitfields still have specialized macro entry paths in `schema/enumeration.rs`
 and `schema/bitfield.rs`. They reuse the same read/write capabilities; their distinct selector and
