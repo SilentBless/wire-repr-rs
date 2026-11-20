@@ -1,5 +1,6 @@
 //! Deferred streaming sources for arrays in detached builders.
 
+use core::fmt;
 use core::marker::PhantomData;
 
 use super::{ChildWriter, Output, WriteError};
@@ -9,6 +10,12 @@ use crate::schema::{WireBuilder, WireWrite};
 #[doc(hidden)]
 pub struct ArrayBuilder<T> {
     marker: PhantomData<fn() -> T>,
+}
+
+impl<T> fmt::Debug for ArrayBuilder<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ArrayBuilder")
+    }
 }
 
 impl<T> ArrayBuilder<T> {
@@ -52,6 +59,14 @@ pub struct ArraySource<T, Values, Build> {
     values: Values,
     build: Build,
     marker: PhantomData<fn() -> T>,
+}
+
+impl<T, Values, Build> fmt::Debug for ArraySource<T, Values, Build> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArraySource")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Emits a detached counted array directly into its parent's child cursor.

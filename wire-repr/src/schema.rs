@@ -21,6 +21,15 @@ pub struct Frame<S> {
     consumed: usize,
 }
 
+impl<S> core::fmt::Debug for Frame<S> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Frame")
+            .field("consumed", &self.consumed)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<S> Frame<S> {
     /// Creates a validated frame.
     #[must_use]
@@ -368,10 +377,12 @@ pub trait ExactWire<T> {
 
 /// Empty typestate slot used by generated builders.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct Unset;
 
 /// Initialized typestate slot used by generated builders.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct Set<T>(pub T);
 #[doc(hidden)]
 pub trait IsSet {}

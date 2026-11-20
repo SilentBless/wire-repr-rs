@@ -1,5 +1,5 @@
 #![no_std]
-#![deny(missing_docs, unsafe_code)]
+#![deny(missing_docs, missing_debug_implementations, unsafe_code)]
 #![doc = include_str!("lib.md")]
 
 extern crate self as wire_repr;

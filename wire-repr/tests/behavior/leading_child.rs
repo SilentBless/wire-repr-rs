@@ -263,9 +263,7 @@ fn child_prefix_body_and_parent_suffix_shortages_keep_absolute_field_context() {
             }),
         ),
     ] {
-        let error = <Packet<Segment> as WireView>::frame(input, 17)
-            .err()
-            .expect("truncated packet");
+        let error = <Packet<Segment> as WireView>::frame(input, 17).expect_err("truncated packet");
         match (error, expected) {
             (PacketViewError::Prefix(actual), PacketViewError::Prefix(expected))
             | (PacketViewError::Suffix(actual), PacketViewError::Suffix(expected)) => {
@@ -415,9 +413,7 @@ fn negative_count_after_nested_and_raw_geometry_fails_before_array_access() {
             6,
         ),
         (
-            <MixedPacket as WireView>::frame(&input, 17)
-                .err()
-                .expect("negative count"),
+            <MixedPacket as WireView>::frame(&input, 17).expect_err("negative count"),
             23,
         ),
     ] {
@@ -688,8 +684,7 @@ fn invalid_child_extents_are_rejected_but_zero_width_leading_children_are_valid(
     }
 
     let error = <Packet<Manual<true>> as WireView>::frame(&[0x31, 0x52, 0x64, 0x65], 5)
-        .err()
-        .expect("overlong child");
+        .expect_err("overlong child");
     assert!(matches!(
         error,
         PacketViewError::ChildExtent(wire_repr::InvalidFrameExtent {

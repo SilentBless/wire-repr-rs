@@ -27,6 +27,15 @@ pub struct RecursiveGeometry {
     kind: u8,
 }
 
+impl core::fmt::Debug for RecursiveGeometry {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RecursiveGeometry")
+            .field("kind", &self.kind())
+            .finish_non_exhaustive()
+    }
+}
+
 impl RecursiveGeometry {
     /// Creates an empty exact geometry that falls back to replay until populated.
     #[must_use]

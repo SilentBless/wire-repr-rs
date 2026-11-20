@@ -72,6 +72,7 @@ pub fn decode_vu128<const BITS: u32>(
 
 /// A minimally encoded unsigned VU128 integer.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct Vu128Bytes {
     bytes: [u8; 17],
     len: usize,

@@ -48,6 +48,15 @@ pub struct ArrayItem<'input, T: WireView> {
     state: T::State,
 }
 
+impl<T: WireView> core::fmt::Debug for ArrayItem<'_, T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ArrayItem")
+            .field("len", &self.input.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'input, T: WireView> ArrayItem<'input, T> {
     /// Returns this item's exact represented bytes.
     #[must_use]
@@ -83,6 +92,18 @@ pub struct ArrayView<'input, T: WireView> {
     offset: usize,
     validated_extent: bool,
     marker: core::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: WireView> core::fmt::Debug for ArrayView<'_, T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ArrayView")
+            .field("len", &self.input.len())
+            .field("count", &self.count)
+            .field("offset", &self.offset)
+            .field("validated_extent", &self.validated_extent)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'input, T: WireView> ArrayView<'input, T> {
@@ -196,6 +217,20 @@ pub struct ArrayIter<'input, T: WireView> {
     cursor: usize,
     failed: bool,
     marker: core::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: WireView> core::fmt::Debug for ArrayIter<'_, T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ArrayIter")
+            .field("len", &self.input.len())
+            .field("count", &self.count)
+            .field("offset", &self.offset)
+            .field("index", &self.index)
+            .field("cursor", &self.cursor)
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'input, T: WireView> Iterator for ArrayIter<'input, T> {

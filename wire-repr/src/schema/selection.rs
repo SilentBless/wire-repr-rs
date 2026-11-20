@@ -3,9 +3,24 @@ use super::WireView;
 #[doc(hidden)]
 pub struct FieldRouteEnd<Root>(core::marker::PhantomData<fn() -> Root>);
 
+impl<Root> core::fmt::Debug for FieldRouteEnd<Root> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("FieldRouteEnd")
+    }
+}
+
 /// One field step in a statically typed physical route.
 #[doc(hidden)]
 pub struct FieldRouteStep<const INDEX: usize, Tail>(core::marker::PhantomData<Tail>);
+
+impl<const INDEX: usize, Tail> core::fmt::Debug for FieldRouteStep<INDEX, Tail> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("FieldRouteStep")
+            .field("index", &INDEX)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Type-level route prefix used by generated nested field sets.
 #[doc(hidden)]
@@ -76,6 +91,12 @@ where
 /// One generated physical field in a typed selection expression.
 pub struct FieldPath<Route>(core::marker::PhantomData<Route>);
 
+impl<Route> core::fmt::Debug for FieldPath<Route> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("FieldPath")
+    }
+}
+
 impl<Route> Copy for FieldPath<Route> {}
 
 impl<Route> Clone for FieldPath<Route> {
@@ -97,6 +118,12 @@ impl<Route> FieldPath<Route> {
 
 /// One nested physical field that may be selected whole or descended through generated paths.
 pub struct NestedField<Route, Schema>(FieldPath<Route>, core::marker::PhantomData<fn() -> Schema>);
+
+impl<Route, Schema> core::fmt::Debug for NestedField<Route, Schema> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("NestedField")
+    }
+}
 
 impl<Route, Schema> Copy for NestedField<Route, Schema> {}
 
@@ -129,6 +156,7 @@ impl<Route, Schema> NestedField<Route, Schema> {
     }
 }
 /// Type-level union of two physical selection expressions.
+#[derive(Debug)]
 pub struct FieldUnion<L, R> {
     left: L,
     right: R,
@@ -262,6 +290,12 @@ pub struct WireBytes<'view, V> {
     view: &'view V,
 }
 
+impl<V> core::fmt::Debug for WireBytes<'_, V> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.debug_struct("WireBytes").finish_non_exhaustive()
+    }
+}
+
 impl<'view, V> WireBytes<'view, V> {
     #[doc(hidden)]
     #[must_use]
@@ -330,6 +364,15 @@ pub trait ByteSelection {
 pub struct Selection<'view, V, Expr, const INCLUDE: bool> {
     view: &'view V,
     expression: Expr,
+}
+
+impl<V, Expr, const INCLUDE: bool> core::fmt::Debug for Selection<'_, V, Expr, INCLUDE> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Selection")
+            .field("include", &INCLUDE)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'view, V, Expr, const INCLUDE: bool> Selection<'view, V, Expr, INCLUDE>
@@ -413,6 +456,17 @@ pub struct SelectionChunks<'selection, 'view, V, Expr, const INCLUDE: bool> {
     selection: &'selection Selection<'view, V, Expr, INCLUDE>,
     cursor: usize,
     done: bool,
+}
+
+impl<V, Expr, const INCLUDE: bool> core::fmt::Debug for SelectionChunks<'_, '_, V, Expr, INCLUDE> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("SelectionChunks")
+            .field("selection", &self.selection)
+            .field("cursor", &self.cursor)
+            .field("done", &self.done)
+            .finish()
+    }
 }
 
 impl<'selection, 'view, V, Expr, const INCLUDE: bool>
@@ -531,6 +585,17 @@ pub struct SelectionBytes<'selection, 'view, V, Expr, const INCLUDE: bool> {
     chunks: SelectionChunks<'selection, 'view, V, Expr, INCLUDE>,
     current: &'selection [u8],
     offset: usize,
+}
+
+impl<V, Expr, const INCLUDE: bool> core::fmt::Debug for SelectionBytes<'_, '_, V, Expr, INCLUDE> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("SelectionBytes")
+            .field("chunks", &self.chunks)
+            .field("current_len", &self.current.len())
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'selection, 'view, V, Expr, const INCLUDE: bool> Iterator
