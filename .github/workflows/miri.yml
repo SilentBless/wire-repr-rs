@@ -1,0 +1,38 @@
+name: Miri
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    paths:
+      - wire-repr/src/**
+      - wire-repr-macros/src/**
+      - .github/workflows/miri.yml
+  workflow_dispatch:
+  schedule:
+    - cron: "47 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: miri-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  miri:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned nightly with Miri
+        run: rustup toolchain install nightly-2026-08-01 --profile minimal --component miri --component rust-src
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      # The skipped geometry and structural-fuzz tests loop over large generated inputs and take
+      # tens of minutes interpreted. The other 350 tests still exercise views, arrays, selections,
+      # sequences, and recursive access.
+      - name: Interpret the behavior suite
+        run: >
+          cargo +nightly-2026-08-01 miri test --locked -p wire-repr --test suite --
+          --skip recursive::recursive_geometry
+          --skip structural_fuzz
