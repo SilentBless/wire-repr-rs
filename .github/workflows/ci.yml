@@ -87,8 +87,13 @@ jobs:
         run: cargo +1.91.0 test --locked -p wire-repr-measure --test harness
 
   measure:
+    name: measure (shard ${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust 1.91.0
@@ -103,5 +108,14 @@ jobs:
           echo "$RUNNER_TEMP/rizin/bin" >> "$GITHUB_PATH"
       - name: Build measurement tool once
         run: cargo +1.91.0 build --locked -p wire-repr-measure --release
-      - name: Measure complete generated corpus
-        run: target/release/wire-repr-measure run --json
+      # Every inventory entry lands in exactly one shard, so the three jobs cover the corpus.
+      - name: Measure this shard of the generated corpus
+        run: |
+          set -euo pipefail
+          target/release/wire-repr-measure list --json \
+            | jq -r --argjson shard ${{ matrix.shard }} 'to_entries[] | select(.key % 3 == $shard) | .value' \
+            > "$RUNNER_TEMP/workloads"
+          test -s "$RUNNER_TEMP/workloads"
+          while read -r workload; do
+            target/release/wire-repr-measure run --workload "$workload" --json
+          done < "$RUNNER_TEMP/workloads"
