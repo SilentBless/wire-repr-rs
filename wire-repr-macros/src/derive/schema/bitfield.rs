@@ -394,21 +394,7 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             #vis fn view<#backing: AsRef<[u8]>>(
                 input: #backing,
             ) -> Result<impl #trait_path + #runtime::ExactWire<Self>, #view_error> {
-                let bytes = input.as_ref();
-                let frame = <Self as #runtime::WireView>::frame(bytes, 0)?;
-                let (raw, consumed) = frame.into_parts();
-                if consumed < bytes.len() {
-                    return Err(#view_error::Trailing(#runtime::TrailingBytes {
-                        offset: consumed,
-                        trailing: bytes.len() - consumed,
-                    }));
-                }
-                Ok(#view_impl {
-                    input,
-                    represented_length: consumed,
-                    raw,
-                    marker: ::core::marker::PhantomData,
-                })
+                <Self as #runtime::__private::WireSelect>::select_view(input)
             }
 
             #[inline]
