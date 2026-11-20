@@ -4,16 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Exact-source wire views and progressive no-alloc writers for Rust."
+description = "Derive zero-copy views and typestate writers for variable-length binary formats; no_std, no allocation."
 documentation = "https://docs.rs/wire-repr"
 repository.workspace = true
 homepage.workspace = true
 readme = "../README.md"
 autotests = false
 autoexamples = false
-keywords = ["binary", "zero-copy", "no-std", "no-alloc", "codegen"]
+keywords = ["binary", "parser", "protocol", "zero-copy", "no-std"]
 exclude = ["measure/**"]
-categories = ["encoding", "no-std", "no-std::no-alloc"]
+categories = ["encoding", "parser-implementations", "network-programming", "no-std", "no-std::no-alloc"]
 
 [dependencies]
 leb128fmt.workspace = true

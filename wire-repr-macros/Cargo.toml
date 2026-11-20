@@ -4,11 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Derive macros for wire-repr exact-source views and progressive writers."
+description = "Derive macros for wire-repr zero-copy views and typestate writers."
 documentation = "https://docs.rs/wire-repr-macros"
 repository.workspace = true
 homepage.workspace = true
-keywords = ["binary", "zero-copy", "codegen", "proc-macro"]
+keywords = ["binary", "parser", "zero-copy", "proc-macro"]
 categories = ["development-tools::procedural-macro-helpers"]
 
 [lib]
