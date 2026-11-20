@@ -429,7 +429,6 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
                 }
             }
 
-            #[allow(unsafe_code)]
             #[inline(always)]
             fn variant<#method_lifetime>(
                 &#method_lifetime self,
@@ -640,7 +639,6 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
 
         // SAFETY: generated enum routes preserve their root prefix and map selector/body ordinals
         // to ranges established by exact enum framing.
-        #[allow(unsafe_code)]
         unsafe impl #impl_generics #runtime::__private::WireFieldSchema
             for #self_type #where_clause
         {
@@ -715,7 +713,6 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
         // SAFETY: framing owns every known child state, checks its reported extent against the
         // exact selector-bounded body, and unknown state retains only the decoded selector.
         // Reconstruction receives that state with the same immutable exact span.
-        #[allow(unsafe_code)]
         unsafe impl #impl_generics #runtime::WireView for #self_type #where_clause {
             type Error = #error_type;
             type State = #state_type;
@@ -853,7 +850,6 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             ) -> Result<Self::Root<#backing>, Self::Error> {
                 Self::select_view(input)
             }
-            #[allow(unsafe_code)]
             unsafe fn framed_view<#backing: AsRef<[u8]>>(
                 input: #backing,
                 state: Self::State,

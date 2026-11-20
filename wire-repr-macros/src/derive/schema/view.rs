@@ -574,7 +574,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         quote! {
             // SAFETY: generated fixed framing is deterministic for one immutable span; the
             // sequence constructor rejects a zero width before iteration.
-            #[allow(unsafe_code)]
             unsafe impl #impl_generics #runtime::__private::LeadingWire for #self_type #where_clause {}
         }
     } else {
@@ -619,7 +618,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
 
         // SAFETY: generated field routes preserve their supplied root prefix and the hooks below
         // resolve only checked descriptor ranges for the matching framed schema.
-        #[allow(unsafe_code)]
         unsafe impl #impl_generics #runtime::__private::WireFieldSchema
             for #self_type #where_clause
         {
@@ -699,7 +697,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
 
         // SAFETY: generated framing bounds-checks every retained scalar value and child extent;
         // the descriptor owns no input references and reconstruction slices the same exact span.
-        #[allow(unsafe_code)]
         unsafe impl #impl_generics #runtime::WireView for #self_type #where_clause {
             type Error = #error_type;
             type State = #descriptor_type;
@@ -734,7 +731,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 }
             }
 
-            #[allow(unsafe_code)]
             #[inline(always)]
             unsafe fn selection_field_range(
                 input: &[u8],
@@ -827,7 +823,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 #retained_value.#represented_length_field = #input_length;
                 Ok(#retained_value)
             }
-            #[allow(unsafe_code)]
             unsafe fn framed_view<#backing: AsRef<[u8]>>(
                 #view_input: #backing,
                 state: Self::State,
@@ -2503,7 +2498,6 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                     };
                     quote! {
                         #[inline(always)]
-                        #[allow(unsafe_code)]
                         fn #name(&self) -> #runtime::ArrayView<'_, #item> {
                             let count = #count;
                             let input = &self.as_bytes()[#dynamic_start..#dynamic_end];
@@ -2578,7 +2572,6 @@ fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStrea
                         }
                     };
                     quote! {
-                        #[allow(unsafe_code)]
                         #[inline(always)]
                         fn #name<#field_lifetime>(&#field_lifetime self)
                             -> <#ty as #runtime::WireView>::View<#field_lifetime>

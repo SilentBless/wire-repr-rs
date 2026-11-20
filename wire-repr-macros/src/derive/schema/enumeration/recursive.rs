@@ -398,7 +398,6 @@ pub(super) fn render_view(
                 #render_root_frame
             }
 
-            #[allow(unsafe_code)]
             #[inline(always)]
             fn skip<const #depth: usize>(
                 input: &[u8],
@@ -408,7 +407,6 @@ pub(super) fn render_view(
                 #render_skip
             }
 
-            #[allow(unsafe_code)]
             unsafe fn into_view<
                 '__wire_repr_recursive_item,
                 const #depth: usize,

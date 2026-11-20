@@ -175,7 +175,6 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
         // SAFETY: generated bitfield routes preserve their root prefix and map every ordinal to
         // the same exact fixed-width representation.
 
-        #[allow(unsafe_code)]
         unsafe impl #impl_generics #runtime::__private::WireFieldSchema
             for #self_type #where_clause
         {
@@ -250,7 +249,6 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
 
         // SAFETY: framing checks the complete fixed-width integer span and retains only its decoded
         // value. Reconstruction pairs that value with an immutable span of the same exact width.
-        #[allow(unsafe_code)]
         unsafe impl #impl_generics #runtime::WireView for #self_type #where_clause {
             type Error = #view_error;
             type State = #wire_ty;
@@ -333,7 +331,6 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
             ) -> Result<Self::Root<#backing>, Self::Error> {
                 Self::select_view(input)
             }
-            #[allow(unsafe_code)]
             unsafe fn framed_view<#backing: AsRef<[u8]>>(
                 input: #backing,
                 raw: Self::State,
@@ -355,7 +352,6 @@ pub(super) fn render_view(input: DeriveInput, runtime: &TokenStream) -> syn::Res
         }
 
         // SAFETY: this fixed-width bitfield always consumes the same positive leading extent.
-        #[allow(unsafe_code)]
         unsafe impl #impl_generics #runtime::__private::LeadingWire for #self_type #where_clause {}
 
         impl #impl_generics #self_type #where_clause {

@@ -397,7 +397,6 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                     #recursive_depth,
                 > {
                     // SAFETY: body framing established this exact item span, count, and geometry.
-                    #[allow(unsafe_code)]
                     unsafe {
                         #runtime::__private::RecursiveArrayView::from_validated_parts(
                             &self.input[self.state.start..self.state.end],
@@ -427,7 +426,6 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                 }
             }
 
-            #[allow(unsafe_code)]
             impl #body_impl #runtime::__private::RecursiveBody<#callback, #marker<#root>>
                 for #self_type #body_where
             {
