@@ -1,6 +1,8 @@
+mod error;
 pub(super) mod fields;
-
-use std::collections::BTreeSet;
+mod frame;
+mod geometry;
+mod methods;
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -9,88 +11,127 @@ use syn::{GenericParam, Generics, LifetimeParam, TypeParam, parse_quote};
 
 use fields::render_wire_fields;
 
-use super::model::{DynamicExtent, FieldKind, Position, Scalar, ScalarType, Schema, ValueType};
+use super::model::{FieldKind, Schema, ValueType};
 use super::{
-    fresh_field_ident, fresh_schema_lifetime, from_bytes_method, pascal, private_ident,
-    scalar_type_tokens, value_type_tokens, view_offset, view_optional_size,
+    fresh_field_ident, fresh_schema_lifetime, private_ident, scalar_type_tokens, view_optional_size,
 };
 
 pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<TokenStream> {
-    let vis = &schema.vis;
-    let name = &schema.name;
-    let view_trait = format_ident!("{}View", name.unraw());
-    let descriptor = format_ident!("__WireRepr{}ViewDescriptor", name.unraw());
-    let view_impl = format_ident!("__WireRepr{}ViewImpl", name.unraw());
-    let state_holder = super::fresh_type_ident(&schema.generics, "StateHolder");
-    let error = format_ident!("{}ViewError", name.unraw());
-    let fields_type = format_ident!("{}Fields", name.unraw());
-
     let bounded = bounded_generics(schema, runtime);
-    let (impl_generics, type_generics, where_clause) = bounded.split_for_impl();
-    let self_type = quote!(#name #type_generics);
-    let backing = super::fresh_type_ident(&bounded, "Backing");
-    let view_lifetime = fresh_schema_lifetime(schema, &bounded, "view");
-    let input_field = fresh_field_ident(schema, "input");
-    let represented_length_field = private_ident(schema, "represented_length");
-    let view_marker = private_ident(schema, "view_marker");
-    let frame_input = private_ident(schema, "frame_input");
-    let frame_offset = private_ident(schema, "frame_offset");
-    let current_input = private_ident(schema, "current_input");
-    let view_input = private_ident(schema, "view_input");
-    let input_length = private_ident(schema, "input_length");
-    let frame_result = private_ident(schema, "frame_result");
-    let framed_descriptor = private_ident(schema, "framed_descriptor");
-    let framed_consumed = private_ident(schema, "framed_consumed");
-    let retained_value = private_ident(schema, "retained_value");
+    let names = names(schema, &bounded);
+    let error_signature = error::signature(schema, &names.error, runtime);
+    let error_names = error::variant_names(schema);
+    let error_declaration = error::render(
+        schema,
+        &names.error,
+        &error_names,
+        &error_signature.parameters,
+        runtime,
+    );
+    let descriptor = render_descriptor(schema, &names, &retained_state(schema), runtime);
+    let targets = impl_targets(schema, &names, bounded, &descriptor.ty, runtime);
 
-    let nested_fields = schema.nested_fields().collect::<Vec<_>>();
-    let error_fields = schema
-        .fields
-        .iter()
-        .filter(|field| matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_)))
-        .collect::<Vec<_>>();
-    let descriptor_parameters = (0..nested_fields.len())
-        .map(|index| format_ident!("__WireReprState{index}"))
-        .collect::<Vec<_>>();
-    let error_parameters = (0..error_fields.len())
-        .map(|index| format_ident!("__WireReprError{index}"))
-        .collect::<Vec<_>>();
-    let error_types = error_fields.iter().map(|field| match &field.kind {
-        FieldKind::Nested(nested) => {
-            let ty = &nested.ty;
-            quote!(<#ty as #runtime::WireView>::Error)
-        }
-        FieldKind::Array(array) => {
-            let item = &array.item;
-            quote!(#runtime::ArrayError<<#item as #runtime::WireView>::Error>)
-        }
-        _ => unreachable!("error fields are nested schemas or arrays"),
-    });
-    let error_type = if error_fields.is_empty() {
-        quote!(#error)
-    } else {
-        quote!(#error<#(#error_types),*>)
-    };
+    let descriptor_declaration = &descriptor.declaration;
+    let field_schema = render_field_schema(schema, &names, &targets, runtime);
+    let view_impls = render_view_impls(schema, &names, &targets, runtime);
+    let wire_view_impl = render_wire_view_impl(
+        schema,
+        &names,
+        &targets,
+        &descriptor,
+        &error_signature.ty,
+        &error_names,
+        runtime,
+    );
+    let select_impl = render_select_impl(schema, &names, &targets, &error_names, runtime);
+    let leading_impl = render_leading_impl(schema, &targets, runtime);
+    let inherent_impl = render_inherent_impl(
+        schema,
+        &names,
+        &targets,
+        &error_signature.ty,
+        &error_names,
+        runtime,
+    );
+    Ok(quote! {
+        #error_declaration
+        #descriptor_declaration
+        #field_schema
+        #view_impls
+        #wire_view_impl
+        #select_impl
 
-    let error_names = error_names(schema);
-    let error_declaration = render_error(schema, &error, &error_names, &error_parameters, runtime);
-    let flatten_error = render_flatten_error(schema, &error, &error_names, runtime);
-    let validator_calls = schema
-        .validators
-        .iter()
-        .zip(&error_names.validators)
-        .map(
-            |(validator, variant)| quote!(#validator(&#retained_value).map_err(#error::#variant)?;),
-        )
-        .collect::<Vec<_>>();
+        #leading_impl
 
-    let validator_view_calls = schema
-        .validators
-        .iter()
-        .zip(&error_names.validators)
-        .map(|(validator, variant)| quote!(#validator(view).map_err(#error::#variant)?;))
-        .collect::<Vec<_>>();
-    let retained_char_fields = schema
+        #inherent_impl
+    })
+}
+
+/// Generated type names and hygienic bindings shared by the emitted items.
+struct Names {
+    view_trait: syn::Ident,
+    descriptor: syn::Ident,
+    view_impl: syn::Ident,
+    state_holder: syn::Ident,
+    error: syn::Ident,
+    fields_type: syn::Ident,
+    backing: syn::Ident,
+    view_lifetime: syn::Lifetime,
+    input_field: syn::Ident,
+    represented_length_field: syn::Ident,
+    view_marker: syn::Ident,
+    frame_input: syn::Ident,
+    frame_offset: syn::Ident,
+    current_input: syn::Ident,
+    view_input: syn::Ident,
+    input_length: syn::Ident,
+    frame_result: syn::Ident,
+    framed_descriptor: syn::Ident,
+    framed_consumed: syn::Ident,
+    retained_value: syn::Ident,
+}
+
+fn names(schema: &Schema, bounded: &Generics) -> Names {
+    let name = &schema.name;
+    Names {
+        view_trait: format_ident!("{}View", name.unraw()),
+        descriptor: format_ident!("__WireRepr{}ViewDescriptor", name.unraw()),
+        view_impl: format_ident!("__WireRepr{}ViewImpl", name.unraw()),
+        state_holder: super::fresh_type_ident(&schema.generics, "StateHolder"),
+        error: format_ident!("{}ViewError", name.unraw()),
+        fields_type: format_ident!("{}Fields", name.unraw()),
+        backing: super::fresh_type_ident(bounded, "Backing"),
+        view_lifetime: fresh_schema_lifetime(schema, bounded, "view"),
+        input_field: fresh_field_ident(schema, "input"),
+        represented_length_field: private_ident(schema, "represented_length"),
+        view_marker: private_ident(schema, "view_marker"),
+        frame_input: private_ident(schema, "frame_input"),
+        frame_offset: private_ident(schema, "frame_offset"),
+        current_input: private_ident(schema, "current_input"),
+        view_input: private_ident(schema, "view_input"),
+        input_length: private_ident(schema, "input_length"),
+        frame_result: private_ident(schema, "frame_result"),
+        framed_descriptor: private_ident(schema, "framed_descriptor"),
+        framed_consumed: private_ident(schema, "framed_consumed"),
+        retained_value: private_ident(schema, "retained_value"),
+    }
+}
+
+/// Values framing computes once and the descriptor keeps for the getters.
+struct Retained {
+    /// Field name, framing binding, and value type of each converted scalar.
+    char_fields: Vec<(syn::Ident, syn::Ident, TokenStream)>,
+    /// Field name and framing binding of each presence flag.
+    flags: Vec<(syn::Ident, syn::Ident)>,
+    starts: Vec<syn::Ident>,
+    ends: Vec<syn::Ident>,
+    array_base: Option<syn::Ident>,
+    /// Descriptor field and controller binding of each counted array.
+    array_counts: Vec<(syn::Ident, syn::Ident)>,
+}
+
+fn retained_state(schema: &Schema) -> Retained {
+    let char_fields = schema
         .fields
         .iter()
         .enumerate()
@@ -113,10 +154,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             ))
         })
         .collect::<Vec<_>>();
-    let converted_parameters = (0..retained_char_fields.len())
-        .map(|index| format_ident!("__WireReprValue{index}"))
-        .collect::<Vec<_>>();
-    let retained_flags = schema
+    let flags = schema
         .flag_fields()
         .map(|field| {
             (
@@ -125,25 +163,25 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             )
         })
         .collect::<Vec<_>>();
-    let retained_starts = schema
+    let starts = schema
         .fields
         .iter()
         .enumerate()
-        .filter(|(index, _)| retains_geometry_start(schema, *index))
+        .filter(|(index, _)| geometry::retains_start(schema, *index))
         .map(|(index, _)| private_ident(schema, &format!("field_{index}_start")))
         .collect::<Vec<_>>();
-    let retained_ends = schema
+    let ends = schema
         .fields
         .iter()
         .enumerate()
-        .filter(|(index, _)| retains_geometry_end(schema, *index))
+        .filter(|(index, _)| geometry::retains_end(schema, *index))
         .map(|(index, _)| private_ident(schema, &format!("field_{index}_end")))
         .collect::<Vec<_>>();
-    let retained_array_base = schema
+    let array_base = schema
         .array_fields()
         .next()
         .map(|_| private_ident(schema, "array_base_offset"));
-    let retained_array_counts = schema
+    let array_counts = schema
         .fields
         .iter()
         .enumerate()
@@ -157,23 +195,62 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             ))
         })
         .collect::<Vec<_>>();
-    let descriptor_array_count_fields = retained_array_counts
-        .iter()
-        .map(|(field, _)| quote!(#field: usize,));
-    let descriptor_char_fields = retained_char_fields
+    Retained {
+        char_fields,
+        flags,
+        starts,
+        ends,
+        array_base,
+        array_counts,
+    }
+}
+
+/// The state type `frame` returns: its declaration, its instantiated type, and its constructor.
+struct Descriptor {
+    declaration: TokenStream,
+    ty: TokenStream,
+    value: TokenStream,
+}
+
+fn render_descriptor(
+    schema: &Schema,
+    names: &Names,
+    retained: &Retained,
+    runtime: &TokenStream,
+) -> Descriptor {
+    let vis = &schema.vis;
+    let Names {
+        descriptor,
+        frame_offset,
+        ..
+    } = names;
+    let Retained {
+        char_fields,
+        flags,
+        starts,
+        ends,
+        array_base,
+        array_counts,
+    } = retained;
+    let nested_fields = schema.nested_fields().collect::<Vec<_>>();
+    let descriptor_parameters = (0..nested_fields.len())
+        .map(|index| format_ident!("__WireReprState{index}"))
+        .collect::<Vec<_>>();
+    let converted_parameters = (0..char_fields.len())
+        .map(|index| format_ident!("__WireReprValue{index}"))
+        .collect::<Vec<_>>();
+    let descriptor_array_count_fields =
+        array_counts.iter().map(|(field, _)| quote!(#field: usize,));
+    let descriptor_char_fields = char_fields
         .iter()
         .zip(&converted_parameters)
         .map(|((field, _, _), ty)| quote!(#field: #ty,));
-    let descriptor_flag_fields = retained_flags
+    let descriptor_flag_fields = flags.iter().map(|(field, _)| quote!(#field: bool,));
+    let descriptor_geometry_fields = starts
         .iter()
-        .map(|(field, _)| quote!(#field: bool,));
-    let descriptor_geometry_fields = retained_starts
-        .iter()
-        .chain(&retained_ends)
+        .chain(ends)
         .map(|field| quote!(#field: usize,));
-    let descriptor_array_base_field = retained_array_base
-        .iter()
-        .map(|field| quote!(#field: usize,));
+    let descriptor_array_base_field = array_base.iter().map(|field| quote!(#field: usize,));
     let descriptor_nested_fields =
         nested_fields
             .iter()
@@ -220,32 +297,27 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         let ty = &nested.ty;
         quote!(<#ty as #runtime::WireView>::State)
     });
-    let descriptor_value_types = retained_char_fields.iter().map(|(_, _, ty)| ty);
+    let descriptor_value_types = char_fields.iter().map(|(_, _, ty)| ty);
     let descriptor_type = if descriptor_parameters.is_empty() && converted_parameters.is_empty() {
         quote!(#descriptor)
     } else {
         quote!(#descriptor<#(#descriptor_states,)* #(#descriptor_value_types),*>)
     };
 
-    let descriptor_char_values = retained_char_fields
+    let descriptor_char_values = char_fields
         .iter()
         .map(|(field, value, _)| quote!(#field: #value,));
-    let descriptor_flag_values = retained_flags
-        .iter()
-        .map(|(field, value)| quote!(#field: #value,));
+    let descriptor_flag_values = flags.iter().map(|(field, value)| quote!(#field: #value,));
     let descriptor_nested_values = nested_fields.iter().map(|field| {
         let name = &field.name;
         let state = private_ident(schema, &format!("{}_state", name.unraw()));
         quote!(#name: #state,)
     });
-    let descriptor_geometry_values = retained_starts
-        .iter()
-        .chain(&retained_ends)
-        .map(|field| quote!(#field,));
-    let descriptor_array_base_value = retained_array_base
+    let descriptor_geometry_values = starts.iter().chain(ends).map(|field| quote!(#field,));
+    let descriptor_array_base_value = array_base
         .iter()
         .map(|field| quote!(#field: #frame_offset,));
-    let descriptor_array_count_values = retained_array_counts
+    let descriptor_array_count_values = array_counts
         .iter()
         .map(|(field, value)| quote!(#field: #value,));
     let descriptor_value = quote! {
@@ -258,110 +330,46 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             #(#descriptor_array_count_values)*
         }
     };
+    Descriptor {
+        declaration: descriptor_declaration,
+        ty: descriptor_type,
+        value: descriptor_value,
+    }
+}
 
-    let fixed_size = if schema.has_explicit_geometry() {
-        quote!(None)
-    } else {
-        view_optional_size(schema, runtime)
-    };
-    let frame_steps = render_frame_steps(
-        schema,
-        &error,
-        &error_names,
-        &frame_input,
-        &frame_offset,
-        runtime,
-        false,
-    );
-    let terminal_leading_extent = match schema.fields.last().map(|field| &field.kind) {
-        Some(FieldKind::RawBytes(super::model::RawBytes {
-            extent: super::model::DynamicExtent::Rest,
-        })) => quote!(false),
-        Some(FieldKind::Array(array)) => {
-            let item = &array.item;
-            quote!(<#item as #runtime::WireView>::LEADING_EXTENT)
-        }
-        Some(FieldKind::Nested(super::model::NestedField {
-            terminal: true,
-            extent: None,
-            ty,
-        })) => quote!(<#ty as #runtime::WireView>::LEADING_EXTENT),
-        _ => quote!(true),
-    };
-    let leading_children = schema.fields.iter().filter_map(|field| {
-        let FieldKind::Nested(nested) = &field.kind else {
-            return None;
-        };
-        if nested.terminal || nested.extent.is_some() {
-            return None;
-        }
-        let ty = &nested.ty;
-        Some(quote!(
-            (<#ty as #runtime::WireView>::FIXED_SIZE.is_some()
-                || <#ty as #runtime::WireView>::LEADING_EXTENT)
-        ))
-    });
-    let leading_extent = quote!(#terminal_leading_extent #(&& #leading_children)*);
-    let consumed = if schema.has_sequential_geometry() {
-        let cursor = private_ident(schema, "geometry_cursor");
-        quote!(#cursor)
-    } else if let Some(last) = schema.fields.last() {
-        match &last.kind {
-            FieldKind::Nested(_) => {
-                let total = private_ident(schema, &format!("{}_total", last.name.unraw()));
-                quote!(#total)
-            }
-            FieldKind::Scalar(_)
-            | FieldKind::Bytes(_)
-            | FieldKind::ScalarArray(_)
-            | FieldKind::BitProjection(_) => {
-                let total = view_offset_for_end(schema, last, runtime);
-                quote!(#total.expect("framed fixed schema width"))
-            }
-            FieldKind::RawBytes(_)
-            | FieldKind::Array(_)
-            | FieldKind::Recursive(_)
-            | FieldKind::Flag(_) => {
-                unreachable!("dynamic fields use explicit geometry")
-            }
-        }
-    } else {
-        quote!(0usize)
-    };
-    let exact_frame = if matches!(
-        schema.fields.last().map(|field| &field.kind),
-        Some(FieldKind::Array(_))
-    ) || matches!(
-        schema.fields.last().map(|field| &field.kind),
-        Some(FieldKind::Nested(nested)) if nested.terminal && nested.extent.is_none()
-    ) {
-        let exact_steps = render_frame_steps(
-            schema,
-            &error,
-            &error_names,
-            &frame_input,
-            &frame_offset,
-            runtime,
-            true,
-        );
-        quote! {
-            #[inline]
-            fn frame_exact(
-                #frame_input: &[u8],
-                #frame_offset: usize,
-            ) -> Result<#runtime::Frame<Self::State>, Self::Error> {
-                #(#exact_steps)*
-                Ok(#runtime::Frame::new(#descriptor_value, #consumed))
-            }
-        }
-    } else {
-        TokenStream::new()
-    };
+/// Generics and implementing types of each generated impl family.
+struct ImplTargets {
+    bounded: Generics,
+    retained_generics: Generics,
+    projected_generics: Generics,
+    common_generics: Generics,
+    schema_arguments: Vec<TokenStream>,
+    self_type: TokenStream,
+    retained_type: TokenStream,
+    projected_type: TokenStream,
+    trait_path: TokenStream,
+    root_fields_type: TokenStream,
+}
 
-    let trait_methods = render_trait_methods(schema, runtime);
-    let retained_methods = render_view_methods(schema, runtime);
-    let projected_methods = retained_methods.clone();
-
+fn impl_targets(
+    schema: &Schema,
+    names: &Names,
+    bounded: Generics,
+    descriptor_type: &TokenStream,
+    runtime: &TokenStream,
+) -> ImplTargets {
+    let name = &schema.name;
+    let Names {
+        view_trait,
+        view_impl,
+        state_holder,
+        fields_type,
+        backing,
+        view_lifetime,
+        ..
+    } = names;
+    let (_, type_generics, _) = bounded.split_for_impl();
+    let self_type = quote!(#name #type_generics);
     let schema_arguments = bounded
         .params
         .iter()
@@ -389,7 +397,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         .make_where_clause()
         .predicates
         .push(parse_quote!(#backing: AsRef<[u8]>));
-    let (retained_impl, _, retained_where) = retained_generics.split_for_impl();
     let retained_type = quote!(
         #view_impl<#(#schema_arguments,)* #backing, #descriptor_type>
     );
@@ -399,7 +406,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         0,
         GenericParam::Lifetime(LifetimeParam::new(view_lifetime.clone())),
     );
-    let (projected_impl, _, projected_where) = projected_generics.split_for_impl();
     let projected_type = quote!(
         #view_impl<
             #(#schema_arguments,)*
@@ -412,10 +418,44 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     common_generics
         .params
         .push(GenericParam::Type(TypeParam::from(state_holder.clone())));
-    let (common_impl, common_types, common_where) = common_generics.split_for_impl();
     let trait_path = quote!(#view_trait #type_generics);
+    let root_fields_type = quote!(
+        #fields_type<
+            #(#schema_arguments,)*
+            #runtime::__private::FieldRouteEnd<#self_type>
+        >
+    );
+    ImplTargets {
+        bounded,
+        retained_generics,
+        projected_generics,
+        common_generics,
+        schema_arguments,
+        self_type,
+        retained_type,
+        projected_type,
+        trait_path,
+        root_fields_type,
+    }
+}
 
-    let field_prefix = super::fresh_type_ident(&bounded, "FieldPrefix");
+/// Renders the typed field-path struct and its `WireFieldSchema` impl.
+fn render_field_schema(
+    schema: &Schema,
+    names: &Names,
+    targets: &ImplTargets,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let vis = &schema.vis;
+    let fields_type = &names.fields_type;
+    let ImplTargets {
+        bounded,
+        schema_arguments,
+        self_type,
+        ..
+    } = targets;
+    let (impl_generics, _, where_clause) = bounded.split_for_impl();
+    let field_prefix = super::fresh_type_ident(bounded, "FieldPrefix");
     let fields_marker = private_ident(schema, "fields_marker");
     let mut fields_generics = bounded.clone();
     fields_generics
@@ -426,12 +466,6 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
         .predicates
         .push(parse_quote!(#field_prefix: #runtime::__private::FieldPrefix));
     let (fields_impl, _, fields_where) = fields_generics.split_for_impl();
-    let root_fields_type = quote!(
-        #fields_type<
-            #(#schema_arguments,)*
-            #runtime::__private::FieldRouteEnd<#self_type>
-        >
-    );
     let field_members = schema
         .fields
         .iter()
@@ -468,150 +502,7 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             }
         })
         .collect::<Vec<_>>();
-    let range_arms = schema
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            let start = geometry_start(schema, index, runtime);
-            let end = geometry_end(schema, index, runtime);
-            quote!(#index => Some(#start..#end),)
-        })
-        .collect::<Vec<_>>();
-    let nested_selection_arms = schema
-        .fields
-        .iter()
-        .enumerate()
-        .filter_map(|(index, field)| {
-            let FieldKind::Nested(nested) = &field.kind else {
-                return None;
-            };
-            let name = &field.name;
-            let ty = &nested.ty;
-            Some(quote! {
-                #index => {
-                    // SAFETY: this hook receives the parent schema's retained exact span/state pair.
-                    let parent = unsafe { Self::selection_field_range(input, state, #index) }?;
-                    let child_input = input.get(parent.clone())?;
-                    // SAFETY: child_input and child state were framed together at this field site.
-                    let child_range = unsafe { Route::resolve::<#ty>(child_input, &state.#name) }?;
-                    let start = parent.start.checked_add(child_range.start)?;
-                    let end = parent.start.checked_add(child_range.end)?;
-                    (end <= parent.end).then_some(start..end)
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let sequence_lifetime = fresh_schema_lifetime(schema, &bounded, "sequence");
-    let views_method = if schema.is_syntactically_fixed() {
-        quote! {
-            /// Validates consecutive fixed-width representations and returns an exact iterator.
-            #vis fn views<#sequence_lifetime>(
-                input: &#sequence_lifetime [u8],
-            ) -> Result<
-                #runtime::FixedViews<#sequence_lifetime, Self>,
-                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
-            >
-            where
-                Self: #runtime::__private::LeadingWire,
-            {
-                #runtime::FixedViews::new(input)
-            }
-        }
-    } else if schema.has_leading_extent() {
-        quote! {
-            /// Returns a lazy facade over consecutive variable-width representations.
-            #vis fn views<#sequence_lifetime>(
-                input: &#sequence_lifetime [u8],
-            ) -> Result<
-                #runtime::VariableViews<#sequence_lifetime, Self>,
-                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
-            > {
-                if !<Self as #runtime::WireView>::LEADING_EXTENT {
-                    return Err(#runtime::SequenceError::Unavailable);
-                }
-                Ok(#runtime::VariableViews::new(input))
-            }
-        }
-    } else {
-        TokenStream::new()
-    };
-    let cursor_methods = if schema.has_leading_extent() {
-        quote! {
-            /// Frames the first representation and returns a cursor over the suffix.
-            #vis fn cursor<#sequence_lifetime>(
-                input: &#sequence_lifetime [u8],
-            ) -> Result<
-                (
-                    <Self as #runtime::__private::WireSelect>::Root<&#sequence_lifetime [u8]>,
-                    #runtime::Cursor<#sequence_lifetime>,
-                ),
-                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
-            > {
-                if !<Self as #runtime::WireView>::LEADING_EXTENT {
-                    return Err(#runtime::SequenceError::Unavailable);
-                }
-                let mut cursor = #runtime::Cursor::new(input);
-                let view = cursor.read::<Self>()?;
-                Ok((view, cursor))
-            }
-
-            /// Frames this schema at the cursor without advancing on failure.
-            #vis fn next<#sequence_lifetime>(
-                cursor: &mut #runtime::Cursor<#sequence_lifetime>,
-            ) -> Result<
-                <Self as #runtime::__private::WireSelect>::Root<&#sequence_lifetime [u8]>,
-                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
-            > {
-                if !<Self as #runtime::WireView>::LEADING_EXTENT {
-                    return Err(#runtime::SequenceError::Unavailable);
-                }
-                cursor.read::<Self>()
-            }
-        }
-    } else {
-        TokenStream::new()
-    };
-
-    let leading_impl = if schema.is_syntactically_fixed() {
-        quote! {
-            // SAFETY: generated fixed framing is deterministic for one immutable span; the
-            // sequence constructor rejects a zero width before iteration.
-            unsafe impl #impl_generics #runtime::__private::LeadingWire for #self_type #where_clause {}
-        }
-    } else {
-        TokenStream::new()
-    };
-
-    let range_body = quote!(match index {
-        #(#range_arms)*
-        _ => None,
-    });
-    let retained_fields = render_wire_fields(
-        quote!(unsafe impl #retained_impl #runtime::__private::WireFields
-            for #retained_type #retained_where),
-        runtime,
-        &self_type,
-        &root_fields_type,
-        &range_body,
-        quote!(&self.descriptor),
-        true,
-    );
-    let projected_fields = render_wire_fields(
-        quote!(unsafe impl #projected_impl #runtime::__private::WireFields
-            for #projected_type #projected_where),
-        runtime,
-        &self_type,
-        &root_fields_type,
-        &range_body,
-        quote!(self.descriptor),
-        true,
-    );
-    Ok(quote! {
-        #error_declaration
-        #descriptor_declaration
-
-
+    quote! {
         #[doc = "Typed physical field paths generated for this schema."]
         #vis struct #fields_type #fields_impl #fields_where {
             #(#field_members)*
@@ -637,6 +528,78 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             }
 
         }
+    }
+}
+
+/// Renders the view struct, the view trait, and the trait's retained and projected impls.
+fn render_view_impls(
+    schema: &Schema,
+    names: &Names,
+    targets: &ImplTargets,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let vis = &schema.vis;
+    let Names {
+        view_trait,
+        view_impl,
+        state_holder,
+        backing,
+        input_field,
+        represented_length_field,
+        view_marker,
+        ..
+    } = names;
+    let ImplTargets {
+        self_type,
+        retained_type,
+        projected_type,
+        trait_path,
+        root_fields_type,
+        ..
+    } = targets;
+    let (impl_generics, _, where_clause) = targets.bounded.split_for_impl();
+    let (retained_impl, _, retained_where) = targets.retained_generics.split_for_impl();
+    let (projected_impl, _, projected_where) = targets.projected_generics.split_for_impl();
+    let (common_impl, common_types, common_where) = targets.common_generics.split_for_impl();
+
+    let trait_methods = methods::render_declarations(schema, runtime);
+    let retained_methods = methods::render_bodies(schema, runtime);
+    let projected_methods = retained_methods.clone();
+    let range_arms = schema
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let start = geometry::field_start(schema, index, runtime);
+            let end = geometry::field_end(schema, index, runtime);
+            quote!(#index => Some(#start..#end),)
+        })
+        .collect::<Vec<_>>();
+    let range_body = quote!(match index {
+        #(#range_arms)*
+        _ => None,
+    });
+    let retained_fields = render_wire_fields(
+        quote!(unsafe impl #retained_impl #runtime::__private::WireFields
+            for #retained_type #retained_where),
+        runtime,
+        self_type,
+        root_fields_type,
+        &range_body,
+        quote!(&self.descriptor),
+        true,
+    );
+    let projected_fields = render_wire_fields(
+        quote!(unsafe impl #projected_impl #runtime::__private::WireFields
+            for #projected_type #projected_where),
+        runtime,
+        self_type,
+        root_fields_type,
+        &range_body,
+        quote!(self.descriptor),
+        true,
+    );
+    quote! {
         #[doc(hidden)]
         #vis struct #view_impl #common_impl #common_where {
             #input_field: #backing,
@@ -697,7 +660,65 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 <Self as AsRef<[u8]>>::as_ref(self)
             }
         }
+    }
+}
 
+fn render_wire_view_impl(
+    schema: &Schema,
+    names: &Names,
+    targets: &ImplTargets,
+    descriptor: &Descriptor,
+    error_type: &TokenStream,
+    error_names: &error::VariantNames,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let Names {
+        error,
+        view_impl,
+        view_lifetime,
+        input_field,
+        represented_length_field,
+        view_marker,
+        frame_input,
+        frame_offset,
+        ..
+    } = names;
+    let ImplTargets {
+        self_type,
+        projected_type,
+        ..
+    } = targets;
+    let (impl_generics, _, where_clause) = targets.bounded.split_for_impl();
+    let descriptor_type = &descriptor.ty;
+    let descriptor_value = &descriptor.value;
+
+    let fixed_size = if schema.has_explicit_geometry() {
+        quote!(None)
+    } else {
+        view_optional_size(schema, runtime)
+    };
+    let frame_steps = frame::render_steps(
+        schema,
+        error,
+        error_names,
+        frame_input,
+        frame_offset,
+        runtime,
+        false,
+    );
+    let leading_extent = render_leading_extent(schema, runtime);
+    let consumed = render_consumed(schema, runtime);
+    let exact_frame = render_exact_frame(
+        schema,
+        names,
+        error_names,
+        descriptor_value,
+        &consumed,
+        runtime,
+    );
+    let nested_selection_arms = render_nested_selection_arms(schema);
+    let flatten_error = error::render_flatten(schema, error, error_names, runtime);
+    quote! {
         // SAFETY: generated framing bounds-checks every retained scalar value and child extent;
         // the descriptor owns no input references and reconstruction slices the same exact span.
         unsafe impl #impl_generics #runtime::WireView for #self_type #where_clause {
@@ -760,7 +781,203 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
             }
             #flatten_error
         }
+    }
+}
 
+/// Renders whether a following schema can start where this one ends.
+fn render_leading_extent(schema: &Schema, runtime: &TokenStream) -> TokenStream {
+    let terminal_leading_extent = match schema.fields.last().map(|field| &field.kind) {
+        Some(FieldKind::RawBytes(super::model::RawBytes {
+            extent: super::model::DynamicExtent::Rest,
+        })) => quote!(false),
+        Some(FieldKind::Array(array)) => {
+            let item = &array.item;
+            quote!(<#item as #runtime::WireView>::LEADING_EXTENT)
+        }
+        Some(FieldKind::Nested(super::model::NestedField {
+            terminal: true,
+            extent: None,
+            ty,
+        })) => quote!(<#ty as #runtime::WireView>::LEADING_EXTENT),
+        _ => quote!(true),
+    };
+    let leading_children = schema.fields.iter().filter_map(|field| {
+        let FieldKind::Nested(nested) = &field.kind else {
+            return None;
+        };
+        if nested.terminal || nested.extent.is_some() {
+            return None;
+        }
+        let ty = &nested.ty;
+        Some(quote!(
+            (<#ty as #runtime::WireView>::FIXED_SIZE.is_some()
+                || <#ty as #runtime::WireView>::LEADING_EXTENT)
+        ))
+    });
+    quote!(#terminal_leading_extent #(&& #leading_children)*)
+}
+
+/// Renders the byte count `frame` reports once every step has run.
+fn render_consumed(schema: &Schema, runtime: &TokenStream) -> TokenStream {
+    if schema.has_sequential_geometry() {
+        let cursor = private_ident(schema, "geometry_cursor");
+        quote!(#cursor)
+    } else if let Some(last) = schema.fields.last() {
+        match &last.kind {
+            FieldKind::Nested(_) => {
+                let total = private_ident(schema, &format!("{}_total", last.name.unraw()));
+                quote!(#total)
+            }
+            FieldKind::Scalar(_)
+            | FieldKind::Bytes(_)
+            | FieldKind::ScalarArray(_)
+            | FieldKind::BitProjection(_) => {
+                let total = geometry::view_offset_for_end(schema, last, runtime);
+                quote!(#total.expect("framed fixed schema width"))
+            }
+            FieldKind::RawBytes(_)
+            | FieldKind::Array(_)
+            | FieldKind::Recursive(_)
+            | FieldKind::Flag(_) => {
+                unreachable!("dynamic fields use explicit geometry")
+            }
+        }
+    } else {
+        quote!(0usize)
+    }
+}
+
+/// Renders `frame_exact` for schemas whose last field takes the rest of the input.
+fn render_exact_frame(
+    schema: &Schema,
+    names: &Names,
+    error_names: &error::VariantNames,
+    descriptor_value: &TokenStream,
+    consumed: &TokenStream,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let Names {
+        error,
+        frame_input,
+        frame_offset,
+        ..
+    } = names;
+    if matches!(
+        schema.fields.last().map(|field| &field.kind),
+        Some(FieldKind::Array(_))
+    ) || matches!(
+        schema.fields.last().map(|field| &field.kind),
+        Some(FieldKind::Nested(nested)) if nested.terminal && nested.extent.is_none()
+    ) {
+        let exact_steps = frame::render_steps(
+            schema,
+            error,
+            error_names,
+            frame_input,
+            frame_offset,
+            runtime,
+            true,
+        );
+        quote! {
+            #[inline]
+            fn frame_exact(
+                #frame_input: &[u8],
+                #frame_offset: usize,
+            ) -> Result<#runtime::Frame<Self::State>, Self::Error> {
+                #(#exact_steps)*
+                Ok(#runtime::Frame::new(#descriptor_value, #consumed))
+            }
+        }
+    } else {
+        TokenStream::new()
+    }
+}
+
+fn render_nested_selection_arms(schema: &Schema) -> Vec<TokenStream> {
+    schema
+        .fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let FieldKind::Nested(nested) = &field.kind else {
+                return None;
+            };
+            let name = &field.name;
+            let ty = &nested.ty;
+            Some(quote! {
+                #index => {
+                    // SAFETY: this hook receives the parent schema's retained exact span/state pair.
+                    let parent = unsafe { Self::selection_field_range(input, state, #index) }?;
+                    let child_input = input.get(parent.clone())?;
+                    // SAFETY: child_input and child state were framed together at this field site.
+                    let child_range = unsafe { Route::resolve::<#ty>(child_input, &state.#name) }?;
+                    let start = parent.start.checked_add(child_range.start)?;
+                    let end = parent.start.checked_add(child_range.end)?;
+                    (end <= parent.end).then_some(start..end)
+                }
+            })
+        })
+        .collect()
+}
+
+/// Renders the schema validator calls that run on a framed, retained view.
+fn render_validator_calls(
+    schema: &Schema,
+    names: &Names,
+    error_names: &error::VariantNames,
+) -> Vec<TokenStream> {
+    let Names {
+        error,
+        retained_value,
+        ..
+    } = names;
+    schema
+        .validators
+        .iter()
+        .zip(&error_names.validators)
+        .map(
+            |(validator, variant)| quote!(#validator(&#retained_value).map_err(#error::#variant)?;),
+        )
+        .collect()
+}
+
+fn render_select_impl(
+    schema: &Schema,
+    names: &Names,
+    targets: &ImplTargets,
+    error_names: &error::VariantNames,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let Names {
+        error,
+        view_impl,
+        backing,
+        input_field,
+        represented_length_field,
+        view_marker,
+        current_input,
+        view_input,
+        input_length,
+        frame_result,
+        framed_descriptor,
+        framed_consumed,
+        retained_value,
+        ..
+    } = names;
+    let ImplTargets {
+        self_type,
+        retained_type,
+        ..
+    } = targets;
+    let (impl_generics, _, where_clause) = targets.bounded.split_for_impl();
+    let validator_calls = render_validator_calls(schema, names, error_names);
+    let validator_view_calls = schema
+        .validators
+        .iter()
+        .zip(&error_names.validators)
+        .map(|(validator, variant)| quote!(#validator(view).map_err(#error::#variant)?;))
+        .collect::<Vec<_>>();
+    quote! {
         impl #impl_generics #runtime::__private::WireSelect for #self_type #where_clause {
             type Root<#backing> = #retained_type
             where
@@ -846,9 +1063,65 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 Ok(())
             }
         }
+    }
+}
 
-        #leading_impl
+fn render_leading_impl(
+    schema: &Schema,
+    targets: &ImplTargets,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let self_type = &targets.self_type;
+    let (impl_generics, _, where_clause) = targets.bounded.split_for_impl();
+    if schema.is_syntactically_fixed() {
+        quote! {
+            // SAFETY: generated fixed framing is deterministic for one immutable span; the
+            // sequence constructor rejects a zero width before iteration.
+            unsafe impl #impl_generics #runtime::__private::LeadingWire for #self_type #where_clause {}
+        }
+    } else {
+        TokenStream::new()
+    }
+}
 
+/// Renders the inherent `views`, `cursor`, `next`, `view`, and `view_unchecked` entry points.
+fn render_inherent_impl(
+    schema: &Schema,
+    names: &Names,
+    targets: &ImplTargets,
+    error_type: &TokenStream,
+    error_names: &error::VariantNames,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let vis = &schema.vis;
+    let Names {
+        error,
+        view_impl,
+        backing,
+        input_field,
+        represented_length_field,
+        view_marker,
+        current_input,
+        view_input,
+        input_length,
+        frame_result,
+        framed_descriptor,
+        framed_consumed,
+        retained_value,
+        ..
+    } = names;
+    let ImplTargets {
+        bounded,
+        self_type,
+        trait_path,
+        ..
+    } = targets;
+    let (impl_generics, _, where_clause) = bounded.split_for_impl();
+    let sequence_lifetime = fresh_schema_lifetime(schema, bounded, "sequence");
+    let views_method = render_views_method(schema, &sequence_lifetime, runtime);
+    let cursor_methods = render_cursor_methods(schema, &sequence_lifetime, runtime);
+    let validator_calls = render_validator_calls(schema, names, error_names);
+    quote! {
         impl #impl_generics #self_type #where_clause {
             #views_method
             #cursor_methods
@@ -916,7 +1189,92 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
                 })
             }
         }
-    })
+    }
+}
+
+fn render_views_method(
+    schema: &Schema,
+    sequence_lifetime: &syn::Lifetime,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let vis = &schema.vis;
+    if schema.is_syntactically_fixed() {
+        quote! {
+            /// Validates consecutive fixed-width representations and returns an exact iterator.
+            #vis fn views<#sequence_lifetime>(
+                input: &#sequence_lifetime [u8],
+            ) -> Result<
+                #runtime::FixedViews<#sequence_lifetime, Self>,
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            >
+            where
+                Self: #runtime::__private::LeadingWire,
+            {
+                #runtime::FixedViews::new(input)
+            }
+        }
+    } else if schema.has_leading_extent() {
+        quote! {
+            /// Returns a lazy facade over consecutive variable-width representations.
+            #vis fn views<#sequence_lifetime>(
+                input: &#sequence_lifetime [u8],
+            ) -> Result<
+                #runtime::VariableViews<#sequence_lifetime, Self>,
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            > {
+                if !<Self as #runtime::WireView>::LEADING_EXTENT {
+                    return Err(#runtime::SequenceError::Unavailable);
+                }
+                Ok(#runtime::VariableViews::new(input))
+            }
+        }
+    } else {
+        TokenStream::new()
+    }
+}
+
+fn render_cursor_methods(
+    schema: &Schema,
+    sequence_lifetime: &syn::Lifetime,
+    runtime: &TokenStream,
+) -> TokenStream {
+    let vis = &schema.vis;
+    if schema.has_leading_extent() {
+        quote! {
+            /// Frames the first representation and returns a cursor over the suffix.
+            #vis fn cursor<#sequence_lifetime>(
+                input: &#sequence_lifetime [u8],
+            ) -> Result<
+                (
+                    <Self as #runtime::__private::WireSelect>::Root<&#sequence_lifetime [u8]>,
+                    #runtime::Cursor<#sequence_lifetime>,
+                ),
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            > {
+                if !<Self as #runtime::WireView>::LEADING_EXTENT {
+                    return Err(#runtime::SequenceError::Unavailable);
+                }
+                let mut cursor = #runtime::Cursor::new(input);
+                let view = cursor.read::<Self>()?;
+                Ok((view, cursor))
+            }
+
+            /// Frames this schema at the cursor without advancing on failure.
+            #vis fn next<#sequence_lifetime>(
+                cursor: &mut #runtime::Cursor<#sequence_lifetime>,
+            ) -> Result<
+                <Self as #runtime::__private::WireSelect>::Root<&#sequence_lifetime [u8]>,
+                #runtime::SequenceError<<Self as #runtime::WireView>::Error>,
+            > {
+                if !<Self as #runtime::WireView>::LEADING_EXTENT {
+                    return Err(#runtime::SequenceError::Unavailable);
+                }
+                cursor.read::<Self>()
+            }
+        }
+    } else {
+        TokenStream::new()
+    }
 }
 
 fn bounded_generics(schema: &Schema, runtime: &TokenStream) -> Generics {
@@ -955,1730 +1313,4 @@ fn bounded_generics(schema: &Schema, runtime: &TokenStream) -> Generics {
             .push(parse_quote!(#ty: Copy + TryFrom<#wire> + 'static));
     }
     generics
-}
-
-struct ErrorNames {
-    fields: Vec<FieldErrorNames>,
-    validators: Vec<syn::Ident>,
-}
-
-struct FieldErrorNames {
-    shortage: syn::Ident,
-    mismatch: Option<syn::Ident>,
-    conversion: Option<syn::Ident>,
-    nested: Option<syn::Ident>,
-    extent: Option<syn::Ident>,
-}
-
-fn error_names(schema: &Schema) -> ErrorNames {
-    let mut used = BTreeSet::from([
-        "InvalidFrame".to_owned(),
-        "LayoutUnavailable".to_owned(),
-        "PositionBeforeCursor".to_owned(),
-        "Trailing".to_owned(),
-    ]);
-    let fields = schema
-        .fields
-        .iter()
-        .map(|field| {
-            let base = pascal(&field.name).to_string();
-            let mismatch = field
-                .kind
-                .constant()
-                .map(|_| unique_variant(&mut used, &format!("{base}Constant")));
-            let conversion = match &field.kind {
-                FieldKind::Scalar(scalar)
-                    if scalar.value_type.is_converted()
-                        || (schema.is_count_controller(&field.name)
-                            && scalar.wire_type.is_signed_integer()) =>
-                {
-                    Some(unique_variant(&mut used, &format!("{base}Value")))
-                }
-                FieldKind::Scalar(_)
-                | FieldKind::Bytes(_)
-                | FieldKind::ScalarArray(_)
-                | FieldKind::RawBytes(_)
-                | FieldKind::Array(_)
-                | FieldKind::Recursive(_)
-                | FieldKind::Flag(_)
-                | FieldKind::BitProjection(_)
-                | FieldKind::Nested(_) => None,
-            };
-            let nested = matches!(field.kind, FieldKind::Nested(_) | FieldKind::Array(_))
-                .then(|| unique_variant(&mut used, &base));
-            let extent = matches!(field.kind, FieldKind::Nested(_))
-                .then(|| unique_variant(&mut used, &format!("{base}Extent")));
-            let decorated_shortage = mismatch.is_some() || conversion.is_some() || nested.is_some();
-            let shortage_base = match &field.kind {
-                FieldKind::Scalar(scalar) if scalar.is_variable() => {
-                    format!("{base}{}", super::integer::error_suffix(scalar))
-                }
-                _ if decorated_shortage => format!("{base}NeedMore"),
-                _ => base.clone(),
-            };
-            let shortage = unique_variant(&mut used, &shortage_base);
-            FieldErrorNames {
-                shortage,
-                mismatch,
-                conversion,
-                nested,
-                extent,
-            }
-        })
-        .collect();
-    let validators = schema
-        .validators
-        .iter()
-        .map(|path| {
-            let name = path.segments.last().expect("validator path has a segment");
-            unique_variant(&mut used, &pascal(&name.ident).to_string())
-        })
-        .collect();
-    ErrorNames { fields, validators }
-}
-
-fn unique_variant(used: &mut BTreeSet<String>, base: &str) -> syn::Ident {
-    if used.insert(base.to_owned()) {
-        return format_ident!("{base}");
-    }
-    for suffix in 2usize.. {
-        let candidate = format!("{base}{suffix}");
-        if used.insert(candidate.clone()) {
-            return format_ident!("{candidate}");
-        }
-    }
-    unreachable!("usize suffix space cannot be exhausted by generated variants")
-}
-fn render_flatten_error(
-    schema: &Schema,
-    error: &syn::Ident,
-    names: &ErrorNames,
-    runtime: &TokenStream,
-) -> TokenStream {
-    let mut arms = Vec::new();
-    for (field, names) in schema.fields.iter().zip(&names.fields) {
-        let shortage = &names.shortage;
-        if let FieldKind::Scalar(scalar) = &field.kind
-            && scalar.is_variable()
-        {
-            let flatten = super::integer::flatten_read_error(scalar, runtime);
-            arms.push(quote! {
-                #error::#shortage(source) => #flatten
-            });
-        } else {
-            arms.push(quote! {
-                #error::#shortage(source) => {
-                    #runtime::__private::RecursiveError::NeedMore(source)
-                }
-            });
-        }
-        if let Some(mismatch) = &names.mismatch {
-            arms.push(quote! {
-                #error::#mismatch(source) => {
-                    #runtime::__private::RecursiveError::Child {
-                        offset: source.offset,
-                    }
-                }
-            });
-        }
-        if let Some(conversion) = &names.conversion {
-            arms.push(quote! {
-                #error::#conversion(source) => {
-                    #runtime::__private::RecursiveError::Child {
-                        offset: source.offset,
-                    }
-                }
-            });
-        }
-        if let Some(nested) = &names.nested {
-            match &field.kind {
-                FieldKind::Nested(nested_field) => {
-                    let ty = &nested_field.ty;
-                    arms.push(quote! {
-                        #error::#nested(source) => {
-                            <#ty as #runtime::WireView>::flatten_recursive_error(
-                                source,
-                                fallback_offset,
-                            )
-                        }
-                    });
-                }
-                FieldKind::Array(array) => {
-                    let item = &array.item;
-                    arms.push(quote! {
-                        #error::#nested(source) => {
-                            match source {
-                                #runtime::ArrayError::NeedMore(source) => {
-                                    #runtime::__private::RecursiveError::NeedMore(source)
-                                }
-                                #runtime::ArrayError::Item { source, .. } => {
-                                    <#item as #runtime::WireView>::flatten_recursive_error(
-                                        source,
-                                        fallback_offset,
-                                    )
-                                }
-                                #runtime::ArrayError::InvalidExtent {
-                                    consumed,
-                                    available,
-                                    ..
-                                } => {
-                                    #runtime::__private::RecursiveError::InvalidFrame(
-                                        #runtime::InvalidFrameExtent {
-                                            offset: fallback_offset,
-                                            consumed,
-                                            available,
-                                        },
-                                    )
-                                }
-                                #runtime::ArrayError::NonProgress { offset, .. } => {
-                                    #runtime::__private::RecursiveError::Child { offset }
-                                }
-                                #runtime::ArrayError::Trailing { offset, trailing } => {
-                                    #runtime::__private::RecursiveError::Trailing(
-                                        #runtime::TrailingBytes { offset, trailing },
-                                    )
-                                }
-                            }
-                        }
-                    });
-                }
-                FieldKind::Scalar(_)
-                | FieldKind::Bytes(_)
-                | FieldKind::ScalarArray(_)
-                | FieldKind::RawBytes(_)
-                | FieldKind::Recursive(_)
-                | FieldKind::Flag(_)
-                | FieldKind::BitProjection(_) => unreachable!("nested error owner"),
-            }
-        }
-        if let Some(extent) = &names.extent {
-            arms.push(quote! {
-                #error::#extent(source) => {
-                    #runtime::__private::RecursiveError::InvalidFrame(source)
-                }
-            });
-        }
-    }
-    for variant in &names.validators {
-        arms.push(quote! {
-            #error::#variant(_) => {
-                #runtime::__private::RecursiveError::Child {
-                    offset: fallback_offset,
-                }
-            }
-        });
-    }
-    arms.extend([
-        quote! {
-            #error::PositionBeforeCursor { field, .. }
-            | #error::LayoutUnavailable { field } => {
-                #runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field },
-                )
-            }
-        },
-        quote! {
-            #error::InvalidFrame(source) => {
-                #runtime::__private::RecursiveError::InvalidFrame(source)
-            }
-        },
-        quote! {
-            #error::Trailing(source) => {
-                #runtime::__private::RecursiveError::Trailing(source)
-            }
-        },
-    ]);
-    quote! {
-        #[inline]
-        fn flatten_recursive_error(
-            error: Self::Error,
-            fallback_offset: usize,
-        ) -> #runtime::__private::RecursiveError {
-            match error {
-                #(#arms),*
-            }
-        }
-    }
-}
-
-fn render_error(
-    schema: &Schema,
-    error: &syn::Ident,
-    names: &ErrorNames,
-    error_parameters: &[syn::Ident],
-    runtime: &TokenStream,
-) -> TokenStream {
-    let mut variants = Vec::new();
-    let mut flatten_arms = Vec::new();
-    let mut nested_index = 0usize;
-    for (field, names) in schema.fields.iter().zip(&names.fields) {
-        let field_name = field.name.to_string();
-        let shortage = &names.shortage;
-        let shortage_message = format!("failed to frame field `{field_name}`: {{0}}");
-        if let FieldKind::Scalar(scalar) = &field.kind
-            && scalar.is_variable()
-        {
-            variants.push(super::integer::read_error_variant(
-                scalar,
-                shortage,
-                &shortage_message,
-                runtime,
-            ));
-            let flatten = super::integer::flatten_read_error(scalar, runtime);
-            flatten_arms.push(quote! {
-                Self::#shortage(source) => #flatten
-            });
-        } else {
-            variants.push(quote! {
-                #[doc = "The field ended before its complete representation."]
-                #[error(#shortage_message)]
-                #shortage(#[source] #runtime::NeedMore),
-            });
-            flatten_arms.push(quote! {
-                Self::#shortage(source) => {
-                    #runtime::__private::RecursiveError::NeedMore(source)
-                }
-            });
-        }
-        if let Some(mismatch) = &names.mismatch {
-            let mismatch_message = format!("invalid constant field `{field_name}`: {{0}}");
-            match &field.kind {
-                FieldKind::Scalar(scalar) => {
-                    let ty = value_type_tokens(&scalar.value_type);
-                    variants.push(quote! {
-                        #[doc = "The stored constant did not match the schema value."]
-                        #[error(#mismatch_message)]
-                        #mismatch(#[source] #runtime::ConstantMismatch<#ty>),
-                    });
-                }
-                FieldKind::Bytes(_) => {
-                    let ty = &field.ty;
-                    variants.push(quote! {
-                        #[doc = "The stored constant did not match the schema value."]
-                        #[error(#mismatch_message)]
-                        #mismatch(#[source] #runtime::ConstantMismatch<#ty>),
-                    });
-                }
-                FieldKind::RawBytes(_)
-                | FieldKind::ScalarArray(_)
-                | FieldKind::Array(_)
-                | FieldKind::Recursive(_)
-                | FieldKind::Flag(_)
-                | FieldKind::BitProjection(_)
-                | FieldKind::Nested(_) => unreachable!(),
-            }
-            flatten_arms.push(quote! {
-                Self::#mismatch(source) => {
-                    #runtime::__private::RecursiveError::Child {
-                        offset: source.offset,
-                    }
-                }
-            });
-        }
-        if let Some(conversion) = &names.conversion {
-            let message = format!("invalid physical value for field `{field_name}`: {{0}}");
-            variants.push(quote! {
-                #[doc = "The physical scalar cannot be represented by the Rust field type."]
-                #[error(#message)]
-                #conversion(#[source] #runtime::ScalarConversionError),
-            });
-            flatten_arms.push(quote! {
-                Self::#conversion(source) => {
-                    #runtime::__private::RecursiveError::Child {
-                        offset: source.offset,
-                    }
-                }
-            });
-        }
-        if let Some(nested) = &names.nested {
-            let parameter = &error_parameters[nested_index];
-            nested_index += 1;
-            let message = format!("failed to frame nested field `{field_name}`: {{0}}");
-            variants.push(quote! {
-                #[doc = "A nested schema or counted array failed structural framing."]
-                #[error(#message)]
-                #nested(#[source] #parameter),
-            });
-            flatten_arms.push(quote! {
-                Self::#nested(source) => source.flatten_recursive(fallback_offset)
-            });
-        }
-        if let Some(extent) = &names.extent {
-            let message = format!("invalid extent for nested field `{field_name}`: {{0}}");
-            variants.push(quote! {
-                #[doc = "The nested schema reported an extent outside its assigned span."]
-                #[error(#message)]
-                #extent(#[source] #runtime::InvalidFrameExtent),
-            });
-            flatten_arms.push(quote! {
-                Self::#extent(source) => {
-                    #runtime::__private::RecursiveError::InvalidFrame(source)
-                }
-            });
-        }
-    }
-    for (validator, variant) in schema.validators.iter().zip(&names.validators) {
-        let validator_name = quote!(#validator).to_string();
-        let validator_error =
-            crate::validator::error_type(validator).expect("validated validator path");
-        let message = format!("schema validator `{validator_name}` failed: {{0}}");
-        variants.push(quote! {
-            #[doc = "A schema-level validator rejected the framed view."]
-            #[error(#message)]
-            #variant(#[source] #validator_error),
-        });
-        flatten_arms.push(quote! {
-            Self::#variant(_) => {
-                #runtime::__private::RecursiveError::Child {
-                    offset: fallback_offset,
-                }
-            }
-        });
-    }
-    variants.push(quote! {
-        #[doc = "A requested field position precedes the current physical cursor."]
-        #[error("field `{field}` requests position {position}, before cursor {cursor}")]
-        PositionBeforeCursor {
-            field: &'static str,
-            position: usize,
-            cursor: usize,
-        },
-    });
-    variants.push(quote! {
-        #[doc = "A field offset or fixed width could not be established."]
-        #[error("fixed layout is unavailable or overflows before field `{field}`")]
-        LayoutUnavailable { field: &'static str },
-    });
-    variants.push(quote! {
-        #[doc = "A child reported an extent outside its supplied input."]
-        #[error("invalid child frame: {0}")]
-        InvalidFrame(#[source] #runtime::InvalidFrameExtent),
-    });
-    variants.push(quote! {
-        #[doc = "Exact framing found trailing input."]
-        #[error("exact framing failed: {0}")]
-        Trailing(#[source] #runtime::TrailingBytes),
-    });
-    flatten_arms.extend([
-        quote! {
-            Self::PositionBeforeCursor { field, .. }
-            | Self::LayoutUnavailable { field } => {
-                #runtime::__private::RecursiveError::Layout(
-                    #runtime::LayoutError { field },
-                )
-            }
-        },
-        quote! {
-            Self::InvalidFrame(source) => {
-                #runtime::__private::RecursiveError::InvalidFrame(source)
-            }
-        },
-        quote! {
-            Self::Trailing(source) => {
-                #runtime::__private::RecursiveError::Trailing(source)
-            }
-        },
-    ]);
-
-    let vis = &schema.vis;
-    let declaration = if error_parameters.is_empty() {
-        quote! {
-            #[doc = "Typed structural failure generated for this schema."]
-            #[derive(Debug, #runtime::__private::ThisError)]
-            #vis enum #error {
-                #(#variants)*
-            }
-        }
-    } else {
-        quote! {
-            #[doc = "Typed structural failure generated for this schema."]
-            #[derive(Debug, #runtime::__private::ThisError)]
-            #vis enum #error<#(#error_parameters: ::core::error::Error + 'static),*> {
-                #(#variants)*
-            }
-        }
-    };
-    let flatten = if error_parameters.is_empty() {
-        quote! {
-            impl #runtime::__private::FlattenRecursiveError for #error {
-                fn flatten_recursive(
-                    self,
-                    fallback_offset: usize,
-                ) -> #runtime::__private::RecursiveError {
-                    match self {
-                        #(#flatten_arms),*
-                    }
-                }
-            }
-        }
-    } else {
-        quote! {
-            impl<#(#error_parameters),*> #runtime::__private::FlattenRecursiveError
-                for #error<#(#error_parameters),*>
-            where
-                #(
-                    #error_parameters:
-                        ::core::error::Error
-                        + #runtime::__private::FlattenRecursiveError
-                        + 'static,
-                )*
-            {
-                fn flatten_recursive(
-                    self,
-                    fallback_offset: usize,
-                ) -> #runtime::__private::RecursiveError {
-                    match self {
-                        #(#flatten_arms),*
-                    }
-                }
-            }
-        }
-    };
-    quote!(#declaration #flatten)
-}
-
-fn render_frame_steps(
-    schema: &Schema,
-    error: &syn::Ident,
-    names: &ErrorNames,
-    frame_input: &syn::Ident,
-    frame_offset: &syn::Ident,
-    runtime: &TokenStream,
-    exact: bool,
-) -> Vec<TokenStream> {
-    if schema.has_sequential_geometry() {
-        return render_sequential_frame_steps(
-            schema,
-            error,
-            names,
-            frame_input,
-            frame_offset,
-            runtime,
-            exact,
-        );
-    }
-    let mut steps = Vec::new();
-    for (index, (field, names)) in schema.fields.iter().zip(&names.fields).enumerate() {
-        let field_name = field.name.unraw().to_string();
-        let offset = private_ident(schema, &format!("field_{index}_offset"));
-        let offset_value = view_offset(&field.offset, runtime);
-        let absolute = private_ident(schema, &format!("field_{index}_absolute"));
-        let input_end = private_ident(schema, &format!("field_{index}_input_end"));
-        steps.push(quote! {
-            let #offset = #offset_value.ok_or(#error::LayoutUnavailable { field: #field_name })?;
-            let #absolute = #frame_offset
-                .checked_add(#offset)
-                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-            let #input_end = #frame_offset
-                .checked_add(#frame_input.len())
-                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-        });
-        match &field.kind {
-            FieldKind::Scalar(scalar) => {
-                let bytes = private_ident(schema, &format!("scalar_{index}_bytes"));
-                let raw = private_ident(schema, &format!("scalar_{index}_raw"));
-                let decoded = private_ident(schema, &format!("scalar_{index}_value"));
-                let expected_value = private_ident(schema, &format!("scalar_{index}_expected"));
-                let width = scalar.width();
-                let end = private_ident(schema, &format!("field_{index}_end"));
-                let shortage = &names.shortage;
-                steps.push(quote! {
-                    let #end = #offset.checked_add(#width)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                    let #bytes: [u8; #width] = #frame_input
-                        .get(#offset..#end)
-                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
-                            offset: #input_end,
-                            additional_at_least: #end.saturating_sub(#frame_input.len()),
-                        }))?
-                        .try_into()
-                        .expect("scalar range has its declared fixed width");
-                });
-                if scalar.constant.is_some() || scalar.value_type.is_converted() {
-                    let wire_ty = scalar_type_tokens(scalar.wire_type);
-                    let value_ty = value_type_tokens(&scalar.value_type);
-                    let decode = from_bytes_method(scalar.endian);
-                    let conversion = convert_from_wire(scalar, &raw);
-                    let converted = if let Some(variant) = &names.conversion {
-                        quote! {
-                            let #decoded: #value_ty = #conversion.ok_or_else(|| {
-                                #error::#variant(#runtime::ScalarConversionError {
-                                    offset: #absolute,
-                                    from: stringify!(#wire_ty),
-                                    to: stringify!(#value_ty),
-                                })
-                            })?;
-                        }
-                    } else {
-                        quote!(let #decoded: #value_ty = #raw;)
-                    };
-                    let constant_check = scalar.constant.as_ref().map(|expected| {
-                        let mismatch = names.mismatch.as_ref().expect("constant mismatch variant");
-                        let differs = constants_differ(scalar, &decoded, &expected_value);
-                        quote! {
-                            let #expected_value: #value_ty = #expected;
-                            if #differs {
-                                return Err(#error::#mismatch(#runtime::ConstantMismatch {
-                                    offset: #absolute,
-                                    expected: #expected_value,
-                                    actual: #decoded,
-                                }));
-                            }
-                        }
-                    });
-                    steps.push(quote! {
-                        let #raw = #wire_ty::#decode(#bytes);
-                        #converted
-                        #constant_check
-                    });
-                }
-            }
-            FieldKind::Bytes(bytes_field) => {
-                let bytes = private_ident(schema, &format!("bytes_{index}_value"));
-                let end = private_ident(schema, &format!("field_{index}_end"));
-                let len = &bytes_field.len;
-                let ty = &field.ty;
-                let shortage = &names.shortage;
-                let constant_check = bytes_field.constant.as_ref().map(|constant| {
-                    let expected = private_ident(schema, &format!("bytes_{index}_expected"));
-                    let actual = private_ident(schema, &format!("bytes_{index}_actual"));
-                    let mismatch = names.mismatch.as_ref().expect("constant mismatch variant");
-                    quote! {
-                        let #expected: #ty = #constant;
-                        if #bytes != #expected.as_slice() {
-                            let #actual: #ty = #bytes
-                                .try_into()
-                                .expect("mismatched byte-array span has its declared width");
-                            return Err(#error::#mismatch(#runtime::ConstantMismatch {
-                                offset: #absolute,
-                                expected: #expected,
-                                actual: #actual,
-                            }));
-                        }
-                    }
-                });
-                steps.push(quote! {
-                    let #end = #offset.checked_add(#len)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                    let #bytes = #frame_input
-                        .get(#offset..#end)
-                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
-                            offset: #input_end,
-                            additional_at_least: #end.saturating_sub(#frame_input.len()),
-                        }))?;
-                    #constant_check
-                });
-            }
-            FieldKind::ScalarArray(array) => {
-                let len = &array.len;
-                let element_width = array.element.width();
-                let total = private_ident(schema, &format!("array_{index}_width"));
-                let end = private_ident(schema, &format!("field_{index}_end"));
-                let shortage = &names.shortage;
-                steps.push(quote! {
-                    let #total = (#len as usize)
-                        .checked_mul(#element_width)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                    let #end = #offset
-                        .checked_add(#total)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                    #frame_input
-                        .get(#offset..#end)
-                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
-                            offset: #input_end,
-                            additional_at_least: #end.saturating_sub(#frame_input.len()),
-                        }))?;
-                });
-            }
-            FieldKind::Nested(nested) => {
-                let ty = &nested.ty;
-                let available = private_ident(schema, &format!("{}_input", field.name.unraw()));
-                let child_frame = private_ident(schema, &format!("{}_frame", field.name.unraw()));
-                let child_state = private_ident(schema, &format!("{}_state", field.name.unraw()));
-                let child_consumed =
-                    private_ident(schema, &format!("{}_consumed", field.name.unraw()));
-                let child_total = private_ident(schema, &format!("{}_total", field.name.unraw()));
-                let shortage = &names.shortage;
-                let variant = names.nested.as_ref().expect("nested error variant");
-                let extent = names.extent.as_ref().expect("nested extent variant");
-                let frame_method = if exact {
-                    quote!(frame_exact)
-                } else {
-                    quote!(frame)
-                };
-                steps.push(quote! {
-                    let #available = #frame_input.get(#offset..).ok_or_else(|| {
-                        #error::#shortage(#runtime::NeedMore {
-                            offset: #input_end,
-                            additional_at_least: #offset.saturating_sub(#frame_input.len()),
-                        })
-                    })?;
-                    let #child_frame = <#ty as #runtime::WireView>::#frame_method(
-                        #available,
-                        #absolute,
-                    )
-                    .map_err(#error::#variant)?;
-                    let (#child_state, #child_consumed) = #child_frame.into_parts();
-                    if #child_consumed > #available.len() {
-                        return Err(#error::#extent(#runtime::InvalidFrameExtent {
-                            offset: #absolute,
-                            consumed: #child_consumed,
-                            available: #available.len(),
-                        }));
-                    }
-                    let #child_total = #offset.checked_add(#child_consumed)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                });
-            }
-            FieldKind::Array(_) => unreachable!("sequential geometry uses its own frame renderer"),
-            FieldKind::RawBytes(_) => {
-                unreachable!("sequential geometry uses its own frame renderer")
-            }
-            FieldKind::Flag(_) => unreachable!("sequential geometry uses its own frame renderer"),
-            FieldKind::BitProjection(_) => {}
-            FieldKind::Recursive(_) => unreachable!("recursive body uses its own frame renderer"),
-        }
-    }
-    steps
-}
-fn render_sequential_frame_steps(
-    schema: &Schema,
-    error: &syn::Ident,
-    names: &ErrorNames,
-    frame_input: &syn::Ident,
-    frame_offset: &syn::Ident,
-    runtime: &TokenStream,
-    exact: bool,
-) -> Vec<TokenStream> {
-    let cursor = private_ident(schema, "geometry_cursor");
-    let input_end = private_ident(schema, "geometry_input_end");
-    let mut steps = vec![quote! {
-        let mut #cursor = 0usize;
-        let #input_end = #frame_offset
-            .checked_add(#frame_input.len())
-            .ok_or(#error::LayoutUnavailable { field: "<input>" })?;
-    }];
-
-    for (index, (field, names)) in schema.fields.iter().zip(&names.fields).enumerate() {
-        let field_name = field.name.unraw().to_string();
-        let start = private_ident(schema, &format!("field_{index}_start"));
-        let end = private_ident(schema, &format!("field_{index}_end"));
-        let absolute = private_ident(schema, &format!("field_{index}_absolute"));
-        let position = match &field.layout.position {
-            Some(Position::Static(position)) => quote!(#position),
-            Some(Position::Field(controller)) => {
-                let value = private_ident(schema, &format!("controller_{}", controller.unraw()));
-                quote!(#value)
-            }
-            None => {
-                let pad = field
-                    .layout
-                    .pad_before
-                    .as_ref()
-                    .map(|pad| {
-                        quote! {
-                            start = start.checked_add(#pad)
-                                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                        }
-                    })
-                    .unwrap_or_default();
-                let align = field
-                    .layout
-                    .align_before
-                    .as_ref()
-                    .map(|align| {
-                        quote! {
-                            start = #runtime::__private::checked_align(start, #align)
-                                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                        }
-                    })
-                    .unwrap_or_default();
-                quote! {{
-                    let mut start = #cursor;
-                    #pad
-                    #align
-                    start
-                }}
-            }
-        };
-        let present =
-            field.layout.condition.as_ref().map(|condition| {
-                private_ident(schema, &format!("flag_{}_value", condition.unraw()))
-            });
-        let present_value = present
-            .as_ref()
-            .map(|present| quote!(#present))
-            .unwrap_or_else(|| quote!(true));
-        let position = quote!(if #present_value { #position } else { #cursor });
-        let absolute_position = if matches!(field.kind, FieldKind::RawBytes(_))
-            && field.layout.pad_before.is_none()
-            && field.layout.align_before.is_none()
-            && field.layout.position.is_none()
-        {
-            // The sequential cursor is already checked; raw fields never use its absolute start.
-            TokenStream::new()
-        } else {
-            quote! {
-                let #absolute = #frame_offset
-                    .checked_add(#start)
-                    .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-            }
-        };
-        steps.push(quote! {
-            let #start: usize = #position;
-            if #start < #cursor {
-                return Err(#error::PositionBeforeCursor {
-                    field: #field_name,
-                    position: #start,
-                    cursor: #cursor,
-                });
-            }
-            #absolute_position
-        });
-
-        match &field.kind {
-            FieldKind::Scalar(scalar) => {
-                let width = scalar.width();
-                let shortage = &names.shortage;
-                let bytes = private_ident(schema, &format!("scalar_{index}_bytes"));
-                let raw = private_ident(schema, &format!("scalar_{index}_raw"));
-                let value = private_ident(schema, &format!("scalar_{index}_value"));
-                let wire_ty = scalar_type_tokens(scalar.wire_type);
-                let value_ty = value_type_tokens(&scalar.value_type);
-                let decode = from_bytes_method(scalar.endian);
-                let conversion = convert_from_wire(scalar, &raw);
-                let converted = if let Some(variant) = &names.conversion {
-                    quote! {
-                        let #value: #value_ty = #conversion.ok_or_else(|| {
-                            #error::#variant(#runtime::ScalarConversionError {
-                                offset: #absolute,
-                                from: stringify!(#wire_ty),
-                                to: stringify!(#value_ty),
-                            })
-                        })?;
-                    }
-                } else {
-                    quote!(let #value: #value_ty = #raw;)
-                };
-                let constant_check = scalar.constant.as_ref().map(|expected| {
-                    let mismatch = names.mismatch.as_ref().expect("constant mismatch variant");
-                    let expected_value = private_ident(schema, &format!("scalar_{index}_expected"));
-                    let differs = constants_differ(scalar, &value, &expected_value);
-                    quote! {
-                        let #expected_value: #value_ty = #expected;
-                        if #differs {
-                            return Err(#error::#mismatch(#runtime::ConstantMismatch {
-                                offset: #absolute,
-                                expected: #expected_value,
-                                actual: #value,
-                            }));
-                        }
-                    }
-                });
-                let is_controller = schema.is_length_controller(&field.name)
-                    || schema.is_count_controller(&field.name)
-                    || schema.fields.iter().any(|candidate| {
-                        matches!(
-                            &candidate.layout.position,
-                            Some(Position::Field(controller)) if controller == &field.name
-                        )
-                    });
-                let controller_value = is_controller.then(|| {
-                    let controller =
-                        private_ident(schema, &format!("controller_{}", field.name.unraw()));
-                    let conversion_error = if scalar.wire_type.is_signed_integer() {
-                        let variant = names.conversion.as_ref().expect("signed count conversion");
-                        quote!(#error::#variant(#runtime::ScalarConversionError {
-                            offset: #absolute,
-                            from: stringify!(#wire_ty),
-                            to: "usize",
-                        }))
-                    } else {
-                        quote!(#error::LayoutUnavailable { field: #field_name })
-                    };
-                    quote! {
-                        let #controller = usize::try_from(#raw)
-                            .map_err(#[cold] |_| #conversion_error)?;
-                    }
-                });
-                let presence_controller_value =
-                    schema.is_presence_controller(&field.name).then(|| {
-                        let presence =
-                            private_ident(schema, &format!("presence_{}", field.name.unraw()));
-                        quote!(let #presence = #value;)
-                    });
-                let decode_value = if scalar.is_variable() {
-                    let available = private_ident(schema, &format!("scalar_{index}_available"));
-                    let encoded_len = private_ident(schema, &format!("scalar_{index}_encoded_len"));
-                    let decode = super::integer::decode_field(
-                        scalar,
-                        frame_input,
-                        &start,
-                        &absolute,
-                        &input_end,
-                        &available,
-                        runtime,
-                    );
-                    quote! {
-                        let (#raw, #encoded_len) = #decode.map_err(#error::#shortage)?;
-                        let #raw: #wire_ty = #raw as #wire_ty;
-                        let #end = #start.checked_add(#encoded_len)
-                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                        #converted
-                        #constant_check
-                        #controller_value
-                        #presence_controller_value
-                    }
-                } else {
-                    quote! {
-                    let #bytes: [u8; #width] = #frame_input
-                        .get(#start..#end)
-                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
-                            offset: #input_end,
-                            additional_at_least: #end.saturating_sub(#frame_input.len()),
-                        }))?
-                        .try_into()
-                        .expect("scalar range has its declared fixed width");
-                    let #raw = #wire_ty::#decode(#bytes);
-                    #converted
-                    #constant_check
-                    #controller_value
-                    #presence_controller_value
-                    }
-                };
-                if scalar.is_variable() {
-                    steps.push(decode_value);
-                } else if field.layout.condition.is_some() {
-                    steps.push(quote! {
-                        let #end = if #present_value {
-                            #start.checked_add(#width)
-                                .ok_or(#error::LayoutUnavailable { field: #field_name })?
-                        } else {
-                            #start
-                        };
-                        if #present_value {
-                            #decode_value
-                        }
-                    });
-                } else {
-                    steps.push(quote! {
-                        let #end = #start.checked_add(#width)
-                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                        #decode_value
-                    });
-                }
-            }
-            FieldKind::Flag(flag) => {
-                let value = private_ident(schema, &format!("flag_{}_value", field.name.unraw()));
-                let controller =
-                    private_ident(schema, &format!("presence_{}", flag.controller.unraw()));
-                steps.push(quote! {
-                    let #end = #start;
-                    let #value = #controller;
-                });
-            }
-            FieldKind::BitProjection(_) => {
-                steps.push(quote! {
-                    let #end = #start;
-                });
-            }
-            FieldKind::Bytes(bytes_field) => {
-                let shortage = &names.shortage;
-                let len = &bytes_field.len;
-                let bytes = private_ident(schema, &format!("bytes_{index}_value"));
-                let ty = &field.ty;
-                let constant_check = bytes_field.constant.as_ref().map(|constant| {
-                    let expected = private_ident(schema, &format!("bytes_{index}_expected"));
-                    let actual = private_ident(schema, &format!("bytes_{index}_actual"));
-                    let mismatch = names.mismatch.as_ref().expect("constant mismatch variant");
-                    quote! {
-                        let #expected: #ty = #constant;
-                        if #bytes != #expected.as_slice() {
-                            let #actual: #ty = #bytes.try_into()
-                                .expect("byte-array span has its declared width");
-                            return Err(#error::#mismatch(#runtime::ConstantMismatch {
-                                offset: #absolute,
-                                expected: #expected,
-                                actual: #actual,
-                            }));
-                        }
-                    }
-                });
-                steps.push(quote! {
-                    let #end = #start.checked_add(#len)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                    let #bytes = #frame_input
-                        .get(#start..#end)
-                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
-                            offset: #input_end,
-                            additional_at_least: #end.saturating_sub(#frame_input.len()),
-                        }))?;
-                    #constant_check
-                });
-            }
-            FieldKind::ScalarArray(array) => {
-                let shortage = &names.shortage;
-                let len = &array.len;
-                let element_width = array.element.width();
-                steps.push(quote! {
-                    let total = (#len as usize)
-                        .checked_mul(#element_width)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                    let #end = #start
-                        .checked_add(total)
-                        .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                    #frame_input
-                        .get(#start..#end)
-                        .ok_or_else(|| #error::#shortage(#runtime::NeedMore {
-                            offset: #input_end,
-                            additional_at_least: #end.saturating_sub(#frame_input.len()),
-                        }))?;
-                });
-            }
-            FieldKind::RawBytes(raw) => {
-                let shortage = &names.shortage;
-                let extent = match &raw.extent {
-                    DynamicExtent::Bounded(controller) => {
-                        let value =
-                            private_ident(schema, &format!("controller_{}", controller.unraw()));
-                        quote!(#start.checked_add(#value)
-                            .ok_or(#error::LayoutUnavailable { field: #field_name })?)
-                    }
-                    DynamicExtent::Rest => {
-                        quote!(::core::cmp::max(#start, #frame_input.len()))
-                    }
-                };
-                steps.push(quote! {
-                    let #end = #extent;
-                    #frame_input.get(#start..#end).ok_or_else(|| {
-                        #error::#shortage(#runtime::NeedMore {
-                            offset: #input_end,
-                            additional_at_least: #end.saturating_sub(#frame_input.len()),
-                        })
-                    })?;
-                });
-            }
-            FieldKind::Array(array) => {
-                let item = &array.item;
-                let controller =
-                    private_ident(schema, &format!("controller_{}", array.controller.unraw()));
-                let variant = names.nested.as_ref().expect("array error variant");
-                if index + 1 == schema.fields.len() && exact {
-                    steps.push(quote! {
-                        #frame_input.get(#start..).ok_or_else(|| {
-                            #error::#variant(#runtime::ArrayError::NeedMore(
-                                #runtime::NeedMore {
-                                    offset: #input_end,
-                                    additional_at_least: #start
-                                        .saturating_sub(#frame_input.len()),
-                                },
-                            ))
-                        })?;
-                        let #end = #frame_input.len();
-                    });
-                } else {
-                    let leading = quote! {
-                        if #controller != 0 && !<#item as #runtime::WireView>::LEADING_EXTENT {
-                            return Err(#error::LayoutUnavailable { field: #field_name });
-                        }
-                    };
-                    steps.push(quote! {
-                        let available = #frame_input.get(#start..).ok_or_else(|| {
-                            #error::#variant(#runtime::ArrayError::NeedMore(
-                                #runtime::NeedMore {
-                                    offset: #input_end,
-                                    additional_at_least: #start
-                                        .saturating_sub(#frame_input.len()),
-                                },
-                            ))
-                        })?;
-                        #leading
-                        let consumed = #runtime::__private::frame_array_extent::<#item>(
-                            available,
-                            #controller,
-                            #absolute,
-                        )
-                        .map_err(#error::#variant)?;
-                        let #end = #start.checked_add(consumed)
-                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                    });
-                }
-            }
-            FieldKind::Nested(nested) => {
-                let ty = &nested.ty;
-                let shortage = &names.shortage;
-                let variant = names.nested.as_ref().expect("nested error variant");
-                let extent_variant = names.extent.as_ref().expect("nested extent variant");
-                let available = private_ident(schema, &format!("{}_input", field.name.unraw()));
-                let child_frame = private_ident(schema, &format!("{}_frame", field.name.unraw()));
-                let child_state = private_ident(schema, &format!("{}_state", field.name.unraw()));
-                let child_consumed =
-                    private_ident(schema, &format!("{}_consumed", field.name.unraw()));
-                let declared = nested.extent.as_ref().map(|controller| {
-                    private_ident(schema, &format!("controller_{}", controller.unraw()))
-                });
-                let frame_method = if nested.extent.is_some() || (exact && nested.terminal) {
-                    quote!(frame_exact)
-                } else {
-                    quote!(frame)
-                };
-                let leading_check = (!nested.terminal && nested.extent.is_none()).then(|| {
-                    quote! {
-                        if <#ty as #runtime::WireView>::FIXED_SIZE.is_none()
-                            && !<#ty as #runtime::WireView>::LEADING_EXTENT
-                        {
-                            return Err(#error::LayoutUnavailable { field: #field_name });
-                        }
-                    }
-                });
-                let prepare_end = if let Some(declared) = &declared {
-                    quote! {
-                        let #end = #start.checked_add(#declared)
-                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                        let #available = #frame_input.get(#start..#end).ok_or_else(|| {
-                            #error::#shortage(#runtime::NeedMore {
-                                offset: #input_end,
-                                additional_at_least: #end.saturating_sub(#frame_input.len()),
-                            })
-                        })?;
-                    }
-                } else if !nested.terminal {
-                    let fixed_end =
-                        private_ident(schema, &format!("{}_fixed_end", field.name.unraw()));
-                    quote! {
-                        let #available = if let Some(width) =
-                            <#ty as #runtime::WireView>::FIXED_SIZE
-                        {
-                            let #fixed_end = #start.checked_add(width)
-                                .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                            #frame_input.get(#start..#fixed_end).ok_or_else(|| {
-                                #error::#shortage(#runtime::NeedMore {
-                                    offset: #input_end,
-                                    additional_at_least: #fixed_end
-                                        .saturating_sub(#frame_input.len()),
-                                })
-                            })?
-                        } else {
-                            #frame_input.get(#start..).ok_or_else(|| {
-                                #error::#shortage(#runtime::NeedMore {
-                                    offset: #input_end,
-                                    additional_at_least: #start
-                                        .saturating_sub(#frame_input.len()),
-                                })
-                            })?
-                        };
-                    }
-                } else {
-                    quote! {
-                        let #available = #frame_input.get(#start..).ok_or_else(|| {
-                            #error::#shortage(#runtime::NeedMore {
-                                offset: #input_end,
-                                additional_at_least: #start.saturating_sub(#frame_input.len()),
-                            })
-                        })?;
-                    }
-                };
-                let finish_end = if let Some(declared) = &declared {
-                    quote! {
-                        if #child_consumed != #declared {
-                            return Err(#error::#extent_variant(#runtime::InvalidFrameExtent {
-                                offset: #absolute,
-                                consumed: #child_consumed,
-                                available: #declared,
-                            }));
-                        }
-                    }
-                } else {
-                    let fixed_check = (!nested.terminal).then(|| {
-                        quote! {
-                            if let Some(expected) = <#ty as #runtime::WireView>::FIXED_SIZE {
-                                if #child_consumed != expected {
-                                    return Err(#error::#extent_variant(#runtime::InvalidFrameExtent {
-                                        offset: #absolute,
-                                        consumed: #child_consumed,
-                                        available: expected,
-                                    }));
-                                }
-                            }
-                        }
-                    });
-                    quote! {
-                        #fixed_check
-                        let #end = #start.checked_add(#child_consumed)
-                            .ok_or(#error::LayoutUnavailable { field: #field_name })?;
-                    }
-                };
-                steps.push(quote! {
-                    #leading_check
-                    #prepare_end
-                    let #child_frame = <#ty as #runtime::WireView>::#frame_method(#available, #absolute)
-                        .map_err(#error::#variant)?;
-                    let (#child_state, #child_consumed) = #child_frame.into_parts();
-                    if #child_consumed > #available.len() {
-                        return Err(#error::#extent_variant(#runtime::InvalidFrameExtent {
-                            offset: #absolute,
-                            consumed: #child_consumed,
-                            available: #available.len(),
-                        }));
-                    }
-                    #finish_end
-                });
-            }
-            FieldKind::Recursive(_) => {
-                unreachable!("recursive body uses its own frame renderer")
-            }
-        }
-        steps.push(quote! {
-            #cursor = #end;
-        });
-    }
-    steps
-}
-
-fn render_trait_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStream> {
-    schema
-        .fields
-        .iter()
-        .map(|field| {
-            let name = &field.name;
-            match &field.kind {
-                FieldKind::Scalar(scalar) => {
-                    let ty = value_type_tokens(&scalar.value_type);
-                    let ty = if field.layout.condition.is_some() {
-                        quote!(Option<#ty>)
-                    } else {
-                        ty
-                    };
-                    quote! {
-                        #[doc = concat!("Returns decoded field `", stringify!(#name), "`.")]
-                        fn #name(&self) -> #ty;
-                    }
-                }
-                FieldKind::Bytes(_) => {
-                    let ty = &field.ty;
-                    quote! {
-                        #[doc = concat!("Returns fixed byte-array field `", stringify!(#name), "`.")]
-                        fn #name(&self) -> #ty;
-                    }
-                }
-                FieldKind::ScalarArray(_) => {
-                    let ty = &field.ty;
-                    quote! {
-                        #[doc = concat!("Returns fixed scalar-array field `", stringify!(#name), "`.")]
-                        fn #name(&self) -> #ty;
-                    }
-                }
-                FieldKind::RawBytes(_) => {
-                    quote! {
-                        #[doc = concat!("Returns raw byte field `", stringify!(#name), "`.")]
-                        fn #name(&self) -> &[u8];
-                    }
-                }
-                FieldKind::Array(array) => {
-                    let item = &array.item;
-                    let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
-                    quote! {
-                        #[doc = concat!("Returns counted array field `", stringify!(#name), "`.")]
-                        fn #name<#field_lifetime>(
-                            &#field_lifetime self,
-                        ) -> #runtime::ArrayView<#field_lifetime, #item>;
-                    }
-                }
-                FieldKind::Flag(_) => {
-                    quote! {
-                        #[doc = concat!("Returns logical presence flag `", stringify!(#name), "`.")]
-                        fn #name(&self) -> bool;
-                    }
-                }
-                FieldKind::BitProjection(_) => {
-                    let ty = &field.ty;
-                    quote! {
-                        #[doc = concat!("Returns logical bit projection `", stringify!(#name), "`.")]
-                        fn #name(&self) -> #ty;
-                    }
-                }
-                FieldKind::Nested(nested) => {
-                    let ty = &nested.ty;
-                    let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
-                    let ty = if field.layout.condition.is_some() {
-                        quote!(Option<<#ty as #runtime::WireView>::View<#field_lifetime>>)
-                    } else {
-                        quote!(<#ty as #runtime::WireView>::View<#field_lifetime>)
-                    };
-                    quote! {
-                        #[doc = concat!("Returns nested field `", stringify!(#name), "`.")]
-                        fn #name<#field_lifetime>(&#field_lifetime self) -> #ty;
-                    }
-                }
-                FieldKind::Recursive(_) => {
-                    unreachable!("recursive body uses its own view renderer")
-                }
-            }
-        })
-        .collect()
-}
-fn retains_geometry_start(schema: &Schema, index: usize) -> bool {
-    let field = &schema.fields[index];
-    schema.has_sequential_geometry()
-        && (field.layout.pad_before.is_some()
-            || field.layout.align_before.is_some()
-            || field.layout.position.is_some())
-}
-
-fn retains_geometry_end(schema: &Schema, index: usize) -> bool {
-    if !schema.has_sequential_geometry() {
-        return false;
-    }
-    let field = &schema.fields[index];
-    if matches!(field.kind, FieldKind::Flag(_) | FieldKind::BitProjection(_)) {
-        return false;
-    }
-    matches!(field.kind, FieldKind::RawBytes(_) | FieldKind::Array(_))
-        || (matches!(field.kind, FieldKind::Nested(_)) && !has_fixed_suffix(schema, index))
-        || field.layout.condition.is_some()
-        || matches!(&field.kind, FieldKind::Scalar(scalar) if scalar.is_variable())
-        || field.layout.pad_before.is_some()
-        || field.layout.align_before.is_some()
-        || field.layout.position.is_some()
-}
-
-fn has_fixed_suffix(schema: &Schema, index: usize) -> bool {
-    // The represented range and fixed suffix recover the final implicit child's exact end.
-    !schema.has_explicit_geometry()
-        && schema.fields[index + 1..].iter().all(|field| {
-            matches!(
-                field.kind,
-                FieldKind::Scalar(_)
-                    | FieldKind::Bytes(_)
-                    | FieldKind::ScalarArray(_)
-                    | FieldKind::BitProjection(_)
-            )
-        })
-}
-
-fn geometry_state_value(schema: &Schema, index: usize, suffix: &str) -> TokenStream {
-    let field = private_ident(schema, &format!("field_{index}_{suffix}"));
-    quote!(self.descriptor.#field)
-}
-
-fn geometry_start(schema: &Schema, index: usize, runtime: &TokenStream) -> TokenStream {
-    if retains_geometry_start(schema, index) {
-        return geometry_state_value(schema, index, "start");
-    }
-    let field = &schema.fields[index];
-    if !field
-        .offset
-        .terms
-        .iter()
-        .any(|term| matches!(term, super::model::SizeTerm::Dynamic))
-    {
-        let offset = view_offset(&field.offset, runtime);
-        if schema.has_nested_geometry()
-            && field
-                .offset
-                .terms
-                .iter()
-                .any(|term| matches!(term, super::model::SizeTerm::Nested(_)))
-        {
-            let preceding_end = geometry_end(schema, index - 1, runtime);
-            return quote!(#offset.unwrap_or_else(|| #preceding_end));
-        }
-        return quote!(#offset.expect("validated static field offset"));
-    }
-    geometry_end(schema, index - 1, runtime)
-}
-
-fn geometry_end(schema: &Schema, index: usize, runtime: &TokenStream) -> TokenStream {
-    if retains_geometry_end(schema, index) {
-        return geometry_state_value(schema, index, "end");
-    }
-    let start = geometry_start(schema, index, runtime);
-    match &schema.fields[index].kind {
-        FieldKind::Scalar(scalar) => {
-            let width = scalar.width();
-            quote!(#start + #width)
-        }
-        FieldKind::Bytes(bytes) => {
-            let width = &bytes.len;
-            quote!(#start + #width)
-        }
-        FieldKind::ScalarArray(array) => {
-            let len = &array.len;
-            let width = array.element.width();
-            quote!(#start + (#len) * #width)
-        }
-        FieldKind::Flag(_) | FieldKind::BitProjection(_) => start,
-        FieldKind::Nested(nested) => {
-            if nested.terminal {
-                quote!(self.as_bytes().len())
-            } else {
-                let suffix = super::model::LayoutOffset {
-                    terms: schema.fields[index + 1..]
-                        .iter()
-                        .map(|field| field.kind.size_term())
-                        .collect(),
-                };
-                let width = view_offset(&suffix, runtime);
-                quote!(
-                    self.as_bytes().len() - #width.expect("framed fixed suffix width")
-                )
-            }
-        }
-        FieldKind::RawBytes(_) | FieldKind::Array(_) | FieldKind::Recursive(_) => {
-            unreachable!("dynamic field end is retained")
-        }
-    }
-}
-
-fn render_view_methods(schema: &Schema, runtime: &TokenStream) -> Vec<TokenStream> {
-    schema
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            let name = &field.name;
-            let offset_value = view_offset(&field.offset, runtime);
-            let dynamic_start = geometry_start(schema, index, runtime);
-            let dynamic_end = geometry_end(schema, index, runtime);
-            let condition = field
-                .layout
-                .condition
-                .as_ref()
-                .map(|condition| quote!(self.descriptor.#condition));
-            match &field.kind {
-                FieldKind::Scalar(scalar) => {
-                    let width = scalar.width();
-                    let value_ty = value_type_tokens(&scalar.value_type);
-                    let body =
-                        if matches!(&scalar.value_type, ValueType::Char | ValueType::Custom(_))
-                            && scalar.constant.is_none()
-                        {
-                            quote!(self.descriptor.#name)
-                        } else if let Some(constant) = &scalar.constant {
-                            quote! {
-                                let value: #value_ty = #constant;
-                                value
-                            }
-                        } else {
-                            let wire_ty = scalar_type_tokens(scalar.wire_type);
-                            let decode = from_bytes_method(scalar.endian);
-                            let raw = private_ident(schema, "scalar_raw");
-                            let decoded = if scalar.value_type.is_converted() {
-                                let conversion = convert_from_validated_wire(scalar, &raw);
-                                quote!(#conversion)
-                            } else {
-                                quote!(#raw)
-                            };
-                            if scalar.is_variable() {
-                                let value = super::integer::scalar_value(
-                                    scalar,
-                                    &dynamic_start,
-                                    &dynamic_end,
-                                    runtime,
-                                );
-                                quote! {
-                                    let #raw: #wire_ty = #value;
-                                    #decoded
-                                }
-                            } else if schema.has_sequential_geometry() {
-                                quote! {
-                                    let #raw = #wire_ty::#decode(
-                                        self.as_bytes()[#dynamic_start..#dynamic_end]
-                                            .try_into()
-                                            .expect("validated scalar field span"),
-                                    );
-                                    #decoded
-                                }
-                            } else {
-                                quote! {
-                                    let offset = #offset_value.expect("validated scalar offset");
-                                    let #raw = #wire_ty::#decode(
-                                        self.as_bytes()[offset..offset + #width]
-                                            .try_into()
-                                            .expect("validated scalar field span"),
-                                    );
-                                    #decoded
-                                }
-                            }
-                        };
-                    let (return_ty, body) = if let Some(condition) = condition {
-                        (
-                            quote!(Option<#value_ty>),
-                            quote! {
-                                if #condition {
-                                    Some({ #body })
-                                } else {
-                                    None
-                                }
-                            },
-                        )
-                    } else {
-                        (value_ty, body)
-                    };
-                    quote! {
-                        #[inline(always)]
-                        fn #name(&self) -> #return_ty {
-                            #body
-                        }
-                    }
-                }
-                FieldKind::Bytes(bytes) => {
-                    let ty = &field.ty;
-                    let len = &bytes.len;
-                    let body = if let Some(constant) = &bytes.constant {
-                        quote! {
-                            let value: #ty = #constant;
-                            value
-                        }
-                    } else if schema.has_sequential_geometry() {
-                        quote! {
-                            self.as_bytes()[#dynamic_start..#dynamic_end]
-                                .try_into()
-                                .expect("validated byte-array field span")
-                        }
-                    } else {
-                        quote! {
-                            let offset = #offset_value.expect("validated byte-array offset");
-                            self.as_bytes()[offset..offset + #len]
-                                .try_into()
-                                .expect("validated byte-array field span")
-                        }
-                    };
-                    quote! {
-                        #[inline(always)]
-                        fn #name(&self) -> #ty {
-                            #body
-                        }
-                    }
-                }
-                FieldKind::ScalarArray(array) => {
-                    let ty = &field.ty;
-                    let element = scalar_type_tokens(array.element);
-                    let width = array.element.width();
-                    let decode = from_bytes_method(array.endian);
-                    let base = if schema.has_sequential_geometry() {
-                        quote!(#dynamic_start)
-                    } else {
-                        quote!(#offset_value.expect("validated scalar-array offset"))
-                    };
-                    quote! {
-                        #[inline]
-                        fn #name(&self) -> #ty {
-                            let base = #base;
-                            ::core::array::from_fn(|index| {
-                                let start = base + index * #width;
-                                #element::#decode(
-                                    self.as_bytes()[start..start + #width]
-                                        .try_into()
-                                        .expect("validated scalar-array element span"),
-                                )
-                            })
-                        }
-                    }
-                }
-                FieldKind::Array(array) => {
-                    let item = &array.item;
-                    let count_field = private_ident(schema, &format!("array_{index}_count"));
-                    let base_field = private_ident(schema, "array_base_offset");
-                    let base = quote!(self.descriptor.#base_field);
-                    let count = quote!(self.descriptor.#count_field);
-                    let constructor = if index + 1 == schema.fields.len() {
-                        quote! {
-                            #runtime::ArrayView::terminal(input, count, #base + #dynamic_start)
-                        }
-                    } else {
-                        quote! {
-                            // SAFETY: parent framing either framed every variable-width item or
-                            // proved the complete fixed-width span from `count * FIXED_SIZE`.
-                            unsafe {
-                                #runtime::ArrayView::from_validated_parts(
-                                    input,
-                                    count,
-                                    #base + #dynamic_start,
-                                )
-                            }
-                        }
-                    };
-                    quote! {
-                        #[inline(always)]
-                        fn #name(&self) -> #runtime::ArrayView<'_, #item> {
-                            let count = #count;
-                            let input = &self.as_bytes()[#dynamic_start..#dynamic_end];
-                            #constructor
-                        }
-                    }
-                }
-                FieldKind::Flag(_) => {
-                    let value = quote!(self.descriptor.#name);
-                    quote! {
-                        #[inline(always)]
-                        fn #name(&self) -> bool {
-                            #value
-                        }
-                    }
-                }
-                FieldKind::BitProjection(projection) => {
-                    let ty = &field.ty;
-                    let controller = &projection.controller;
-                    let controller_field = schema
-                        .fields
-                        .iter()
-                        .find(|candidate| candidate.name == *controller)
-                        .expect("validated bit controller");
-                    let FieldKind::Scalar(controller_scalar) = &controller_field.kind else {
-                        unreachable!("validated bit controller is scalar")
-                    };
-                    let controller_ty = scalar_type_tokens(controller_scalar.wire_type);
-                    let start = projection.start;
-                    let width = projection.end - projection.start + 1;
-                    let mask = if width == 128 {
-                        u128::MAX
-                    } else {
-                        (1u128 << width) - 1
-                    };
-                    let body = if matches!(
-                        primitive_name_for_projection(ty).as_deref(),
-                        Some("bool")
-                    ) {
-                        quote!(((self.#controller() >> #start) & 1) != 0)
-                    } else {
-                        quote!(((self.#controller() >> #start) & (#mask as #controller_ty)) as #ty)
-                    };
-                    quote! {
-                        #[inline(always)]
-                        fn #name(&self) -> #ty {
-                            #body
-                        }
-                    }
-                }
-                FieldKind::RawBytes(_) => {
-                    quote! {
-                        #[inline(always)]
-                        fn #name(&self) -> &[u8] {
-                            &self.as_bytes()[#dynamic_start..#dynamic_end]
-                        }
-                    }
-                }
-                FieldKind::Nested(nested) => {
-                    let ty = &nested.ty;
-                    let field_lifetime = fresh_schema_lifetime(schema, &schema.generics, "field");
-                    let state = quote!(&self.descriptor.#name);
-                    let offset_setup = if schema.has_sequential_geometry() {
-                        quote! {
-                            let offset = #dynamic_start;
-                            let end = #dynamic_end;
-                        }
-                    } else {
-                        quote! {
-                            let offset = #offset_value.expect("validated nested offset");
-                            let end = self.as_bytes().len();
-                        }
-                    };
-                    quote! {
-                        #[inline(always)]
-                        fn #name<#field_lifetime>(&#field_lifetime self)
-                            -> <#ty as #runtime::WireView>::View<#field_lifetime>
-                        {
-                            #offset_setup
-                            // SAFETY: framing produced this state for a child span of this exact length.
-                            unsafe {
-                                <#ty as #runtime::WireView>::from_validated_parts(
-                                    &self.as_bytes()[offset..end],
-                                    #state,
-                                )
-                            }
-                        }
-                    }
-                }
-                FieldKind::Recursive(_) => {
-                    unreachable!("recursive body uses its own view renderer")
-                }
-            }
-        })
-        .collect()
-}
-
-fn view_offset_for_end(
-    _schema: &Schema,
-    field: &super::model::Field,
-    runtime: &TokenStream,
-) -> TokenStream {
-    let offset = view_offset(&field.offset, runtime);
-    if let FieldKind::ScalarArray(array) = &field.kind {
-        let len = &array.len;
-        let element_width = array.element.width();
-        return quote!(
-            #offset.and_then(|offset| {
-                (#len as usize)
-                    .checked_mul(#element_width)
-                    .and_then(|width| offset.checked_add(width))
-            })
-        );
-    }
-    let width = match &field.kind {
-        FieldKind::Scalar(scalar) => {
-            let width = scalar.width();
-            quote!(#width)
-        }
-        FieldKind::Bytes(bytes) => {
-            let len = &bytes.len;
-            quote!(#len)
-        }
-        FieldKind::ScalarArray(_) => unreachable!("handled by checked scaled width"),
-        FieldKind::BitProjection(_) => quote!(0usize),
-        FieldKind::RawBytes(_)
-        | FieldKind::Array(_)
-        | FieldKind::Recursive(_)
-        | FieldKind::Flag(_)
-        | FieldKind::Nested(_) => unreachable!(),
-    };
-    quote!(#offset.and_then(|offset| offset.checked_add(#width)))
-}
-
-fn constants_differ(scalar: &Scalar, actual: &syn::Ident, expected: &syn::Ident) -> TokenStream {
-    if matches!(
-        &scalar.value_type,
-        ValueType::Scalar(ScalarType::F32 | ScalarType::F64)
-    ) {
-        quote!(#actual.to_bits() != #expected.to_bits())
-    } else {
-        quote!(#actual != #expected)
-    }
-}
-
-fn convert_from_validated_wire(scalar: &Scalar, raw: &syn::Ident) -> TokenStream {
-    match &scalar.value_type {
-        ValueType::Scalar(_) => quote!(#raw),
-        ValueType::Usize => quote!(#raw as usize),
-        ValueType::Isize => quote!(#raw as isize),
-        ValueType::Bool => quote!(#raw != 0),
-        ValueType::Char | ValueType::Custom(_) => {
-            unreachable!("retained converted getters use descriptor state")
-        }
-    }
-}
-
-fn convert_from_wire(scalar: &Scalar, raw: &syn::Ident) -> TokenStream {
-    match &scalar.value_type {
-        ValueType::Scalar(_) => quote!(Some(#raw)),
-        ValueType::Usize => quote!(usize::try_from(#raw).ok()),
-        ValueType::Isize => quote!(isize::try_from(#raw).ok()),
-        ValueType::Bool => quote!(match #raw {
-            0 => Some(false),
-            1 => Some(true),
-            _ => None,
-        }),
-        ValueType::Char => quote!(u32::try_from(#raw).ok().and_then(char::from_u32)),
-        ValueType::Custom(ty) => quote!(<#ty>::try_from(#raw).ok()),
-    }
-}
-
-fn primitive_name_for_projection(ty: &syn::Type) -> Option<String> {
-    let syn::Type::Path(path) = ty else {
-        return None;
-    };
-    if path.qself.is_some() || path.path.segments.len() != 1 {
-        return None;
-    }
-    Some(path.path.segments[0].ident.unraw().to_string())
 }
