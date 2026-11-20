@@ -1,12 +1,14 @@
-# Exact-source wire views and progressive writers
+# Zero-copy readers and writers for variable-length binary formats
 
-`wire-repr` compiles Rust schema declarations into immutable views over exact source bytes and
-output-owning typestate writers. The generated target API is `no_std`, allocation-free, and
-statically dispatched.
+Describe a byte layout once as a Rust struct or enum: length prefixes, counted arrays, tagged
+unions, optional groups, checksums. `wire-repr` derives a view that reads fields straight from the
+source bytes and a typestate writer that fills in lengths, counts, constants, and checksums. The
+generated code is `no_std`, allocation-free, statically dispatched, and compiles in crates that
+forbid unsafe code.
 
-A schema describes physical representation rather than a decoded semantic object. The library owns
-byte order, widths, field order, framing, selectors, controllers, geometry, and exact represented
-ranges. Protocol and application semantics remain in consumer code.
+A schema describes physical bytes, not a decoded object. The library owns byte order, widths,
+field order, framing, selectors, length and count fields, and exact byte ranges. Protocol meaning
+stays in your code.
 
 ## Installation
 
