@@ -47,6 +47,16 @@ jobs:
       - name: Documentation
         run: RUSTDOCFLAGS='-D warnings' cargo +1.91.0 doc --locked --workspace --no-deps
 
+  semver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # Compares the runtime API with the latest published release; derive output is owned by tests.
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239
+        with:
+          package: wire-repr
+
   artifact-platforms:
     name: artifact (${{ matrix.name }})
     timeout-minutes: 15
