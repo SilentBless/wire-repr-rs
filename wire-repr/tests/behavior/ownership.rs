@@ -28,8 +28,10 @@ fn borrowed_foo(input: &[u8]) -> impl FooView<Bar> + '_ {
 
 #[test]
 fn borrowed_view_retains_the_callers_slice_lifetime_and_identity() {
-    let foo = borrowed_foo(&BYTES);
-    assert_eq!(foo.as_bytes().as_ptr(), BYTES.as_ptr());
+    // Each use of a `const` may materialize at a different address; compare against one binding.
+    let bytes = BYTES;
+    let foo = borrowed_foo(&bytes);
+    assert_eq!(foo.as_bytes().as_ptr(), bytes.as_ptr());
     assert_eq!(foo.foo(), 1);
     assert_eq!(foo.bar().foo(), 2);
 }
