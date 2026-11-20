@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-pub(super) fn render_wire_fields(
+pub(in crate::derive::schema) fn render_wire_fields(
     impl_header: TokenStream,
     runtime: &TokenStream,
     schema: &TokenStream,

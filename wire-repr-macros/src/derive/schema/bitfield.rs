@@ -7,7 +7,7 @@ use syn::{
 };
 
 use super::model::{Endian, ScalarType};
-use super::view_fields::render_wire_fields;
+use super::view::fields::render_wire_fields;
 use super::{
     fresh_lifetime, fresh_type_ident, from_bytes_method, scalar_type_tokens, to_bytes_method,
 };

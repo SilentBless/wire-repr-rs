@@ -3,12 +3,15 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, Ident, TypeParam};
 
-use super::model::{FieldKind, Schema};
-use super::recursive::RecursiveSlot;
+use super::super::model::{FieldKind, Schema};
+use super::RecursiveSlot;
 
-pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Result<TokenStream> {
+pub(in crate::derive::schema) fn render_bodies(
+    schema: &Schema,
+    runtime: &TokenStream,
+) -> syn::Result<TokenStream> {
     let mut rendered = TokenStream::new();
-    for slot in super::recursive::schema_slots(schema) {
+    for slot in super::schema_slots(schema) {
         if slot
             .fields
             .iter()
@@ -19,9 +22,7 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
                 .iter()
                 .any(|field| matches!(field.kind, FieldKind::RawBytes(_)))
             {
-                rendered.extend(super::recursive_demand_writer::render(
-                    schema, &slot, runtime,
-                )?);
+                rendered.extend(super::demand_writer::render(schema, &slot, runtime)?);
             } else {
                 rendered.extend(render_object(schema, &slot, runtime)?);
             }
@@ -41,15 +42,15 @@ fn render_object(
     slot: &RecursiveSlot,
     runtime: &TokenStream,
 ) -> syn::Result<TokenStream> {
-    super::recursive_object::validate(schema, &slot.generic)?;
+    super::object::validate(schema, &slot.generic)?;
     let vis = &schema.vis;
     let name = &schema.name;
     let root = &slot.generic;
     let (schema_impl, schema_types, schema_where) = schema.generics.split_for_impl();
     let self_type = quote!(#name #schema_types);
     let marker = write_marker(schema, slot);
-    let callback = super::fresh_type_ident(&schema.generics, "RecursiveWriteCallback");
-    let cursor = super::fresh_type_ident(&schema.generics, "RecursiveWriteCursor");
+    let callback = super::super::fresh_type_ident(&schema.generics, "RecursiveWriteCallback");
+    let cursor = super::super::fresh_type_ident(&schema.generics, "RecursiveWriteCursor");
     let stages = (0..=schema.fields.len())
         .map(|index| format_ident!("{}WriterStage{index}", marker))
         .collect::<Vec<_>>();
@@ -84,7 +85,7 @@ fn render_object(
             };
             match &field.kind {
                 FieldKind::Recursive(_) => {
-                    let build = super::fresh_type_ident(&schema.generics, "RecursiveBuild");
+                    let build = super::super::fresh_type_ident(&schema.generics, "RecursiveBuild");
                     quote! {
                         impl<#cursor, #callback, #root> #current<#cursor, #callback, #root>
                         where
@@ -124,9 +125,9 @@ fn render_object(
                     }
                 }
                 FieldKind::Scalar(scalar) => {
-                    let value_ty = super::value_type_tokens(&scalar.value_type);
-                    let wire_ty = super::scalar_type_tokens(scalar.wire_type);
-                    let encode = super::to_bytes_method(scalar.endian);
+                    let value_ty = super::super::value_type_tokens(&scalar.value_type);
+                    let wire_ty = super::super::scalar_type_tokens(scalar.wire_type);
+                    let encode = super::super::to_bytes_method(scalar.endian);
                     quote! {
                         impl<#cursor, #callback, #root> #current<#cursor, #callback, #root>
                         where
@@ -282,16 +283,16 @@ fn render_array(
     let writer = format_ident!("{}Writer", marker);
     let complete = format_ident!("{}Complete", marker);
     let items = format_ident!("{}Items", marker);
-    let callback = super::fresh_type_ident(&schema.generics, "RecursiveWriteCallback");
-    let cursor = super::fresh_type_ident(&schema.generics, "RecursiveWriteCursor");
-    let build = super::fresh_type_ident(&schema.generics, "RecursiveBuild");
-    let view = super::fresh_type_ident(&schema.generics, "RecursiveView");
-    let count_wire = super::scalar_type_tokens(count.wire_type);
-    let count_encode = super::to_bytes_method(count.endian);
+    let callback = super::super::fresh_type_ident(&schema.generics, "RecursiveWriteCallback");
+    let cursor = super::super::fresh_type_ident(&schema.generics, "RecursiveWriteCursor");
+    let build = super::super::fresh_type_ident(&schema.generics, "RecursiveBuild");
+    let view = super::super::fresh_type_ident(&schema.generics, "RecursiveView");
+    let count_wire = super::super::scalar_type_tokens(count.wire_type);
+    let count_encode = super::super::to_bytes_method(count.endian);
     let count_width = count.width();
     let count_field_name = count_field.name.unraw().to_string();
     let logical_check = count.value_type.is_converted().then(|| {
-        let value_type = super::value_type_tokens(&count.value_type);
+        let value_type = super::super::value_type_tokens(&count.value_type);
         quote! {
             let _: #value_type = #value_type::try_from(items.count).map_err(|_| {
                 #runtime::WriteError::Schema(

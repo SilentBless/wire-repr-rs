@@ -6,13 +6,7 @@ mod geometry;
 mod integer;
 mod model;
 mod recursive;
-mod recursive_demand;
-mod recursive_demand_writer;
-mod recursive_object;
-mod recursive_writer;
 mod view;
-mod view_fields;
-mod write_fields;
 mod writer;
 
 use geometry::{builder_offset, builder_optional_size, view_offset, view_optional_size};
@@ -55,7 +49,7 @@ pub(super) fn render_builder(
         bitfield::render_builder(input, runtime)
     } else {
         let schema = model::Schema::parse(input, "WireBuilder")?;
-        let recursive = recursive_writer::render_bodies(&schema, runtime)?;
+        let recursive = recursive::writer::render_bodies(&schema, runtime)?;
         if schema
             .fields
             .iter()

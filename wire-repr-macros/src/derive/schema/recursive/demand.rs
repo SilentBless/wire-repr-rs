@@ -2,8 +2,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{GenericParam, Ident};
 
-use super::geometry::{ScalarBase, scalar_position};
-use super::model::{DynamicExtent, FieldKind, Schema};
+use super::super::geometry::{ScalarBase, scalar_position};
+use super::super::model::{DynamicExtent, FieldKind, Schema};
 
 pub(super) fn render(
     schema: &Schema,
@@ -21,8 +21,8 @@ pub(super) fn render(
     let state = format_ident!("{}DemandState", marker);
     let continuation = format_ident!("{}DemandContinuation", marker);
     let body_view = format_ident!("{}DemandView", marker);
-    let callback = super::fresh_type_ident(&schema.generics, "RecursiveCallback");
-    let depth = super::fresh_type_ident(&schema.generics, "RecursiveDepth");
+    let callback = super::super::fresh_type_ident(&schema.generics, "RecursiveCallback");
+    let depth = super::super::fresh_type_ident(&schema.generics, "RecursiveDepth");
     let mut impl_generics = schema.generics.clone();
     impl_generics
         .params
@@ -34,13 +34,13 @@ pub(super) fn render(
     let scalar_name = &schema.fields[demand.scalar].name;
     let right_name = &schema.fields[demand.right].name;
     let controller = demand.controller_scalar;
-    let controller_wire = super::scalar_type_tokens(controller.wire_type);
-    let controller_decode = super::from_bytes_method(controller.endian);
+    let controller_wire = super::super::scalar_type_tokens(controller.wire_type);
+    let controller_decode = super::super::from_bytes_method(controller.endian);
     let controller_width = controller.width();
     let scalar = demand.scalar_field;
-    let scalar_ty = super::value_type_tokens(&scalar.value_type);
-    let scalar_wire = super::scalar_type_tokens(scalar.wire_type);
-    let scalar_decode = super::from_bytes_method(scalar.endian);
+    let scalar_ty = super::super::value_type_tokens(&scalar.value_type);
+    let scalar_wire = super::super::scalar_type_tokens(scalar.wire_type);
+    let scalar_decode = super::super::from_bytes_method(scalar.endian);
     let scalar_width = scalar.width();
     let scalar_layout = &schema.fields[demand.scalar].layout;
     let needs_body_start = scalar_layout.align_before.is_some();
@@ -489,8 +489,8 @@ pub(super) struct Demand<'a> {
     pub(super) bytes: usize,
     pub(super) scalar: usize,
     pub(super) right: usize,
-    pub(super) controller_scalar: &'a super::model::Scalar,
-    pub(super) scalar_field: &'a super::model::Scalar,
+    pub(super) controller_scalar: &'a super::super::model::Scalar,
+    pub(super) scalar_field: &'a super::super::model::Scalar,
 }
 
 pub(super) fn validate<'a>(schema: &'a Schema, root: &Ident) -> syn::Result<Demand<'a>> {

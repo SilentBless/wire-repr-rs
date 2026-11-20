@@ -1,4 +1,5 @@
 mod automatic;
+pub(super) mod fields;
 
 use std::collections::BTreeSet;
 
@@ -8,6 +9,10 @@ use syn::ext::IdentExt;
 use syn::{GenericParam, TypeParam, parse_quote};
 
 use automatic::{render_automatic_fields, render_finish_constants, render_pending_fields};
+use fields::{
+    Slot, SlotKind, choice_final_ident, choice_start_ident, choice_trait_ident, convert_to_wire,
+    slots, unique_build_variant,
+};
 
 use super::computed::computed_offset_state;
 use super::integer::{
@@ -15,10 +20,6 @@ use super::integer::{
     scalar_bytes, variable_controllers,
 };
 use super::model::{DynamicExtent, FieldKind, LayoutOffset, Position, Schema, SizeTerm};
-use super::write_fields::{
-    Slot, SlotKind, choice_final_ident, choice_start_ident, choice_trait_ident, convert_to_wire,
-    slots, unique_build_variant,
-};
 use super::{
     builder_offset, builder_optional_size, fresh_field_ident, fresh_type_ident, pascal,
     private_ident, scalar_type_tokens, to_bytes_method,

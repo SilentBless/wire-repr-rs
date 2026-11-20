@@ -10,7 +10,7 @@ use super::integer::{
     detached_expansions, detached_state, render_detached_length_patch, scalar_bytes,
 };
 use super::model::{FieldKind, Position, Schema};
-use super::write_fields::{
+use super::writer::fields::{
     Slot, SlotKind, choice_final_ident, choice_start_ident, choice_state_ident, choice_trait_ident,
     convert_to_wire, slots, unique_build_variant,
 };

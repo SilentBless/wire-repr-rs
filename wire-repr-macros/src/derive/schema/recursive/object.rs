@@ -2,7 +2,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{GenericParam, Ident};
 
-use super::model::{Field, FieldKind, Schema};
+use super::super::model::{Field, FieldKind, Schema};
 
 pub(super) fn render(
     schema: &Schema,
@@ -16,7 +16,7 @@ pub(super) fn render(
         .iter()
         .any(|field| matches!(field.kind, FieldKind::RawBytes(_)))
     {
-        return super::recursive_demand::render(schema, slot_index, marker, root, runtime);
+        return super::demand::render(schema, slot_index, marker, root, runtime);
     }
     validate(schema, root)?;
 
@@ -26,8 +26,8 @@ pub(super) fn render(
     let self_type = quote!(#name #schema_types);
     let state = format_ident!("{}State", marker);
     let body_view = format_ident!("{}View", marker);
-    let callback = super::fresh_type_ident(&schema.generics, "RecursiveCallback");
-    let depth = super::fresh_type_ident(&schema.generics, "RecursiveDepth");
+    let callback = super::super::fresh_type_ident(&schema.generics, "RecursiveCallback");
+    let depth = super::super::fresh_type_ident(&schema.generics, "RecursiveDepth");
     let mut impl_generics = schema.generics.clone();
     impl_generics
         .params
@@ -428,9 +428,9 @@ fn render_getters(
                 },
                 FieldKind::Scalar(scalar) => {
                     let width = scalar.width();
-                    let ty = super::value_type_tokens(&scalar.value_type);
-                    let wire_ty = super::scalar_type_tokens(scalar.wire_type);
-                    let decode = super::from_bytes_method(scalar.endian);
+                    let ty = super::super::value_type_tokens(&scalar.value_type);
+                    let wire_ty = super::super::scalar_type_tokens(scalar.wire_type);
+                    let decode = super::super::from_bytes_method(scalar.endian);
                     quote! {
                         pub fn #name(&self) -> #ty {
                             let start = self.state.offsets[#index];
