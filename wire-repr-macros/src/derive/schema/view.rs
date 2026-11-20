@@ -45,14 +45,8 @@ pub(super) fn render(schema: &Schema, runtime: &TokenStream) -> syn::Result<Toke
     );
     let select_impl = render_select_impl(schema, &names, &targets, &error_names, runtime);
     let leading_impl = render_leading_impl(schema, &targets, runtime);
-    let inherent_impl = render_inherent_impl(
-        schema,
-        &names,
-        &targets,
-        &error_signature.ty,
-        &error_names,
-        runtime,
-    );
+    let inherent_impl =
+        render_inherent_impl(schema, &names, &targets, &error_signature.ty, runtime);
     Ok(quote! {
         #error_declaration
         #descriptor_declaration
@@ -1090,24 +1084,12 @@ fn render_inherent_impl(
     names: &Names,
     targets: &ImplTargets,
     error_type: &TokenStream,
-    error_names: &error::VariantNames,
     runtime: &TokenStream,
 ) -> TokenStream {
     let vis = &schema.vis;
     let Names {
-        error,
-        view_impl,
         backing,
-        input_field,
-        represented_length_field,
-        view_marker,
-        current_input,
         view_input,
-        input_length,
-        frame_result,
-        framed_descriptor,
-        framed_consumed,
-        retained_value,
         ..
     } = names;
     let ImplTargets {
@@ -1120,7 +1102,6 @@ fn render_inherent_impl(
     let sequence_lifetime = fresh_schema_lifetime(schema, bounded, "sequence");
     let views_method = render_views_method(schema, &sequence_lifetime, runtime);
     let cursor_methods = render_cursor_methods(schema, &sequence_lifetime, runtime);
-    let validator_calls = render_validator_calls(schema, names, error_names);
     quote! {
         impl #impl_generics #self_type #where_clause {
             #views_method
@@ -1131,32 +1112,7 @@ fn render_inherent_impl(
             #vis fn view<#backing: AsRef<[u8]>>(
                 #view_input: #backing,
             ) -> Result<impl #trait_path + #runtime::ExactWire<Self>, #error_type> {
-                let #current_input = #view_input.as_ref();
-                let #input_length = #current_input.len();
-                let #frame_result = <Self as #runtime::WireView>::frame_exact(#current_input, 0)?;
-                let (#framed_descriptor, #framed_consumed) = #frame_result.into_parts();
-                if #framed_consumed > #input_length {
-                    return Err(#error::InvalidFrame(#runtime::InvalidFrameExtent {
-                        offset: 0,
-                        consumed: #framed_consumed,
-                        available: #input_length,
-                    }));
-                }
-                let mut #retained_value = #view_impl {
-                    #input_field: #view_input,
-                    #represented_length_field: #framed_consumed,
-                    descriptor: #framed_descriptor,
-                    #view_marker: ::core::marker::PhantomData,
-                };
-                #(#validator_calls)*
-                if #framed_consumed < #input_length {
-                    return Err(#error::Trailing(#runtime::TrailingBytes {
-                        offset: #framed_consumed,
-                        trailing: #input_length - #framed_consumed,
-                    }));
-                }
-                #retained_value.#represented_length_field = #input_length;
-                Ok(#retained_value)
+                <Self as #runtime::__private::WireSelect>::validated_view(#view_input)
             }
 
             /// Validates exact structural framing while skipping schema validators.
@@ -1164,29 +1120,7 @@ fn render_inherent_impl(
             #vis fn view_unchecked<#backing: AsRef<[u8]>>(
                 #view_input: #backing,
             ) -> Result<impl #trait_path + #runtime::ExactWire<Self>, #error_type> {
-                let #current_input = #view_input.as_ref();
-                let #input_length = #current_input.len();
-                let #frame_result = <Self as #runtime::WireView>::frame_exact(#current_input, 0)?;
-                let (#framed_descriptor, #framed_consumed) = #frame_result.into_parts();
-                if #framed_consumed > #input_length {
-                    return Err(#error::InvalidFrame(#runtime::InvalidFrameExtent {
-                        offset: 0,
-                        consumed: #framed_consumed,
-                        available: #input_length,
-                    }));
-                }
-                if #framed_consumed < #input_length {
-                    return Err(#error::Trailing(#runtime::TrailingBytes {
-                        offset: #framed_consumed,
-                        trailing: #input_length - #framed_consumed,
-                    }));
-                }
-                Ok(#view_impl {
-                    #input_field: #view_input,
-                    #represented_length_field: #input_length,
-                    descriptor: #framed_descriptor,
-                    #view_marker: ::core::marker::PhantomData,
-                })
+                <Self as #runtime::__private::WireSelect>::select_view(#view_input)
             }
         }
     }

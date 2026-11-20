@@ -11,6 +11,8 @@ All notable public changes to `wire-repr` are recorded here.
   merged chunks, and selection and recursive-array iterators implement `FusedIterator`.
 - Implement `Debug` for every public runtime type. Views, writers, and iterators print positions
   and lengths, never buffer contents, and add no bounds on output or backing types.
+- Generate each schema's exact-framing checks once. `view` and `view_unchecked` call the shared
+  entry points instead of repeating them, which removes about 4% of expanded code.
 
 ## [1.2.0] - 2026-10-13
 
