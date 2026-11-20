@@ -1,3 +1,5 @@
+pub(super) mod fields;
+
 use std::collections::BTreeSet;
 
 use proc_macro2::TokenStream;
@@ -5,8 +7,9 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, Generics, LifetimeParam, TypeParam, parse_quote};
 
+use fields::render_wire_fields;
+
 use super::model::{DynamicExtent, FieldKind, Position, Scalar, ScalarType, Schema, ValueType};
-use super::view_fields::render_wire_fields;
 use super::{
     fresh_field_ident, fresh_schema_lifetime, from_bytes_method, pascal, private_ident,
     scalar_type_tokens, value_type_tokens, view_offset, view_optional_size,

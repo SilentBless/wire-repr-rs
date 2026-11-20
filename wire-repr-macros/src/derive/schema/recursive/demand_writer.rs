@@ -2,34 +2,34 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{GenericParam, TypeParam};
 
-use super::geometry::{ScalarBase, scalar_position};
-use super::model::Schema;
-use super::recursive::RecursiveSlot;
+use super::super::geometry::{ScalarBase, scalar_position};
+use super::super::model::Schema;
+use super::RecursiveSlot;
 
 pub(super) fn render(
     schema: &Schema,
     slot: &RecursiveSlot,
     runtime: &TokenStream,
 ) -> syn::Result<TokenStream> {
-    let demand = super::recursive_demand::validate(schema, &slot.generic)?;
+    let demand = super::demand::validate(schema, &slot.generic)?;
     let vis = &schema.vis;
     let name = &schema.name;
     let root = &slot.generic;
     let (schema_impl, schema_types, schema_where) = schema.generics.split_for_impl();
     let self_type = quote!(#name #schema_types);
-    let marker = super::recursive_writer::write_marker(schema, slot);
-    let callback = super::fresh_type_ident(&schema.generics, "RecursiveWriteCallback");
-    let cursor = super::fresh_type_ident(&schema.generics, "RecursiveWriteCursor");
-    let source = super::fresh_type_ident(&schema.generics, "RecursiveBytes");
-    let build = super::fresh_type_ident(&schema.generics, "RecursiveBuild");
+    let marker = super::writer::write_marker(schema, slot);
+    let callback = super::super::fresh_type_ident(&schema.generics, "RecursiveWriteCallback");
+    let cursor = super::super::fresh_type_ident(&schema.generics, "RecursiveWriteCursor");
+    let source = super::super::fresh_type_ident(&schema.generics, "RecursiveBytes");
+    let build = super::super::fresh_type_ident(&schema.generics, "RecursiveBuild");
     let controller = demand.controller_scalar;
-    let controller_wire = super::scalar_type_tokens(controller.wire_type);
-    let controller_encode = super::to_bytes_method(controller.endian);
+    let controller_wire = super::super::scalar_type_tokens(controller.wire_type);
+    let controller_encode = super::super::to_bytes_method(controller.endian);
     let controller_width = controller.width();
     let scalar = demand.scalar_field;
-    let scalar_ty = super::value_type_tokens(&scalar.value_type);
-    let scalar_wire = super::scalar_type_tokens(scalar.wire_type);
-    let scalar_encode = super::to_bytes_method(scalar.endian);
+    let scalar_ty = super::super::value_type_tokens(&scalar.value_type);
+    let scalar_wire = super::super::scalar_type_tokens(scalar.wire_type);
+    let scalar_encode = super::super::to_bytes_method(scalar.endian);
     let scalar_name = &schema.fields[demand.scalar].name;
     let scalar_layout = &schema.fields[demand.scalar].layout;
     let scalar_error = quote!(

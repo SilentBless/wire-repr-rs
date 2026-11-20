@@ -1,3 +1,8 @@
+mod demand;
+mod demand_writer;
+mod object;
+pub(super) mod writer;
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::ext::IdentExt;
@@ -252,7 +257,7 @@ pub(super) fn render_bodies(schema: &Schema, runtime: &TokenStream) -> syn::Resu
             .iter()
             .any(|&index| matches!(schema.fields[index].kind, FieldKind::Recursive(_)))
         {
-            rendered.extend(super::recursive_object::render(
+            rendered.extend(object::render(
                 schema,
                 slot.index,
                 &slot.marker,

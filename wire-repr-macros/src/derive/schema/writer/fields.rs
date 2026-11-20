@@ -5,16 +5,16 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{GenericParam, TypeParam};
 
-use super::model::{FieldKind, Scalar, Schema, ValueType};
-use super::{fresh_type_ident, pascal, value_type_tokens};
+use super::super::model::{FieldKind, Scalar, Schema, ValueType};
+use super::super::{fresh_type_ident, pascal, value_type_tokens};
 
-pub(super) struct Slot {
-    pub(super) field: syn::Ident,
-    pub(super) state: syn::Ident,
-    pub(super) kind: SlotKind,
+pub(in crate::derive::schema) struct Slot {
+    pub(in crate::derive::schema) field: syn::Ident,
+    pub(in crate::derive::schema) state: syn::Ident,
+    pub(in crate::derive::schema) kind: SlotKind,
 }
 
-pub(super) enum SlotKind {
+pub(in crate::derive::schema) enum SlotKind {
     Value(TokenStream),
     RawBytes,
     Array(Box<syn::Type>),
@@ -22,7 +22,7 @@ pub(super) enum SlotKind {
     Nested(Box<syn::Type>),
 }
 
-pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
+pub(in crate::derive::schema) fn slots(schema: &Schema) -> Vec<Slot> {
     let mut used = schema.generics.clone();
     let mut slots = Vec::new();
     for field in &schema.fields {
@@ -69,22 +69,34 @@ pub(super) fn slots(schema: &Schema) -> Vec<Slot> {
     }
     slots
 }
-pub(super) fn choice_trait_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
+pub(in crate::derive::schema) fn choice_trait_ident(
+    schema: &Schema,
+    flag: &syn::Ident,
+) -> syn::Ident {
     let index = choice_index(schema, flag);
     format_ident!("__WireRepr{}Choice{index}Value", schema.name.unraw())
 }
 
-pub(super) fn choice_start_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
+pub(in crate::derive::schema) fn choice_start_ident(
+    schema: &Schema,
+    flag: &syn::Ident,
+) -> syn::Ident {
     let index = choice_index(schema, flag);
     format_ident!("__WireRepr{}Choice{index}", schema.name.unraw())
 }
 
-pub(super) fn choice_state_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
+pub(in crate::derive::schema) fn choice_state_ident(
+    schema: &Schema,
+    flag: &syn::Ident,
+) -> syn::Ident {
     let index = choice_index(schema, flag);
     format_ident!("__WireRepr{}Choice{index}State", schema.name.unraw())
 }
 
-pub(super) fn choice_final_ident(schema: &Schema, flag: &syn::Ident) -> syn::Ident {
+pub(in crate::derive::schema) fn choice_final_ident(
+    schema: &Schema,
+    flag: &syn::Ident,
+) -> syn::Ident {
     let index = choice_index(schema, flag);
     format_ident!("__WireRepr{}Choice{index}Final", schema.name.unraw())
 }
@@ -97,7 +109,10 @@ fn choice_index(schema: &Schema, flag: &syn::Ident) -> usize {
         .expect("flag belongs to schema")
 }
 
-pub(super) fn unique_build_variant(used: &mut BTreeSet<String>, base: &str) -> syn::Ident {
+pub(in crate::derive::schema) fn unique_build_variant(
+    used: &mut BTreeSet<String>,
+    base: &str,
+) -> syn::Ident {
     if used.insert(base.to_owned()) {
         return format_ident!("{base}");
     }
@@ -110,7 +125,7 @@ pub(super) fn unique_build_variant(used: &mut BTreeSet<String>, base: &str) -> s
     unreachable!("usize suffix space cannot be exhausted by generated variants")
 }
 
-pub(super) fn convert_to_wire(
+pub(in crate::derive::schema) fn convert_to_wire(
     scalar: &Scalar,
     value: &syn::Ident,
     wire_type: &TokenStream,

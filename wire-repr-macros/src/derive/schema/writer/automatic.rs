@@ -5,10 +5,10 @@ use syn::ext::IdentExt;
 use super::super::computed::computed_offset_state;
 use super::super::integer::{retained_controller_offsets, scalar_bytes};
 use super::super::model::{FieldKind, Schema};
-use super::super::write_fields::{Slot, convert_to_wire};
 use super::super::{
     builder_offset, private_ident, scalar_type_tokens, to_bytes_method, value_type_tokens,
 };
+use super::fields::{Slot, convert_to_wire};
 use super::render_writer_start;
 
 pub(super) fn render_pending_fields(

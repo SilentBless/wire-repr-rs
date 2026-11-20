@@ -240,7 +240,7 @@ pub(super) fn render_patches(
             };
             let encoded = if scalar.value_type.is_converted() {
                 let conversion =
-                    super::write_fields::convert_to_wire(scalar, &semantic, &wire_ty);
+                    super::writer::fields::convert_to_wire(scalar, &semantic, &wire_ty);
                 quote!(#conversion.ok_or_else(|| #layout_error)?)
             } else {
                 quote!(#semantic)
