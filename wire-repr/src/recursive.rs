@@ -693,3 +693,10 @@ where
         }))
     }
 }
+
+impl<C, Slot, const DEPTH: usize> core::iter::FusedIterator
+    for RecursiveArrayIter<'_, C, Slot, DEPTH>
+where
+    C: RecursiveFrame<Slot>,
+{
+}
