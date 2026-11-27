@@ -17,7 +17,7 @@ leb128fmt = { version = "0.1.0", default-features = false }
 proc-macro-crate = { version = "3.5", default-features = false }
 proc-macro2 = { version = "1", default-features = false, features = ["proc-macro"] }
 quote = { version = "1", default-features = false }
-syn = { version = "2", default-features = false, features = ["clone-impls", "full", "parsing", "printing", "proc-macro", "derive", "visit"] }
+syn = { version = "3", default-features = false, features = ["clone-impls", "full", "parsing", "printing", "proc-macro", "derive", "visit"] }
 thiserror = { version = "2", default-features = false }
 vu128 = "1.1.0"
 wire-repr-macros = { path = "wire-repr-macros", version = "1.2.0" }
